@@ -146,7 +146,7 @@ impl SessionStore {
         session_id: String,
         pin: String,
         tx: WsSender,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let Some(mut entry) = self.sessions.get_mut(&session_id) else {
             return Err("unknown session".into());
         };
@@ -156,6 +156,7 @@ impl SessionStore {
             self.record_pin_failure(&session_id);
             return Err("invalid PIN for session".into());
         }
+        let first_player = entry.player.tx.is_none();
         entry.player.tx = Some(tx);
         entry.last_activity = Utc::now();
         self.metrics
@@ -163,7 +164,7 @@ impl SessionStore {
             .fetch_add(1, Ordering::Relaxed);
         self.audit
             .record(&session_id, AuditEventKind::PlayerRegistered, None);
-        Ok(())
+        Ok(first_player)
     }
 
     pub fn peer_tx(&self, session_id: &str, role: Role) -> Option<WsSender> {

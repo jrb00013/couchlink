@@ -29,6 +29,7 @@ export type SignalMessage =
     }
   | { type: "heartbeat" }
   | { type: "pong" }
+  | { type: "request_offer" }
   | { type: "peer_joined"; role: Role }
   | { type: "peer_left" }
   | {

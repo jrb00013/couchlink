@@ -25,7 +25,7 @@ export interface PlayerCallbacks {
 
 const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
-const MEDIA_RECOVER_DELAY_MS = 2000;
+const MEDIA_RECOVER_DELAY_MS = 5000;
 
 export class CouchlinkPlayer {
   private ws: WebSocket | null = null;
@@ -182,8 +182,11 @@ export class CouchlinkPlayer {
     this.mediaRecoverTimer = window.setTimeout(() => {
       this.mediaRecoverTimer = null;
       this.resetPeer();
-      clog("re-register player after media failure");
-      this.sendRegister(this.ws!);
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        clog("signal → request_offer (media recover)");
+        send(this.ws, { type: "request_offer" });
+        this.cb.onState("waiting_host", "Recovering media…");
+      }
     }, MEDIA_RECOVER_DELAY_MS);
   }
 
@@ -230,8 +233,7 @@ export class CouchlinkPlayer {
         cwarn("ICE problem", pc.iceConnectionState);
         this.scheduleMediaRecover("ICE failed");
       } else if (pc.iceConnectionState === "disconnected") {
-        cwarn("ICE problem", pc.iceConnectionState);
-        this.scheduleMediaRecover("ICE disconnected");
+        cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
       }
     };
     pc.onicegatheringstatechange = () => {

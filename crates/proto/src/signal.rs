@@ -42,6 +42,8 @@ pub enum SignalMessage {
     },
     Heartbeat,
     Pong,
+    /// Player asks host to send a new SDP offer (e.g. after WebRTC failed) without re-registering.
+    RequestOffer,
     PeerJoined {
         role: Role,
     },

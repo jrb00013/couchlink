@@ -89,35 +89,45 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 pin,
                 player_name: _,
             } => {
-                if let Err(e) = store.register_player(sid.clone(), pin, tx.clone()) {
-                    let _ = tx.send(
-                        SignalMessage::Error { message: e }.to_json().unwrap(),
-                    );
-                    continue;
-                }
-                session_id = Some(sid.clone());
-                role = Some(Role::Player);
-                let _ = tx.send(
-                    SignalMessage::Registered {
-                        role: Role::Player,
-                        session_id: sid.clone(),
-                    }
-                    .to_json()
-                    .unwrap(),
-                );
-                if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
-                    let _ = host_tx.send(
-                        SignalMessage::PeerJoined {
-                            role: Role::Player,
+                match store.register_player(sid.clone(), pin, tx.clone()) {
+                    Ok(first_player) => {
+                        session_id = Some(sid.clone());
+                        role = Some(Role::Player);
+                        let _ = tx.send(
+                            SignalMessage::Registered {
+                                role: Role::Player,
+                                session_id: sid.clone(),
+                            }
+                            .to_json()
+                            .unwrap(),
+                        );
+                        if first_player {
+                            if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
+                                let _ = host_tx.send(
+                                    SignalMessage::PeerJoined {
+                                        role: Role::Player,
+                                    }
+                                    .to_json()
+                                    .unwrap(),
+                                );
+                            }
                         }
-                        .to_json()
-                        .unwrap(),
-                    );
+                        debug!("player registered (first={first_player})");
+                    }
+                    Err(e) => {
+                        let _ = tx.send(
+                            SignalMessage::Error { message: e }.to_json().unwrap(),
+                        );
+                    }
                 }
-                debug!("player registered");
             }
             SignalMessage::Heartbeat => {
                 let _ = tx.send(SignalMessage::Pong.to_json().unwrap());
+            }
+            SignalMessage::RequestOffer => {
+                if let (Some(sid), Some(r)) = (&session_id, role) {
+                    store.relay(sid, r, &text);
+                }
             }
             SignalMessage::Offer { .. }
             | SignalMessage::Answer { .. }

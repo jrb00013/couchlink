@@ -135,6 +135,13 @@ async fn main() -> Result<()> {
                     Some(SignalMessage::PeerLeft) => {
                         warn!("player left");
                     }
+                    Some(SignalMessage::RequestOffer) => {
+                        info!("player requested offer (renegotiate, no peer rebuild)");
+                        force_idr = true;
+                        if let Err(e) = host.create_and_send_offer(&signal_out).await {
+                            warn!("request_offer failed: {e}");
+                        }
+                    }
                     Some(SignalMessage::PeerJoined { .. }) => {
                         // Fresh browser peer = fresh RTCPeerConnection. Reusing the
                         // old PC after a refresh/leave sends a renegotiation offer the
