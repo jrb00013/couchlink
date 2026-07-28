@@ -17,6 +17,10 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+/// Wall-clock gap between keyframes. Frame-count intervals stretch to many seconds
+/// once the encoder throttles on a static screen, stranding late joiners on black.
+const IDR_INTERVAL: Duration = Duration::from_secs(2);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -105,10 +109,18 @@ async fn main() -> Result<()> {
     );
     let mut encoder = encode::H264Encoder::new(preset.width, preset.height, preset.bitrate_kbps)?;
     let mut motion = motion::MotionDetector::new(preset.width, preset.height);
+    // Motion is measured on the raw capture, whose size is not the preset size.
+    let mut motion_dims: (usize, usize) = (0, 0);
+    let mut last_encode = std::time::Instant::now();
     let frame_dur = Duration::from_millis(1000 / preset.fps.max(1) as u64);
     let idle_dur = Duration::from_millis(1000 / args.idle_fps.max(1) as u64);
     let mut frames_out: u64 = 0;
+    let mut rate_window = std::time::Instant::now();
+    let mut rate_mark: u64 = 0;
+    let mut idle_frames: u64 = 0;
     let mut force_idr = true;
+    let mut idr_burst: u32 = 0;
+    let mut last_idr = std::time::Instant::now();
     let mut capture_ok_announced: Option<bool> = None;
 
     // Wait for the first player before offering WebRTC.
@@ -203,6 +215,23 @@ async fn main() -> Result<()> {
                 let Some(bgra) = capturer.capture_bgra()? else { continue };
                 let cap_w = capturer.width();
                 let cap_h = capturer.height();
+                if (cap_w, cap_h) != motion_dims {
+                    motion.resize(cap_w as u32, cap_h as u32);
+                    motion_dims = (cap_w, cap_h);
+                }
+                // Detect motion on the raw capture, before any scaling — the scale is
+                // the expensive half of the work we are deciding whether to skip.
+                let idle = motion.is_idle(&bgra);
+                // Static screens skip the encode entirely rather than sleeping. Sleeping
+                // is what made input feel laggy: a keystroke landing during an idle sleep
+                // waited it out before anything was encoded. Polling stays at frame_dur,
+                // so motion is picked up within one frame regardless.
+                let refresh_due = last_encode.elapsed() >= idle_dur;
+                if idle && !force_idr && idr_burst == 0 && !refresh_due && frames_out > 0 {
+                    idle_frames += 1;
+                    continue;
+                }
+                last_encode = std::time::Instant::now();
                 let scaled = if cap_w as u32 == preset.width
                     && cap_h as u32 == preset.height
                 {
@@ -216,10 +245,6 @@ async fn main() -> Result<()> {
                         preset.height as usize,
                     )
                 };
-                let idle = motion.is_idle(&scaled);
-                if idle {
-                    tokio::time::sleep(idle_dur.saturating_sub(frame_dur / 4)).await;
-                }
                 if frames_out == 0 {
                     let avg = capture::sample_avg_luma_bgra(&scaled, 4096);
                     let ok = avg >= 8;
@@ -248,18 +273,44 @@ async fn main() -> Result<()> {
                         ));
                     }
                 }
-                // Periodic IDR so late joiners / stalled decoders can resync (~2s @ 30fps).
-                if force_idr || frames_out % 60 == 0 {
-                    encoder.force_keyframe();
+                // A single IDR can be lost before the browser's decoder is ready, which
+                // costs the viewer seconds of black. Send a short burst instead.
+                if force_idr {
+                    idr_burst = 3;
                     force_idr = false;
+                }
+                // Periodic IDR so late joiners / stalled decoders can resync. This MUST be
+                // time-based: counting encoded frames meant a throttled static screen went
+                // 12+ seconds between keyframes, which is exactly how long a reloading
+                // browser sat on black waiting for something it could decode.
+                if idr_burst > 0 || last_idr.elapsed() >= IDR_INTERVAL {
+                    encoder.force_keyframe();
+                    idr_burst = idr_burst.saturating_sub(1);
+                    last_idr = std::time::Instant::now();
                 }
                 if let Some(nal) = encoder.encode_bgra(&scaled)? {
                     if let Err(e) = host.push_h264(nal, frame_dur).await {
                         warn!("push h264: {e}");
                     } else {
                         frames_out += 1;
-                        if frames_out == 1 || frames_out % 120 == 0 {
-                            info!("encoded {frames_out} H264 frames so far");
+                        if rate_window.elapsed() >= Duration::from_secs(5) {
+                            let window_frames = frames_out - rate_mark;
+                            let fps = window_frames as f64 / rate_window.elapsed().as_secs_f64();
+                            // Idle share tells throttling apart from starvation: a low
+                            // fps with idle≈100% is the motion detector doing its job,
+                            // a low fps with idle≈0% means the pipeline can't keep up.
+                            let polled = window_frames + idle_frames;
+                            let idle_pct = if polled > 0 {
+                                idle_frames * 100 / polled
+                            } else {
+                                0
+                            };
+                            info!(
+                                "streaming {fps:.1} fps ({frames_out} frames total, {idle_pct}% frames skipped as static)"
+                            );
+                            rate_window = std::time::Instant::now();
+                            rate_mark = frames_out;
+                            idle_frames = 0;
                         }
                     }
                 }
