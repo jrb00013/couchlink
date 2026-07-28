@@ -126,6 +126,8 @@ async fn main() -> Result<()> {
     let mut force_idr = true;
 
     let mut capture_ok_announced: Option<bool> = None;
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let _ = signal_out.send(stream_info_message(
         &preset,
@@ -135,6 +137,9 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                let _ = signal_out.send(SignalMessage::Heartbeat);
+            }
             msg = signaling.inbound.recv() => {
                 match msg {
                     Some(SignalMessage::Answer { sdp }) => {

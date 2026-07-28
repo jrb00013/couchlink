@@ -225,7 +225,11 @@ impl SessionStore {
         let stale: Vec<String> = self
             .sessions
             .iter()
-            .filter(|e| now - e.last_activity > ttl)
+            .filter(|e| {
+                now - e.last_activity > ttl
+                    && e.host.tx.is_none()
+                    && e.player.tx.is_none()
+            })
             .map(|e| e.key().clone())
             .collect();
         for id in stale {
@@ -233,6 +237,12 @@ impl SessionStore {
             self.metrics.sessions_active.fetch_sub(1, Ordering::Relaxed);
             self.audit
                 .record(&id, AuditEventKind::SessionExpired, None);
+        }
+    }
+
+    pub fn touch(&self, session_id: &str) {
+        if let Some(mut s) = self.sessions.get_mut(session_id) {
+            s.last_activity = Utc::now();
         }
     }
 }

@@ -123,7 +123,15 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 }
             }
             SignalMessage::Heartbeat => {
+                if let Some(sid) = &session_id {
+                    store.touch(sid);
+                }
                 let _ = tx.send(SignalMessage::Pong.to_json().unwrap());
+            }
+            SignalMessage::Pong => {
+                if let Some(sid) = &session_id {
+                    store.touch(sid);
+                }
             }
             SignalMessage::RequestOffer => {
                 if let (Some(sid), Some(r)) = (&session_id, role) {
