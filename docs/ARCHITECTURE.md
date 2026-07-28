@@ -16,6 +16,7 @@ STUN/TURN). Pad HID layouts follow [dualsensekit](https://github.com/jrb00013/du
 | `crates/signaling` | Axum WebSocket session broker |
 | `crates/host` | Capture → H.264 → WebRTC; apply pad frames to virtual device |
 | `crates/client` | hidapi DualSense reader + WebRTC answer + pad sender |
+| `web/` | React player — WebRTC video + Gamepad API → CLPD |
 | `infra/wireguard` | VPN examples for friend↔you path |
 | `adapters/` | PCSX2 / RPCS3 binding helpers |
 
