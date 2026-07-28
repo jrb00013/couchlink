@@ -13,7 +13,7 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Session / PIN / ICE | Rohomieo-style WebSocket signaling |
 | Video | WebRTC + OpenH264, presets up to **1080p60**, scaled capture |
 | Congestion / idle | WebRTC GCC + tile motion detector |
-| Path | **Automatic** — public STUN plus your own local TURN relay (`scripts/start-turn.sh`) for NAT traversal, no VPN/setup needed on the friend's end; WireGuard optional for private LAN-style posture |
+| Path | **Automatic** — public STUN + local TURN relay (`scripts/start-turn.sh`), router ports opened via UPnP automatically; no VPN or manual router config; WireGuard optional for private LAN-style posture |
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
 | Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |
 | Host injection | Linux `uinput` DualSense identity, bus = Bluetooth |
@@ -34,8 +34,9 @@ source .env.couchlink
 # terminal 1 — signaling + player web UI
 ./scripts/start-signaling.sh
 
-# terminal 2 — local TURN relay (only needed once STUN alone can't reach your friend,
-# e.g. CGNAT/mobile carrier — safe to always leave running)
+# terminal 2 — local TURN relay (safe to always leave running).
+# Auto-opens the needed router port via UPnP — no router login needed
+# (falls back to a warning if your router doesn't support UPnP).
 ./scripts/start-turn.sh
 
 # terminal 3 — your PC (emulator host)

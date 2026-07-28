@@ -15,7 +15,7 @@ if [[ "$(uname -s)" == Linux ]]; then
   if command -v apt-get >/dev/null; then
     sudo apt-get update -qq
     sudo apt-get install -y -qq build-essential pkg-config libx11-dev libxcb1-dev \
-      libxcb-shm0-dev libxcb-randr0-dev libhidapi-hidraw-dev libudev-dev udev coturn || true
+      libxcb-shm0-dev libxcb-randr0-dev libhidapi-hidraw-dev libudev-dev udev coturn miniupnpc || true
   fi
   # uinput access
   sudo tee /etc/udev/rules.d/99-couchlink-uinput.rules >/dev/null <<'RULE'
