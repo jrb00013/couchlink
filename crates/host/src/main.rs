@@ -1,6 +1,7 @@
 mod capture;
 mod config;
 mod encode;
+mod invite;
 mod motion;
 mod scale;
 mod signaling_client;
@@ -32,6 +33,25 @@ async fn main() -> Result<()> {
         args.session_id, preset.width, preset.height, preset.fps, args.bluetooth_pad
     );
 
+    // Friend opens this in a browser (same host as signaling static files).
+    let public_http = args
+        .signaling
+        .replacen("ws://", "http://", 1)
+        .replacen("wss://", "https://", 1)
+        .trim_end_matches("/ws")
+        .to_string();
+    let join = invite::player_invite_url(
+        &public_http,
+        &args.session_id,
+        &args.pin,
+        &args.signaling,
+    );
+    info!("friend join URL: {join}");
+    if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
+        let ste = qr.render::<char>().quiet_zone(false).module_dimensions(2, 1).build();
+        eprintln!("\nScan / open join link:\n{ste}\n{join}\n");
+    }
+
     let pad = Arc::new(Mutex::new(webrtc_peer::create_virtual_pad(
         args.bluetooth_pad,
     )?));
@@ -52,7 +72,6 @@ async fn main() -> Result<()> {
         webrtc_peer::WebRtcHost::new(signal_out.clone(), Arc::clone(&pad), args.bluetooth_pad)
             .await?;
 
-    // Wait for player, then offer
     loop {
         let Some(msg) = signaling.inbound.recv().await else {
             break;
@@ -104,12 +123,24 @@ async fn main() -> Result<()> {
             }
             _ = tokio::time::sleep(frame_dur) => {
                 let Some(bgra) = capturer.capture_bgra()? else { continue };
-                // Note: production path should scale capturer buffer to preset size.
-                let idle = motion.is_idle(&bgra);
+                let scaled = if capturer.width as u32 == preset.width
+                    && capturer.height as u32 == preset.height
+                {
+                    bgra
+                } else {
+                    scale::scale_bgra(
+                        &bgra,
+                        capturer.width,
+                        capturer.height,
+                        preset.width as usize,
+                        preset.height as usize,
+                    )
+                };
+                let idle = motion.is_idle(&scaled);
                 if idle {
                     tokio::time::sleep(idle_dur.saturating_sub(frame_dur / 4)).await;
                 }
-                if let Some(nal) = encoder.encode_bgra(&bgra)? {
+                if let Some(nal) = encoder.encode_bgra(&scaled)? {
                     if let Err(e) = host.push_h264(nal, frame_dur).await {
                         warn!("push h264: {e}");
                     }
