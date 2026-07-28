@@ -1,0 +1,17 @@
+/target/
+**/node_modules/
+web/dist/
+infra/certs/*.pem
+infra/wireguard/keys/
+var/
+.local/
+.env.couchlink
+.env
+.DS_Store
+.idea/
+.vscode/
+*.key
+*.pub
+python/.venv/
+__pycache__/
+*.pyc
