@@ -3,7 +3,9 @@ use bytes::BytesMut;
 use couchlink_proto::{PadFrame, SignalMessage, PAD_CHANNEL};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
+
+use crate::decode::{DecodedFrame, H264Decoder};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
@@ -25,7 +27,7 @@ impl WebRtcPlayer {
         turn_url: Option<String>,
         turn_user: Option<String>,
         turn_pass: Option<String>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, mpsc::UnboundedReceiver<DecodedFrame>)> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
         let mut registry = Registry::new();
@@ -85,14 +87,64 @@ impl WebRtcPlayer {
             })
         }));
 
+        let (nal_tx, nal_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<DecodedFrame>();
+
+        std::thread::Builder::new()
+            .name("couchlink-decode".into())
+            .spawn(move || {
+                let mut decoder = match H264Decoder::new() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!("failed to init h264 decoder: {e}");
+                        return;
+                    }
+                };
+                let mut nal_rx = nal_rx;
+                while let Some(nal) = nal_rx.blocking_recv() {
+                    match decoder.decode(&nal) {
+                        Ok(Some(frame)) => {
+                            if frame_tx.send(frame).is_err() {
+                                break; // viewer gone
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("decode error: {e}"),
+                    }
+                }
+            })
+            .expect("spawn decode thread");
+
         pc.on_track(Box::new(move |track, _, _| {
+            let nal_tx = nal_tx.clone();
             Box::pin(async move {
                 info!("video track received: {}", track.codec().capability.mime_type);
-                // Decode/display is left to a viewer frontend or SDL sink in a follow-up.
+                let mut depacketizer = rtp::codecs::h264::H264Packet::default();
+                depacketizer.is_avc = false; // false => depacketize() emits Annex-B (start-code) NALs
+                loop {
+                    match track.read_rtp().await {
+                        Ok((packet, _attrs)) => {
+                            use rtp::packetizer::Depacketizer;
+                            match depacketizer.depacketize(&packet.payload) {
+                                Ok(nal) if !nal.is_empty() => {
+                                    if nal_tx.send(nal).is_err() {
+                                        break; // decode thread gone, stop reading
+                                    }
+                                }
+                                Ok(_) => {} // mid-fragment, nothing to emit yet
+                                Err(e) => warn!("rtp depacketize error: {e}"),
+                            }
+                        }
+                        Err(e) => {
+                            warn!("video track read_rtp ended: {e}");
+                            break;
+                        }
+                    }
+                }
             })
         }));
 
-        Ok(Self { pc, pad_dc })
+        Ok((Self { pc, pad_dc }, frame_rx))
     }
 
     pub async fn handle_offer(&self, sdp: String, signal_out: &mpsc::UnboundedSender<SignalMessage>) -> Result<()> {

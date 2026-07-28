@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let signal_out = signaling.outbound.clone();
-    let player = webrtc_player::WebRtcPlayer::new(
+    let (player, mut _video_frames) = webrtc_player::WebRtcPlayer::new(
         signal_out.clone(),
         args.turn_url.clone(),
         args.turn_user.clone(),
