@@ -1,3 +1,4 @@
+mod decode;
 mod dualsense_reader;
 mod feedback_apply;
 mod signaling_client;
