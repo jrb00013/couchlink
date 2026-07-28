@@ -1,5 +1,5 @@
 //! Windows capture client — streams a monitor or window to couchlink-host in WSL.
-//! Connects outbound to the WSL listener (localhost forwarding by default).
+//! Connects outbound to the WSL listener (use the WSL eth0 IP, not 127.0.0.1).
 
 #[cfg(not(windows))]
 fn main() {
@@ -38,6 +38,7 @@ mod run {
     #[derive(Parser, Debug)]
     #[command(name = "couchlink-win-capture")]
     pub struct Args {
+        /// WSL host listener — use the WSL IP (e.g. 172.18.x.x:9876), not 127.0.0.1.
         #[arg(long, default_value = "127.0.0.1:9876")]
         pub connect: String,
         #[arg(long, default_value = "60")]
@@ -145,14 +146,12 @@ mod run {
         }
 
         let (tx, rx) = mpsc::sync_channel::<FrameMsg>(2);
-        spawn_tcp_writer(args.connect.clone(), rx);
-
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
         let flags = (tx, frame_dur);
 
-        // Capture::start owns this thread (required: picker item is !Send).
         match args.source {
             CaptureSource::Desktop => {
+                spawn_tcp_writer(args.connect.clone(), rx);
                 let m = Monitor::primary().context("primary monitor")?;
                 info!("capturing primary monitor → {}", args.connect);
                 let settings = Settings::new(
@@ -174,6 +173,7 @@ mod run {
                     bail!("no capture target selected");
                 };
                 info!("picker selection accepted → {}", args.connect);
+                spawn_tcp_writer(args.connect.clone(), rx);
                 let settings = Settings::new(
                     item,
                     CursorCaptureSettings::WithCursor,
@@ -197,6 +197,7 @@ mod run {
                     w.title().unwrap_or_else(|_| args.window.clone()),
                     args.connect
                 );
+                spawn_tcp_writer(args.connect.clone(), rx);
                 let settings = Settings::new(
                     w,
                     CursorCaptureSettings::WithCursor,

@@ -29,7 +29,17 @@ if ! command -v powershell.exe >/dev/null 2>&1; then
   exit 1
 fi
 
-connect="${COUCHLINK_WIN_CAPTURE_CONNECT:-127.0.0.1:9876}"
+connect="${COUCHLINK_WIN_CAPTURE_CONNECT:-}"
+if [[ -z "$connect" ]]; then
+  # Prefer the WSL eth0 address. Windows 127.0.0.1:9876 often hits a stuck
+  # wslrelay half-connection and never reaches the Linux listener.
+  wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  if [[ -n "$wsl_ip" ]]; then
+    connect="${wsl_ip}:9876"
+  else
+    connect="127.0.0.1:9876"
+  fi
+fi
 source_mode="${COUCHLINK_CAPTURE_SOURCE:-picker}"
 window_title="${COUCHLINK_CAPTURE_WINDOW:-}"
 if [[ -n "$window_title" ]]; then
