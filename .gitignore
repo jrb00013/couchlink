@@ -1,6 +1,7 @@
 /target/
 **/node_modules/
-web/dist/
+web/dist/**
+!web/dist/index.html
 infra/certs/*.pem
 infra/wireguard/keys/
 var/
