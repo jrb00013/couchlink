@@ -46,6 +46,17 @@ cleanup() {
   for pid in "${PIDS[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done
+  if [[ "$PLATFORM" == "wsl" && "$ROLE" == "host" ]]; then
+    # Host started win-capture via powershell; stop it with the session.
+    case "${COUCHLINK_WINDOWS_CAPTURE:-auto}" in
+      0|false|local|off) ;;
+      *)
+        if command -v taskkill.exe >/dev/null 2>&1; then
+          taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
+  fi
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

@@ -2,10 +2,7 @@
 
 One host runs the game. One friend joins from **anywhere** with the browser or the **Couchlink Player** desktop app (Windows / Linux / macOS).
 
-> **WSL + Windows games (PCSX2/RPCS3):** Keep **`couchlink-host` in WSL** for uinput virtual DualSense, but stream the **Windows desktop** with the capture bridge:
-> 1. On **Windows** (PowerShell): `.\scripts\start-win-capture.ps1` — listens on **TCP 9876** (allow in Windows Firewall for WSL).
-> 2. In WSL host env: `COUCHLINK_WINDOWS_CAPTURE=auto` (default on WSL if unset) — connects via `/etc/resolv.conf` nameserver → Windows.
-> Without the bridge, WSL host capture is the **Linux/WSLg desktop** (often black while the game runs on Windows).
+> **WSL + Windows games (PCSX2/RPCS3):** Keep **`couchlink-host` in WSL** for uinput. Starting the host (`./scripts/run.sh host` or `./scripts/start-host.sh`) **auto-launches** `couchlink-win-capture` on Windows via `powershell.exe` and waits for TCP **9876**. Set `COUCHLINK_WINDOWS_CAPTURE=0` to disable. Allow inbound TCP 9876 in Windows Firewall if the wait times out.
 
 Internet play uses **STUN + your host’s TURN relay** (started automatically with `./scripts/run.sh host`) and **UPnP** when your router supports it.
 

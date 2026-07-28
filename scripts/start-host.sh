@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
 : "${COUCHLINK_SESSION_ID:?set COUCHLINK_SESSION_ID}"
 : "${COUCHLINK_PIN:?set COUCHLINK_PIN}"
+
+# On WSL, bring up Windows DXGI capture before the host connects to it.
+"$ROOT/scripts/ensure-win-capture.sh"
+
 BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/debug/couchlink-host}"
 ARGS=(
   --signaling "${COUCHLINK_SIGNALING:-ws://127.0.0.1:8443/ws}"
