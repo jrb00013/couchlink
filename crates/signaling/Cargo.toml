@@ -1,0 +1,28 @@
+[package]
+name = "couchlink-signaling"
+version.workspace = true
+edition.workspace = true
+description = "WebSocket signaling for couchlink co-play sessions"
+
+[[bin]]
+name = "couchlink-signaling"
+path = "src/main.rs"
+
+[dependencies]
+couchlink-proto = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures-util = "0.3"
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+dashmap = "6"
