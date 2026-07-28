@@ -76,17 +76,27 @@ impl WebRtcHost {
             let signal_ice = signal_ice.clone();
             Box::pin(async move {
                 if let Some(c) = c {
-                    let _ = signal_ice.send(SignalMessage::IceCandidate {
-                        candidate: c.to_json().await.unwrap_or_default().candidate,
-                        sdp_mid: c.sdp_mid.clone(),
-                        sdp_mline_index: c.sdp_mline_index.map(|v| v as u16),
-                    });
+                    if let Ok(init) = c.to_json() {
+                        let _ = signal_ice.send(SignalMessage::IceCandidate {
+                            candidate: init.candidate,
+                            sdp_mid: init.sdp_mid,
+                            sdp_mline_index: init.sdp_mline_index,
+                        });
+                    }
                 }
             })
         }));
 
         // Create pad data channel (host→negotiated with offer)
-        let dc = pc2.create_data_channel(PAD_CHANNEL, None).await?;
+        let dc = pc2
+            .create_data_channel(
+                PAD_CHANNEL,
+                Some(webrtc::data_channel::data_channel_init::RTCDataChannelInit {
+                    ordered: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await?;
         setup_pad_channel(dc, pad_tx_dc, pad_device_dc).await;
 
         Ok((

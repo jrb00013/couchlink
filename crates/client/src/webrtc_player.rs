@@ -44,11 +44,13 @@ impl WebRtcPlayer {
             let signal_ice = signal_ice.clone();
             Box::pin(async move {
                 if let Some(c) = c {
-                    let _ = signal_ice.send(SignalMessage::IceCandidate {
-                        candidate: c.to_json().await.unwrap_or_default().candidate,
-                        sdp_mid: c.sdp_mid.clone(),
-                        sdp_mline_index: c.sdp_mline_index.map(|v| v as u16),
-                    });
+                    if let Ok(init) = c.to_json() {
+                        let _ = signal_ice.send(SignalMessage::IceCandidate {
+                            candidate: init.candidate,
+                            sdp_mid: init.sdp_mid,
+                            sdp_mline_index: init.sdp_mline_index,
+                        });
+                    }
                 }
             })
         }));

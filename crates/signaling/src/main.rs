@@ -8,8 +8,7 @@ use anyhow::Context;
 use api::{api_audit, api_status, health, metrics_handler, ApiState};
 use audit::AuditLog;
 use axum::{
-    extract::{ws::WebSocketUpgrade, State},
-    response::IntoResponse,
+    extract::ws::WebSocketUpgrade,
     routing::get,
     Router,
 };

@@ -12,5 +12,5 @@ jobs:
       - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libhidapi-hidraw-dev pkg-config
+          sudo apt-get install -y libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev pkg-config
       - run: cargo test --workspace
