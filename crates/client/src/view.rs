@@ -5,12 +5,26 @@
 use crate::decode::DecodedFrame;
 use crate::keyboard_input::KeyboardPad;
 use anyhow::Result;
+use glyphon::{
+    Attrs, Buffer as TextBuffer, Color as TextColor, Family, FontSystem, Metrics, Resolution,
+    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
+};
 use std::sync::{mpsc::Receiver, Arc, Mutex};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
+
+/// couchlink brand palette (matches web/src/App.css) — dark background, mint accent.
+const BG_COLOR: wgpu::Color = wgpu::Color {
+    r: 0.0196,
+    g: 0.0314,
+    b: 0.0471,
+    a: 1.0,
+};
+const ACCENT_COLOR: TextColor = TextColor::rgb(0x3e, 0xcf, 0x8e);
+const MUTED_COLOR: TextColor = TextColor::rgb(0x8f, 0xa0, 0xb5);
 
 struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -21,6 +35,11 @@ struct Renderer {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     current_texture: Option<(wgpu::BindGroup, u32, u32)>,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    text_atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    status_text: TextBuffer,
 }
 
 impl Renderer {
@@ -130,13 +149,11 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[],
-                compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: "fs_main",
                 targets: &[Some(config.format.into())],
-                compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
@@ -150,6 +167,23 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             ..Default::default()
         });
 
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let mut text_atlas = TextAtlas::new(&device, &queue, config.format);
+        let text_renderer =
+            TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
+
+        let mut status_text = TextBuffer::new(&mut font_system, Metrics::new(22.0, 30.0));
+        status_text.set_size(&mut font_system, config.width as f32, config.height as f32);
+        let title_attrs = Attrs::new().family(Family::SansSerif).color(ACCENT_COLOR);
+        let subtitle_attrs = Attrs::new().family(Family::SansSerif).color(MUTED_COLOR);
+        status_text.set_rich_text(
+            &mut font_system,
+            [("couchlink\n", title_attrs), ("Waiting for stream…", subtitle_attrs)],
+            Shaping::Advanced,
+        );
+        status_text.shape_until_scroll(&mut font_system);
+
         Ok(Self {
             surface,
             device,
@@ -159,6 +193,11 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             bind_group_layout,
             sampler,
             current_texture: None,
+            font_system,
+            swash_cache,
+            text_atlas,
+            text_renderer,
+            status_text,
         })
     }
 
@@ -169,6 +208,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.status_text
+            .set_size(&mut self.font_system, width as f32, height as f32);
     }
 
     fn upload_frame(&mut self, frame: &DecodedFrame) {
@@ -224,6 +265,33 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
 
     fn draw(&mut self) -> Result<()> {
+        let show_status = self.current_texture.is_none();
+        if show_status {
+            self.text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.text_atlas,
+                    Resolution {
+                        width: self.config.width,
+                        height: self.config.height,
+                    },
+                    [
+                        TextArea {
+                            buffer: &self.status_text,
+                            left: (self.config.width as f32 / 2.0 - 90.0).max(16.0),
+                            top: (self.config.height as f32 / 2.0 - 40.0).max(16.0),
+                            scale: 1.0,
+                            bounds: TextBounds::default(),
+                            default_color: ACCENT_COLOR,
+                        },
+                    ],
+                    &mut self.swash_cache,
+                )
+                .map_err(|e| anyhow::anyhow!("text prepare: {e:?}"))?;
+        }
+
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
@@ -236,7 +304,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(BG_COLOR),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -248,10 +316,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, bind_group, &[]);
                 pass.draw(0..6, 0..1);
+            } else {
+                self.text_renderer
+                    .render(&self.text_atlas, &mut pass)
+                    .map_err(|e| anyhow::anyhow!("text render: {e:?}"))?;
             }
         }
         self.queue.submit(Some(encoder.finish()));
         output.present();
+        self.text_atlas.trim();
         Ok(())
     }
 }
