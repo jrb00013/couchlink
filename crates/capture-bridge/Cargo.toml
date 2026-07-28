@@ -19,3 +19,9 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-capture = "2.0.0"
+# Must track the version windows-capture links, so HWNDs are the same type.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }

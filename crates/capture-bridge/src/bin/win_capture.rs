@@ -49,6 +49,10 @@ mod run {
         pub window: String,
         #[arg(long, default_value_t = false)]
         pub list_windows: bool,
+        /// Keep a minimized window rendering by parking it off-screen instead
+        /// (`--source window` only — DWM stops compositing true minimized windows).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        pub keep_rendering: bool,
     }
 
     type FrameMsg = (u32, u32, Vec<u8>);
@@ -172,7 +176,16 @@ mod run {
                 let Some(item) = item else {
                     bail!("no capture target selected");
                 };
-                info!("picker selection accepted → {}", args.connect);
+                let picked = item
+                    .item
+                    .DisplayName()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| "<unknown>".into());
+                let (pw, ph) = item.size().unwrap_or((0, 0));
+                info!(
+                    "picker selection accepted: '{picked}' {pw}x{ph} → {}",
+                    args.connect
+                );
                 spawn_tcp_writer(args.connect.clone(), rx);
                 let settings = Settings::new(
                     item,
@@ -197,6 +210,9 @@ mod run {
                     w.title().unwrap_or_else(|_| args.window.clone()),
                     args.connect
                 );
+                if args.keep_rendering {
+                    couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
+                }
                 spawn_tcp_writer(args.connect.clone(), rx);
                 let settings = Settings::new(
                     w,
@@ -208,7 +224,10 @@ mod run {
                     ColorFormat::Bgra8,
                     flags,
                 );
-                BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let result = BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"));
+                // Never leave someone else's window parked at -32000.
+                couchlink_capture_bridge::keep_rendering::stop();
+                result?;
             }
         }
         Ok(())

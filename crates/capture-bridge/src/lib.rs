@@ -1,5 +1,8 @@
 //! TCP wire format for Windows → WSL (or any) raw BGRA screen frames.
 
+#[cfg(windows)]
+pub mod keep_rendering;
+
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
 
@@ -17,6 +20,13 @@ pub fn read_frame_sync(r: &mut impl Read, buf: &mut Vec<u8>) -> Result<FrameInfo
     if &magic != FRAME_MAGIC {
         bail!("bad frame magic {:?}", magic);
     }
+    read_frame_body_sync(r, buf)
+}
+
+/// Read everything after the 4-byte magic. Split out so callers that poll for the
+/// start of a frame (and tolerate a timeout there) can still demand the rest of the
+/// frame arrive in one piece — a timeout mid-frame desyncs the stream.
+pub fn read_frame_body_sync(r: &mut impl Read, buf: &mut Vec<u8>) -> Result<FrameInfo> {
     let mut wh = [0u8; 8];
     r.read_exact(&mut wh).context("frame wh")?;
     let width = u32::from_le_bytes(wh[0..4].try_into()?);
