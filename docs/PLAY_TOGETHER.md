@@ -2,7 +2,7 @@
 
 One host runs the game. One friend joins from **anywhere** with the browser or the **Couchlink Player** desktop app (Windows / Linux / macOS).
 
-> **WSL + Windows games (PCSX2/RPCS3):** Keep **`couchlink-host` in WSL** for uinput. Starting the host (`./scripts/run.sh host` or `./scripts/start-host.sh`) **auto-launches** `couchlink-win-capture` on Windows via `powershell.exe` and waits for TCP **9876**. Set `COUCHLINK_WINDOWS_CAPTURE=0` to disable. Allow inbound TCP 9876 in Windows Firewall if the wait times out.
+> **WSL + Windows games (PCSX2/RPCS3):** `./install.sh` and host start **auto-build** `couchlink-win-capture.exe` via Windows cargo. Host start opens the **Windows capture picker** so you choose which window/monitor to stream (or set `COUCHLINK_CAPTURE_SOURCE=desktop` / `COUCHLINK_CAPTURE_WINDOW=PCSX2`). WSL listens on TCP **9876**; Windows connects outbound via localhost forwarding.
 
 Internet play uses **STUN + your host’s TURN relay** (started automatically with `./scripts/run.sh host`) and **UPnP** when your router supports it.
 

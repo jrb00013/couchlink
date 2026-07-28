@@ -1,30 +1,33 @@
-# Stream the Windows primary display to couchlink-host in WSL.
-# Connects outbound to the WSL listener (default 127.0.0.1:9876 via localhost forwarding).
+# Launch couchlink-win-capture (builds first if needed).
 param(
     [string]$Connect = "127.0.0.1:9876",
-    [int]$MaxFps = 60
+    [ValidateSet("desktop", "picker", "window")]
+    [string]$Source = "picker",
+    [string]$Window = "",
+    [int]$MaxFps = 60,
+    [switch]$ListWindows,
+    [switch]$BuildOnly
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$BuildScript = Join-Path $Root "scripts\build-win-capture.ps1"
+$Bin = & $BuildScript
+if (-not $Bin) { throw "build-win-capture.ps1 returned no binary path" }
+$Bin = "$Bin".Trim()
 
-$Bin = Join-Path $Root "target\release\couchlink-win-capture.exe"
-if (-not (Test-Path $Bin)) {
-    $Bin = Join-Path $Root "target\debug\couchlink-win-capture.exe"
-}
-if (-not (Test-Path $Bin)) {
-    Write-Host "Building couchlink-win-capture..."
-    Push-Location $Root
-    try {
-        cargo build -p couchlink-capture-bridge --bin couchlink-win-capture --release
-    } finally {
-        Pop-Location
-    }
-    $Bin = Join-Path $Root "target\release\couchlink-win-capture.exe"
-}
-if (-not (Test-Path $Bin)) {
-    throw "couchlink-win-capture.exe not found after build at $Bin"
+if ($BuildOnly) { exit 0 }
+
+if ($ListWindows) {
+    & $Bin --list-windows
+    exit $LASTEXITCODE
 }
 
-Write-Host "Windows capture connecting to $Connect (WSL must listen)"
-& $Bin --connect $Connect --max-fps $MaxFps
+$argList = @("--connect", $Connect, "--max-fps", "$MaxFps", "--source", $Source)
+if ($Source -eq "window") {
+    if (-not $Window) { throw "-Window is required when -Source window" }
+    $argList += @("--window", $Window)
+}
+
+Write-Host "Windows capture: source=$Source connect=$Connect"
+& $Bin @argList

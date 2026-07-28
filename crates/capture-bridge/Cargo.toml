@@ -16,4 +16,6 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-scrap = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0.0"

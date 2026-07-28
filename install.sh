@@ -51,6 +51,16 @@ install -Dm755 target/release/couchlink-signaling "$HOME/.local/bin/couchlink-si
 install -Dm755 target/release/couchlink-host "$HOME/.local/bin/couchlink-host"
 install -Dm755 target/release/couchlink-client "$HOME/.local/bin/couchlink-client"
 
+if [[ "$PLATFORM" == "wsl" ]]; then
+  echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
+  if command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+      "$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
+  else
+    echo "warning: powershell.exe missing — cannot build couchlink-win-capture.exe"
+  fi
+fi
+
 if command -v npm >/dev/null; then
   echo "==> building player UI"
   (cd web && npm install && npm run build)

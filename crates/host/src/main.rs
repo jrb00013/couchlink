@@ -225,9 +225,9 @@ async fn main() -> Result<()> {
                     let ok = avg >= 8;
                     if !ok {
                         let hint = if windows_spec.is_some() {
-                            "Windows capture bridge is connected but frames look black — check that PCSX2/RPCS3 is on the primary monitor and couchlink-win-capture is running."
+                            "Windows capture bridge is connected but frames look black — check the selected window is visible (or re-run with COUCHLINK_CAPTURE_SOURCE=picker)."
                         } else if capture::is_wsl() {
-                            "WSL is capturing the Linux desktop (usually black). Run scripts/start-win-capture.ps1 on Windows and set COUCHLINK_WINDOWS_CAPTURE=auto on the host."
+                            "WSL is capturing the Linux desktop (usually black). Restart the host so couchlink-win-capture auto-starts, then pick your game window."
                         } else {
                             "Capture looks black/empty — nothing visible on the host display."
                         };
