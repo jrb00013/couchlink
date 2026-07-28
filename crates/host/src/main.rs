@@ -118,6 +118,8 @@ async fn main() -> Result<()> {
     let mut rate_window = std::time::Instant::now();
     let mut rate_mark: u64 = 0;
     let mut idle_frames: u64 = 0;
+    let (mut stage_capture, mut stage_scale, mut stage_encode, mut stage_push) =
+        (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO);
     let mut force_idr = true;
     let mut idr_burst: u32 = 0;
     let mut last_idr = std::time::Instant::now();
@@ -212,7 +214,9 @@ async fn main() -> Result<()> {
                 }
             }
             _ = tokio::time::sleep(frame_dur) => {
+                let t_capture = std::time::Instant::now();
                 let Some(bgra) = capturer.capture_bgra()? else { continue };
+                let ms_capture = t_capture.elapsed();
                 let cap_w = capturer.width();
                 let cap_h = capturer.height();
                 if (cap_w, cap_h) != motion_dims {
@@ -232,6 +236,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 last_encode = std::time::Instant::now();
+                let t_scale = std::time::Instant::now();
                 let scaled = if cap_w as u32 == preset.width
                     && cap_h as u32 == preset.height
                 {
@@ -288,11 +293,20 @@ async fn main() -> Result<()> {
                     idr_burst = idr_burst.saturating_sub(1);
                     last_idr = std::time::Instant::now();
                 }
-                if let Some(nal) = encoder.encode_bgra(&scaled)? {
+                let ms_scale = t_scale.elapsed();
+                let t_encode = std::time::Instant::now();
+                let nal = encoder.encode_bgra(&scaled)?;
+                let ms_encode = t_encode.elapsed();
+                let t_push = std::time::Instant::now();
+                if let Some(nal) = nal {
                     if let Err(e) = host.push_h264(nal, frame_dur).await {
                         warn!("push h264: {e}");
                     } else {
                         frames_out += 1;
+                        stage_capture += ms_capture;
+                        stage_scale += ms_scale;
+                        stage_encode += ms_encode;
+                        stage_push += t_push.elapsed();
                         if rate_window.elapsed() >= Duration::from_secs(5) {
                             let window_frames = frames_out - rate_mark;
                             let fps = window_frames as f64 / rate_window.elapsed().as_secs_f64();
@@ -305,9 +319,18 @@ async fn main() -> Result<()> {
                             } else {
                                 0
                             };
+                            let per = window_frames.max(1) as u32;
                             info!(
-                                "streaming {fps:.1} fps ({frames_out} frames total, {idle_pct}% frames skipped as static)"
+                                "streaming {fps:.1} fps ({frames_out} frames total, {idle_pct}% skipped as static)                                  | per frame: capture {:.1}ms scale {:.1}ms encode {:.1}ms push {:.1}ms",
+                                (stage_capture / per).as_secs_f64() * 1000.0,
+                                (stage_scale / per).as_secs_f64() * 1000.0,
+                                (stage_encode / per).as_secs_f64() * 1000.0,
+                                (stage_push / per).as_secs_f64() * 1000.0,
                             );
+                            stage_capture = Duration::ZERO;
+                            stage_scale = Duration::ZERO;
+                            stage_encode = Duration::ZERO;
+                            stage_push = Duration::ZERO;
                             rate_window = std::time::Instant::now();
                             rate_mark = frames_out;
                             idle_frames = 0;

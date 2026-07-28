@@ -49,6 +49,14 @@ mod run {
         pub window: String,
         #[arg(long, default_value_t = false)]
         pub list_windows: bool,
+        /// Downscale to fit this box before sending. Frames cross a WSL virtual NIC
+        /// uncompressed, so wire bytes — not the encoder — set the frame rate:
+        /// 1080p BGRA is 7.9MB/frame, about 64MB/s, i.e. ~8fps. Sending at the
+        /// stream's actual resolution is the single biggest win available.
+        #[arg(long, default_value_t = 1280)]
+        pub max_width: u32,
+        #[arg(long, default_value_t = 720)]
+        pub max_height: u32,
         /// Keep a minimized window rendering by parking it off-screen instead
         /// (`--source window` only — DWM stops compositing true minimized windows).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -63,10 +71,46 @@ mod run {
         frame_dur: Duration,
         last: Instant,
         scratch: Vec<u8>,
+        max_w: u32,
+        max_h: u32,
+        arrived: u32,
+        sent: u32,
+        dropped: u32,
+        rate_window: Instant,
+    }
+
+    /// Nearest-neighbour box fit, preserving aspect. Cheap enough to run on the
+    /// capture thread and it removes multiples of the wire cost downstream.
+    fn downscale_bgra(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+        let mut out = vec![0u8; (dw * dh * 4) as usize];
+        for y in 0..dh {
+            let sy = (y * sh / dh).min(sh - 1) as usize;
+            for x in 0..dw {
+                let sx = (x * sw / dw).min(sw - 1) as usize;
+                let si = (sy * sw as usize + sx) * 4;
+                let di = ((y * dw + x) * 4) as usize;
+                if let Some(px) = src.get(si..si + 4) {
+                    out[di..di + 4].copy_from_slice(px);
+                }
+            }
+        }
+        out
+    }
+
+    /// Target size that fits (sw, sh) inside the box without upscaling.
+    fn fit(sw: u32, sh: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+        if sw == 0 || sh == 0 || (sw <= max_w && sh <= max_h) {
+            return (sw, sh);
+        }
+        if sw * max_h <= max_w * sh {
+            ((sw * max_h / sh).max(1), max_h)
+        } else {
+            (max_w, (sh * max_w / sw).max(1))
+        }
     }
 
     impl GraphicsCaptureApiHandler for BridgeCapture {
-        type Flags = (mpsc::SyncSender<FrameMsg>, Duration);
+        type Flags = (mpsc::SyncSender<FrameMsg>, Duration, u32, u32);
         type Error = CaptureError;
 
         fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
@@ -75,6 +119,12 @@ mod run {
                 frame_dur: ctx.flags.1,
                 last: Instant::now() - Duration::from_secs(1),
                 scratch: Vec::new(),
+                max_w: ctx.flags.2,
+                max_h: ctx.flags.3,
+                arrived: 0,
+                sent: 0,
+                dropped: 0,
+                rate_window: Instant::now(),
             })
         }
 
@@ -83,6 +133,22 @@ mod run {
             frame: &mut Frame,
             _capture_control: InternalCaptureControl,
         ) -> Result<(), Self::Error> {
+            self.arrived += 1;
+            if self.rate_window.elapsed() >= Duration::from_secs(5) {
+                let secs = self.rate_window.elapsed().as_secs_f64();
+                // Tells apart "Windows isn't rendering the window" from "the wire is
+                // full": arrived is what WGC gave us, sent is what reached the socket.
+                info!(
+                    "capture {:.1} fps arrived, {:.1} fps sent, {} dropped (queue full)",
+                    self.arrived as f64 / secs,
+                    self.sent as f64 / secs,
+                    self.dropped
+                );
+                self.arrived = 0;
+                self.sent = 0;
+                self.dropped = 0;
+                self.rate_window = Instant::now();
+            }
             if self.last.elapsed() < self.frame_dur {
                 return Ok(());
             }
@@ -90,8 +156,17 @@ mod run {
             let buffer = frame.buffer()?;
             let w = buffer.width();
             let h = buffer.height();
-            let pixels = buffer.as_nopadding_buffer(&mut self.scratch).to_vec();
-            let _ = self.tx.try_send((w, h, pixels));
+            let raw = buffer.as_nopadding_buffer(&mut self.scratch);
+            let (dw, dh) = fit(w, h, self.max_w, self.max_h);
+            let (w, h, pixels) = if (dw, dh) == (w, h) {
+                (w, h, raw.to_vec())
+            } else {
+                (dw, dh, downscale_bgra(raw, w, h, dw, dh))
+            };
+            match self.tx.try_send((w, h, pixels)) {
+                Ok(()) => self.sent += 1,
+                Err(_) => self.dropped += 1,
+            }
             Ok(())
         }
 
@@ -151,7 +226,11 @@ mod run {
 
         let (tx, rx) = mpsc::sync_channel::<FrameMsg>(2);
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
-        let flags = (tx, frame_dur);
+        let flags = (tx, frame_dur, args.max_width, args.max_height);
+        info!(
+            "sending at most {}x{} over the wire (raw BGRA)",
+            args.max_width, args.max_height
+        );
 
         match args.source {
             CaptureSource::Desktop => {

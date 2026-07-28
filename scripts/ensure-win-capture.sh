@@ -40,6 +40,12 @@ if [[ -z "$connect" ]]; then
     connect="127.0.0.1:9876"
   fi
 fi
+# Send frames at the stream resolution: the WSL virtual NIC, not the encoder,
+# is what caps the frame rate when raw BGRA crosses it.
+case "${COUCHLINK_PRESET:-720p30}" in
+  1080p*) wire_w=1920; wire_h=1080 ;;
+  *)      wire_w=1280; wire_h=720 ;;
+esac
 source_mode="${COUCHLINK_CAPTURE_SOURCE:-picker}"
 window_title="${COUCHLINK_CAPTURE_WINDOW:-}"
 if [[ -n "$window_title" ]]; then
@@ -62,7 +68,7 @@ style=Minimized
 echo "==> starting Windows capture (source=$source_mode → $connect)"
 # Build ArgumentList in PowerShell so quoting stays correct.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode')
+  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
 " >/dev/null
