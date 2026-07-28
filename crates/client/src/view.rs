@@ -10,6 +10,7 @@ use glyphon::{
     Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
 };
 use std::sync::{mpsc::Receiver, Arc, Mutex};
+use tracing::{info, warn};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -26,6 +27,15 @@ const BG_COLOR: wgpu::Color = wgpu::Color {
 const ACCENT_COLOR: TextColor = TextColor::rgb(0x3e, 0xcf, 0x8e);
 const MUTED_COLOR: TextColor = TextColor::rgb(0x8f, 0xa0, 0xb5);
 
+struct FrameTextures {
+    _y_texture: wgpu::Texture,
+    _u_texture: wgpu::Texture,
+    _v_texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    width: u32,
+    height: u32,
+}
+
 struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -34,7 +44,7 @@ struct Renderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    current_texture: Option<(wgpu::BindGroup, u32, u32)>,
+    current_frame: Option<FrameTextures>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     text_atlas: TextAtlas,
@@ -47,12 +57,7 @@ impl Renderer {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone())?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| anyhow::anyhow!("no compatible GPU adapter"))?;
+        let adapter = request_adapter(&instance, &surface)?;
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("couchlink-client"),
@@ -104,11 +109,21 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
 }
 
 @group(0) @binding(0) var t_frame: texture_2d<f32>;
-@group(0) @binding(1) var s_frame: sampler;
+@group(0) @binding(1) var t_u: texture_2d<f32>;
+@group(0) @binding(2) var t_v: texture_2d<f32>;
+@group(0) @binding(3) var s_frame: sampler;
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    return textureSample(t_frame, s_frame, in.uv);
+    let y = textureSample(t_frame, s_frame, in.uv).r;
+    let u = textureSample(t_u, s_frame, in.uv).r - 0.5;
+    let v = textureSample(t_v, s_frame, in.uv).r - 0.5;
+    let rgb = vec3<f32>(
+        y + 1.5748 * v,
+        y - 0.1873 * u - 0.4681 * v,
+        y + 1.8556 * u
+    );
+    return vec4<f32>(rgb, 1.0);
 }
 "#,
             )),
@@ -129,6 +144,26 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -192,7 +227,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             pipeline,
             bind_group_layout,
             sampler,
-            current_texture: None,
+            current_frame: None,
             font_system,
             swash_cache,
             text_atlas,
@@ -213,59 +248,35 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
 
     fn upload_frame(&mut self, frame: &DecodedFrame) {
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("frame-texture"),
-            size: wgpu::Extent3d {
-                width: frame.width,
-                height: frame.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &frame.rgba,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(frame.width * 4),
-                rows_per_image: Some(frame.height),
-            },
-            wgpu::Extent3d {
-                width: frame.width,
-                height: frame.height,
-                depth_or_array_layers: 1,
-            },
+        if self
+            .current_frame
+            .as_ref()
+            .map(|textures| textures.width != frame.width || textures.height != frame.height)
+            .unwrap_or(true)
+        {
+            self.current_frame = Some(self.create_frame_textures(frame.width, frame.height));
+        }
+
+        let textures = self.current_frame.as_ref().expect("frame textures initialized");
+        upload_plane(&self.queue, &textures._y_texture, frame.width, frame.height, &frame.y_plane);
+        upload_plane(
+            &self.queue,
+            &textures._u_texture,
+            frame.width / 2,
+            frame.height / 2,
+            &frame.u_plane,
         );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame-bind-group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-        self.current_texture = Some((bind_group, frame.width, frame.height));
+        upload_plane(
+            &self.queue,
+            &textures._v_texture,
+            frame.width / 2,
+            frame.height / 2,
+            &frame.v_plane,
+        );
     }
 
     fn draw(&mut self) -> Result<()> {
-        let show_status = self.current_texture.is_none();
+        let show_status = self.current_frame.is_none();
         if show_status {
             self.text_renderer
                 .prepare(
@@ -312,9 +323,9 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if let Some((bind_group, _, _)) = &self.current_texture {
+            if let Some(frame) = &self.current_frame {
                 pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, bind_group, &[]);
+                pass.set_bind_group(0, &frame.bind_group, &[]);
                 pass.draw(0..6, 0..1);
             } else {
                 self.text_renderer
@@ -327,6 +338,107 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         self.text_atlas.trim();
         Ok(())
     }
+
+    fn create_frame_textures(&self, width: u32, height: u32) -> FrameTextures {
+        let y_texture = create_plane_texture(&self.device, width, height, "frame-y-texture");
+        let u_texture = create_plane_texture(&self.device, width / 2, height / 2, "frame-u-texture");
+        let v_texture = create_plane_texture(&self.device, width / 2, height / 2, "frame-v-texture");
+        let y_view = y_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frame-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&y_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&u_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&v_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        FrameTextures {
+            _y_texture: y_texture,
+            _u_texture: u_texture,
+            _v_texture: v_texture,
+            bind_group,
+            width,
+            height,
+        }
+    }
+}
+
+fn request_adapter(instance: &wgpu::Instance, surface: &wgpu::Surface<'static>) -> Result<wgpu::Adapter> {
+    let attempts = [
+        ("high-performance", wgpu::PowerPreference::HighPerformance, false),
+        ("default", wgpu::PowerPreference::default(), false),
+        ("fallback", wgpu::PowerPreference::LowPower, true),
+    ];
+    for (label, power_preference, force_fallback_adapter) in attempts {
+        if let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference,
+            compatible_surface: Some(surface),
+            force_fallback_adapter,
+        })) {
+            let info = adapter.get_info();
+            info!(
+                "using {label} adapter: {} ({:?}/{:?})",
+                info.name, info.backend, info.device_type
+            );
+            return Ok(adapter);
+        }
+    }
+    Err(anyhow::anyhow!("no compatible GPU adapter"))
+}
+
+fn create_plane_texture(device: &wgpu::Device, width: u32, height: u32, label: &str) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+fn upload_plane(queue: &wgpu::Queue, texture: &wgpu::Texture, width: u32, height: u32, data: &[u8]) {
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(width),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 struct App {
@@ -414,7 +526,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(r) = &mut self.renderer {
                     if let Err(e) = r.draw() {
-                        tracing::warn!("draw error: {e}");
+                        warn!("draw error: {e}");
                     }
                 }
                 if let Some(w) = &self.window {

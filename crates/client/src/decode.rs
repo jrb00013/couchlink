@@ -10,7 +10,9 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 pub struct DecodedFrame {
-    pub rgba: Vec<u8>,
+    pub y_plane: Vec<u8>,
+    pub u_plane: Vec<u8>,
+    pub v_plane: Vec<u8>,
     pub width: u32,
     pub height: u32,
 }
@@ -55,15 +57,19 @@ impl H264Decoder {
         self.frame_count += 1;
 
         let (width, height) = decoded.dimensions();
-        let mut rgba = vec![0u8; width * height * 4];
-        decoded.write_rgba8(&mut rgba);
+        let (y_stride, u_stride, v_stride) = decoded.strides();
+        let y_plane = copy_plane(decoded.y(), width, height, y_stride);
+        let u_plane = copy_plane(decoded.u(), width / 2, height / 2, u_stride);
+        let v_plane = copy_plane(decoded.v(), width / 2, height / 2, v_stride);
 
         if self.latencies_us.len() >= LATENCY_LOG_EVERY {
             self.log_latency_stats();
         }
 
         Ok(Some(DecodedFrame {
-            rgba,
+            y_plane,
+            u_plane,
+            v_plane,
             width: width as u32,
             height: height as u32,
         }))
@@ -81,6 +87,16 @@ impl H264Decoder {
         );
         self.latencies_us.clear();
     }
+}
+
+fn copy_plane(src: &[u8], width: usize, height: usize, stride: usize) -> Vec<u8> {
+    let mut out = vec![0u8; width * height];
+    for row in 0..height {
+        let src_start = row * stride;
+        let dst_start = row * width;
+        out[dst_start..dst_start + width].copy_from_slice(&src[src_start..src_start + width]);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -119,6 +135,8 @@ mod tests {
 
         assert_eq!(frame.width, width as u32);
         assert_eq!(frame.height, height as u32);
-        assert_eq!(frame.rgba.len(), width * height * 4);
+        assert_eq!(frame.y_plane.len(), width * height);
+        assert_eq!(frame.u_plane.len(), width * height / 4);
+        assert_eq!(frame.v_plane.len(), width * height / 4);
     }
 }
