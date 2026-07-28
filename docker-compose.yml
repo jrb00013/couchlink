@@ -1,0 +1,9 @@
+services:
+  signaling:
+    image: rust:1.84
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: bash -lc "cargo run -p couchlink-signaling -- --bind 0.0.0.0:8443 --web-root web/dist"
+    ports:
+      - "8443:8443"
