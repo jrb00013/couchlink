@@ -10,8 +10,16 @@ if ! command -v cargo >/dev/null; then
   exit 1
 fi
 
-# Linux deps for capture + uinput + hid
-if [[ "$(uname -s)" == Linux ]]; then
+PLATFORM="linux"
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  PLATFORM="wsl"
+elif [[ "$(uname -s)" == "Darwin" ]]; then
+  PLATFORM="macos"
+fi
+echo "==> platform: $PLATFORM"
+
+# Linux/WSL deps for capture + uinput + hid
+if [[ "$PLATFORM" == "linux" || "$PLATFORM" == "wsl" ]]; then
   if command -v apt-get >/dev/null; then
     sudo apt-get update -qq
     sudo apt-get install -y -qq build-essential pkg-config libx11-dev libxcb1-dev \
@@ -27,6 +35,14 @@ RULE
     sudo usermod -aG input "$USER" || true
     echo "Added $USER to group 'input' — re-login may be required for /dev/uinput"
   fi
+  [[ "$PLATFORM" == "wsl" ]] && echo "WSL: host role needs uinput passed through (usbipd-win / wsl2 kernel with CONFIG_INPUT_UINPUT)"
+elif [[ "$PLATFORM" == "macos" ]]; then
+  if command -v brew >/dev/null; then
+    brew install pkg-config hidapi coturn miniupnpc || true
+  else
+    echo "Homebrew not found — install manually: https://brew.sh"
+  fi
+  echo "macOS: no uinput — host role (virtual pad injection) is Linux/WSL only. macOS can run signaling/turn/client."
 fi
 
 cargo build --release --workspace
@@ -52,5 +68,25 @@ if [[ ! -f .env.couchlink ]]; then
 fi
 
 echo "OK — binaries in ~/.local/bin"
-echo "source .env.couchlink && ./scripts/start-signaling.sh"
-echo "Friend opens the join URL printed by couchlink-host (or http://HOST:8443)"
+echo "Run everything with: ./scripts/run.sh host   (or ./scripts/run.sh client to join a friend)"
+
+# Auto-source .env.couchlink for you: a script can't export vars into the shell
+# that launched it, so instead we hand you back an interactive shell that
+# already has it sourced — only when run interactively (not from CI/non-tty).
+if [[ -t 0 && -t 1 && -z "${COUCHLINK_NO_SHELL_HANDOFF:-}" ]]; then
+  case "${SHELL:-}" in
+    */bash|"")
+      echo "==> dropping you into a bash shell with .env.couchlink already sourced"
+      exec bash --rcfile <(echo "[ -f ~/.bashrc ] && source ~/.bashrc; source '$ROOT/.env.couchlink'") -i
+      ;;
+    */zsh)
+      echo "==> dropping you into a zsh shell with .env.couchlink already sourced"
+      TMP_ZDOTDIR="$(mktemp -d)"
+      { [[ -f "$HOME/.zshrc" ]] && cat "$HOME/.zshrc"; echo "source '$ROOT/.env.couchlink'"; } > "$TMP_ZDOTDIR/.zshrc"
+      ZDOTDIR="$TMP_ZDOTDIR" exec zsh -i
+      ;;
+    *)
+      echo "Run this to load env vars: source .env.couchlink"
+      ;;
+  esac
+fi

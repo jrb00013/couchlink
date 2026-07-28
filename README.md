@@ -30,28 +30,38 @@ source .env.couchlink
 
 ## Run
 
-```bash
-# terminal 1 — signaling + player web UI
-./scripts/start-signaling.sh
-
-# terminal 2 — local TURN relay (safe to always leave running).
-# Auto-opens the needed router port via UPnP — no router login needed
-# (falls back to a warning if your router doesn't support UPnP).
-./scripts/start-turn.sh
-
-# terminal 3 — your PC (emulator host)
-./scripts/gen_session.sh   # paste into .env.couchlink
-./scripts/start-host.sh    # prints join URL + QR (TURN creds baked in automatically)
-
-# friend — open the printed URL (works from anywhere, no VPN setup)
-# press a button on DualSense, then Join
-```
-
-Native client alternative (hidraw pad sender):
+One command, one terminal — `run.sh` starts signaling + TURN + host as
+background child processes, auto-generates a session if you don't have one,
+and tears everything down together on Ctrl-C. Detects Linux / WSL / macOS.
 
 ```bash
-COUCHLINK_SIGNALING=ws://YOUR_PUBLIC_HOST:8443/ws ./scripts/start-client.sh
+./scripts/run.sh host
+# prints the friend's join URL + QR (session, PIN, and TURN creds baked in)
 ```
+
+Friend — open the printed URL from anywhere, no VPN/router setup needed, press
+a button on their DualSense, then Join. Or, for a native client instead of the
+browser:
+
+```bash
+./scripts/run.sh client        # Linux / WSL / macOS
+.\scripts\run.ps1 client       # native Windows (PowerShell)
+```
+
+Host role needs Linux `uinput` for the virtual DualSense — run it from Linux
+or WSL; macOS/native Windows can only run the friend/client role.
+
+<details>
+<summary>Individual scripts (if you want separate terminals/logs)</summary>
+
+```bash
+./scripts/start-signaling.sh   # signaling + player web UI
+./scripts/start-turn.sh        # local TURN relay, auto UPnP port
+./scripts/gen_session.sh       # paste output into .env.couchlink
+./scripts/start-host.sh
+./scripts/start-client.sh
+```
+</details>
 
 Bind Player 2 in RPCS3/PCSX2 to **DualSense Wireless Controller**.
 
