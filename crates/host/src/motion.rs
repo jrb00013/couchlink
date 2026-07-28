@@ -5,8 +5,12 @@
 //! than the encode it saves. Several samples per tile with a luma tolerance, plus
 //! hysteresis so a single static frame never throttles a live stream.
 
-/// Fraction of tiles that must change for the screen to count as active.
-const ACTIVE_TILE_FRACTION: f32 = 0.004;
+/// Any changed tile at all counts as active. A screen is not a camera sensor —
+/// there is no noise floor, so a change above LUMA_TOLERANCE is a real change.
+/// Requiring a *fraction* of tiles meant a moving mouse cursor or a blinking
+/// caret (one tile) was classified static and its frame discarded, so the player
+/// did not see their own input until something larger moved.
+const ACTIVE_TILE_MINIMUM: u32 = 1;
 /// Per-sample luma delta that counts as a change (ignores dither / compression noise).
 const LUMA_TOLERANCE: i32 = 10;
 /// Consecutive idle frames required before throttling. Prevents a still moment in
@@ -29,7 +33,9 @@ impl MotionDetector {
             prev: Vec::new(),
             width,
             height,
-            tile: 32,
+            // 16px tiles with 4 samples each puts a probe every ~8px, small enough
+            // to catch a cursor. Still only ~1/64th of the pixels.
+            tile: 16,
             idle_streak: 0,
         }
     }
@@ -42,11 +48,11 @@ impl MotionDetector {
         self.idle_streak = 0;
     }
 
-    /// Returns fraction of changed tiles in 0.0..=1.0 (BGRA input).
-    pub fn changed_fraction(&mut self, bgra: &[u8]) -> f32 {
+    /// Returns the number of changed tiles (BGRA input).
+    pub fn changed_tiles(&mut self, bgra: &[u8]) -> u32 {
         let stride = (self.width as usize) * 4;
         if bgra.len() < stride * self.height as usize {
-            return 1.0;
+            return u32::MAX;
         }
         let tw = self.tile.max(8);
         let tiles_x = (self.width / tw).max(1);
@@ -54,10 +60,10 @@ impl MotionDetector {
         let need = (tiles_x * tiles_y) as usize * SAMPLES.len();
         if self.prev.len() != need {
             self.prev = vec![0u8; need];
-            // First frame after a resize: everything is "new", but reporting 1.0 here
-            // would be a false motion signal. Seed and report idle-safe zero.
+            // First frame after a resize: everything is "new". Seed the baseline and
+            // report maximum change so the frame is definitely encoded.
             self.seed(bgra, stride, tiles_x, tiles_y, tw);
-            return 1.0;
+            return u32::MAX;
         }
         let mut changed = 0u32;
         let mut slot = 0usize;
@@ -79,7 +85,7 @@ impl MotionDetector {
                 }
             }
         }
-        changed as f32 / (tiles_x * tiles_y) as f32
+        changed
     }
 
     fn seed(&mut self, bgra: &[u8], stride: usize, tiles_x: u32, tiles_y: u32, tw: u32) {
@@ -97,7 +103,7 @@ impl MotionDetector {
     }
 
     pub fn is_idle(&mut self, bgra: &[u8]) -> bool {
-        if self.changed_fraction(bgra) >= ACTIVE_TILE_FRACTION {
+        if self.changed_tiles(bgra) >= ACTIVE_TILE_MINIMUM {
             self.idle_streak = 0;
             return false;
         }
@@ -139,6 +145,31 @@ mod tests {
         let f = frame(320, 240, 40);
         m.is_idle(&f);
         assert!(!m.is_idle(&f), "must not throttle on the first static frame");
+    }
+
+    /// Regression: a mouse cursor or text caret changes a single tile. The old
+    /// "0.4% of tiles must change" rule classified that as static and discarded the
+    /// frame, so a player did not see their own cursor move until something bigger
+    /// happened on screen. That is felt directly as input lag.
+    #[test]
+    fn a_single_cursor_sized_change_is_active() {
+        let mut m = MotionDetector::new(1152, 720);
+        let mut f = frame(1152, 720, 40);
+        m.is_idle(&f);
+        m.is_idle(&f);
+        // One 16x16 block, the size of a mouse cursor, on a 1152x720 screen.
+        for y in 300..316 {
+            for x in 500..516 {
+                let i = (y * 1152 + x) * 4;
+                f[i] = 240;
+                f[i + 1] = 240;
+                f[i + 2] = 240;
+            }
+        }
+        assert!(
+            !m.is_idle(&f),
+            "a cursor-sized change must not be discarded as static"
+        );
     }
 
     #[test]
