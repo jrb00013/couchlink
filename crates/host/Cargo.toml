@@ -21,8 +21,8 @@ uuid = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 futures-util = "0.3"
-webrtc = "0.12"
-interceptor = "0.12"
+webrtc = "0.17"
+interceptor = "0.17"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 url = "2"
