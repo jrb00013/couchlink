@@ -3,6 +3,7 @@ mod dualsense_reader;
 mod feedback_apply;
 mod keyboard_input;
 mod signaling_client;
+mod view;
 mod webrtc_player;
 
 use anyhow::Result;
