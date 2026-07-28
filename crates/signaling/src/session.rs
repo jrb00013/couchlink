@@ -148,7 +148,7 @@ impl SessionStore {
         session_id: String,
         pin: String,
         tx: WsSender,
-    ) -> Result<(bool, u64), String> {
+    ) -> Result<u64, String> {
         let Some(mut entry) = self.sessions.get_mut(&session_id) else {
             return Err("unknown session".into());
         };
@@ -158,10 +158,10 @@ impl SessionStore {
             self.record_pin_failure(&session_id);
             return Err("invalid PIN for session".into());
         }
-        let first_player = entry.player.tx.is_none();
-        if first_player {
-            entry.player_epoch = entry.player_epoch.saturating_add(1);
-        }
+        // Every registration is a fresh player socket (reload, new tab, reconnect),
+        // so always bump the epoch and let the caller notify the host. A stale tx
+        // from a dead socket must never suppress the PeerJoined that triggers the offer.
+        entry.player_epoch = entry.player_epoch.saturating_add(1);
         entry.player.tx = Some(tx);
         entry.last_activity = Utc::now();
         self.metrics
@@ -169,7 +169,7 @@ impl SessionStore {
             .fetch_add(1, Ordering::Relaxed);
         self.audit
             .record(&session_id, AuditEventKind::PlayerRegistered, None);
-        Ok((first_player, entry.player_epoch))
+        Ok(entry.player_epoch)
     }
 
     pub fn peer_tx(&self, session_id: &str, role: Role) -> Option<WsSender> {
@@ -244,5 +244,49 @@ impl SessionStore {
         if let Some(mut s) = self.sessions.get_mut(session_id) {
             s.last_activity = Utc::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> SessionStore {
+        SessionStore::with_limits(Arc::new(AuditLog::new()), Arc::new(Metrics::new()), 5, 600)
+    }
+
+    fn chan() -> WsSender {
+        mpsc::unbounded_channel::<String>().0
+    }
+
+    /// Regression: a reloading browser leaves a stale player tx behind. If that made
+    /// register_player report "not the first player", the host was never told to send
+    /// an offer and the page hung forever on "waiting for host offer".
+    #[test]
+    fn player_rejoin_always_produces_a_fresh_epoch() {
+        let s = store();
+        s.register_host("sid".into(), "pin".into(), None, None, None, chan())
+            .expect("host registers");
+
+        let first = s
+            .register_player("sid".into(), "pin".into(), chan())
+            .expect("first player");
+        // Second registration without any unregister — exactly the reload case.
+        let second = s
+            .register_player("sid".into(), "pin".into(), chan())
+            .expect("player reloads");
+
+        assert!(
+            second > first,
+            "reload must bump the epoch (got {first} then {second})"
+        );
+    }
+
+    #[test]
+    fn wrong_pin_is_rejected() {
+        let s = store();
+        s.register_host("sid".into(), "pin".into(), None, None, None, chan())
+            .expect("host registers");
+        assert!(s.register_player("sid".into(), "nope".into(), chan()).is_err());
     }
 }

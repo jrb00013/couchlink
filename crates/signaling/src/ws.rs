@@ -90,7 +90,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 player_name: _,
             } => {
                 match store.register_player(sid.clone(), pin, tx.clone()) {
-                    Ok((first_player, player_epoch)) => {
+                    Ok(player_epoch) => {
                         session_id = Some(sid.clone());
                         role = Some(Role::Player);
                         let _ = tx.send(
@@ -101,19 +101,20 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                             .to_json()
                             .unwrap(),
                         );
-                        if first_player {
-                            if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
-                                let _ = host_tx.send(
-                                    SignalMessage::PeerJoined {
-                                        role: Role::Player,
-                                        epoch: player_epoch,
-                                    }
-                                    .to_json()
-                                    .unwrap(),
-                                );
-                            }
+                        // Always notify the host: a reload leaves a stale player tx
+                        // behind, and suppressing PeerJoined would strand the browser
+                        // waiting for an offer that never comes.
+                        if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
+                            let _ = host_tx.send(
+                                SignalMessage::PeerJoined {
+                                    role: Role::Player,
+                                    epoch: player_epoch,
+                                }
+                                .to_json()
+                                .unwrap(),
+                            );
                         }
-                        debug!("player registered (first={first_player}, epoch={player_epoch})");
+                        debug!("player registered (epoch={player_epoch})");
                     }
                     Err(e) => {
                         let _ = tx.send(
