@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let signal_out = signaling.outbound.clone();
-    let (host, mut _pad_rx) = webrtc_peer::WebRtcHost::new(
+    let mut host = webrtc_peer::WebRtcHost::new(
         signal_out.clone(),
         Arc::clone(&pad),
         args.bluetooth_pad,
@@ -81,11 +81,13 @@ async fn main() -> Result<()> {
         args.turn_user.clone(),
         args.turn_pass.clone(),
     )
-    .await?;
+    .await?
+    .0;
 
+    // Wait for the first player before opening the capture/encode loop.
     loop {
         let Some(msg) = signaling.inbound.recv().await else {
-            break;
+            return Ok(());
         };
         match msg {
             SignalMessage::PeerJoined { .. } => {
@@ -99,10 +101,15 @@ async fn main() -> Result<()> {
     }
 
     let mut capturer = capture::FrameCapture::primary()?;
+    info!(
+        "capturing primary display {}x{}",
+        capturer.width, capturer.height
+    );
     let mut encoder = encode::H264Encoder::new(preset.width, preset.height, preset.bitrate_kbps)?;
     let mut motion = motion::MotionDetector::new(preset.width, preset.height);
     let frame_dur = Duration::from_millis(1000 / preset.fps.max(1) as u64);
     let idle_dur = Duration::from_millis(1000 / args.idle_fps.max(1) as u64);
+    let mut frames_out: u64 = 0;
 
     let _ = signal_out.send(SignalMessage::StreamInfo {
         width: preset.width,
@@ -126,10 +133,30 @@ async fn main() -> Result<()> {
                         warn!("player left");
                     }
                     Some(SignalMessage::PeerJoined { .. }) => {
-                        info!("player joined — sending offer");
+                        // Fresh browser peer = fresh RTCPeerConnection. Reusing the
+                        // old PC after a refresh/leave sends a renegotiation offer the
+                        // new player can't answer as an initial offer → join/leave loop.
+                        info!("player rejoined — rebuilding WebRTC peer + offer");
+                        let _ = host.pc.close().await;
+                        host = webrtc_peer::WebRtcHost::new(
+                            signal_out.clone(),
+                            Arc::clone(&pad),
+                            args.bluetooth_pad,
+                            args.turn_url.clone(),
+                            args.turn_user.clone(),
+                            args.turn_pass.clone(),
+                        )
+                        .await?
+                        .0;
                         if let Err(e) = host.create_and_send_offer(&signal_out).await {
                             warn!("offer on rejoin failed: {e}");
                         }
+                        let _ = signal_out.send(SignalMessage::StreamInfo {
+                            width: preset.width,
+                            height: preset.height,
+                            fps: preset.fps,
+                            codec: "H264".into(),
+                        });
                     }
                     Some(SignalMessage::Heartbeat) => {
                         let _ = signal_out.send(SignalMessage::Pong);
@@ -160,6 +187,11 @@ async fn main() -> Result<()> {
                 if let Some(nal) = encoder.encode_bgra(&scaled)? {
                     if let Err(e) = host.push_h264(nal, frame_dur).await {
                         warn!("push h264: {e}");
+                    } else {
+                        frames_out += 1;
+                        if frames_out == 1 || frames_out % 120 == 0 {
+                            info!("encoded {frames_out} H264 frames so far");
+                        }
                     }
                 }
             }
