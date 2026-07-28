@@ -1,0 +1,31 @@
+[package]
+name = "couchlink-host"
+version.workspace = true
+edition.workspace = true
+description = "Couchlink host — HD capture, WebRTC stream, virtual BT pad inject"
+
+[[bin]]
+name = "couchlink-host"
+path = "src/main.rs"
+
+[dependencies]
+couchlink-proto = { workspace = true }
+couchlink-pad = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+futures-util = "0.3"
+webrtc = "0.12"
+interceptor = "0.12"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+url = "2"
+scrap = "0.5"
+openh264 = "0.6"
+rand = "0.8"
