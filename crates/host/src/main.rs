@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
         args.turn_url.clone(),
         args.turn_user.clone(),
         args.turn_pass.clone(),
+        args.ice_ips.clone(),
     )
     .await?
     .0;
@@ -110,6 +111,7 @@ async fn main() -> Result<()> {
     let frame_dur = Duration::from_millis(1000 / preset.fps.max(1) as u64);
     let idle_dur = Duration::from_millis(1000 / args.idle_fps.max(1) as u64);
     let mut frames_out: u64 = 0;
+    let mut force_idr = true;
 
     let _ = signal_out.send(SignalMessage::StreamInfo {
         width: preset.width,
@@ -124,7 +126,8 @@ async fn main() -> Result<()> {
                 match msg {
                     Some(SignalMessage::Answer { sdp }) => {
                         host.handle_answer(sdp).await?;
-                        info!("remote answer set");
+                        info!("remote answer set — forcing IDR for browser decoder");
+                        force_idr = true;
                     }
                     Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
                         let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
@@ -145,12 +148,14 @@ async fn main() -> Result<()> {
                             args.turn_url.clone(),
                             args.turn_user.clone(),
                             args.turn_pass.clone(),
+                            args.ice_ips.clone(),
                         )
                         .await?
                         .0;
                         if let Err(e) = host.create_and_send_offer(&signal_out).await {
                             warn!("offer on rejoin failed: {e}");
                         }
+                        force_idr = true;
                         let _ = signal_out.send(SignalMessage::StreamInfo {
                             width: preset.width,
                             height: preset.height,
@@ -183,6 +188,11 @@ async fn main() -> Result<()> {
                 let idle = motion.is_idle(&scaled);
                 if idle {
                     tokio::time::sleep(idle_dur.saturating_sub(frame_dur / 4)).await;
+                }
+                // Periodic IDR so late joiners / stalled decoders can resync (~2s @ 30fps).
+                if force_idr || frames_out % 60 == 0 {
+                    encoder.force_keyframe();
+                    force_idr = false;
                 }
                 if let Some(nal) = encoder.encode_bgra(&scaled)? {
                     if let Err(e) = host.push_h264(nal, frame_dur).await {

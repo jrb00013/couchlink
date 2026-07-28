@@ -120,6 +120,11 @@ impl H264Encoder {
         })
     }
 
+    /// Ask OpenH264 for an IDR on the next encode (browser needs SPS/PPS+IDR to start).
+    pub fn force_keyframe(&mut self) {
+        self.enc.force_intra_frame();
+    }
+
     pub fn encode_bgra(&mut self, bgra: &[u8]) -> Result<Option<Vec<u8>>> {
         let w = self.width as usize;
         let h = self.height as usize;

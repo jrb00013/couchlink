@@ -179,6 +179,10 @@ button.ghost {
   pointer-events: none;
 }
 
+.overlay-dim {
+  background: rgba(0, 0, 0, 0.55);
+}
+
 .meta {
   display: flex;
   flex-wrap: wrap;

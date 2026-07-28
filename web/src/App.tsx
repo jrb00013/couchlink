@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CouchlinkPlayer, type ConnectionState } from "./player";
+import { clog, cerror, cwarn } from "./log";
 import "./App.css";
 
 const DEFAULT_WS =
@@ -38,20 +39,90 @@ export default function App() {
   const stageRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<CouchlinkPlayer | null>(null);
   const autoStarted = useRef(false);
+  const pendingStreamRef = useRef<MediaStream | null>(null);
+  const [videoDiag, setVideoDiag] = useState("video: —");
+
+  function attachStream(stream: MediaStream) {
+    const bind = (v: HTMLVideoElement) => {
+      const logVideo = (tag: string) => {
+        clog(tag, {
+          videoWidth: v.videoWidth,
+          videoHeight: v.videoHeight,
+          readyState: v.readyState,
+          paused: v.paused,
+          currentTime: v.currentTime,
+        });
+        setVideoDiag(
+          `video: ${v.videoWidth || "?"}×${v.videoHeight || "?"} rs=${v.readyState} ${v.paused ? "paused" : "playing"}`
+        );
+      };
+      const tryPlay = (why: string) => {
+        void v
+          .play()
+          .then(() => logVideo(`video.play ok (${why})`))
+          .catch((e: unknown) => {
+            const name = e && typeof e === "object" && "name" in e ? String((e as { name: string }).name) : "";
+            // Re-attach / unmute often aborts an in-flight play(); retry once.
+            if (name === "AbortError") {
+              clog("play aborted (reattach)", why);
+              window.setTimeout(() => {
+                void v.play().then(() => logVideo("video.play ok (retry)")).catch((e2) => {
+                  cerror("video.play failed", e2);
+                });
+              }, 50);
+              return;
+            }
+            cerror("video.play failed (autoplay policy?)", e);
+          });
+      };
+
+      v.onloadedmetadata = () => logVideo("video loadedmetadata");
+      v.onplaying = () => logVideo("video playing");
+      v.onwaiting = () => clog("video waiting (buffering / no keyframe?)");
+      v.onstalled = () => cwarn("video stalled");
+      v.onerror = () => cerror("video element error", v.error);
+
+      // Same MediaStream on unmute — don't reset srcObject (that aborts play()).
+      if (v.srcObject === stream) {
+        tryPlay("same-stream");
+        return;
+      }
+      v.srcObject = stream;
+      tryPlay("attach");
+    };
+
+    const v = videoRef.current;
+    if (!v) {
+      pendingStreamRef.current = stream;
+      cwarn("onVideo before ref — will attach on ref");
+      return;
+    }
+    pendingStreamRef.current = null;
+    bind(v);
+  }
 
   useEffect(() => {
+    const v = videoRef.current;
+    const pending = pendingStreamRef.current;
+    if (v && pending) {
+      clog("attach pending stream after ref ready");
+      attachStream(pending);
+    }
+  });
+
+  useEffect(() => {
+    clog("player mount", {
+      href: typeof location !== "undefined" ? location.href : "",
+      defaultWs: DEFAULT_WS,
+      invite,
+    });
     const player = new CouchlinkPlayer({
       onState: (s, d) => {
+        clog("ui state", s, d ?? "");
         setState(s);
         if (d) setDetail(d);
       },
-      onVideo: (stream) => {
-        const v = videoRef.current;
-        if (v) {
-          v.srcObject = stream;
-          void v.play().catch(() => undefined);
-        }
-      },
+      onVideo: (stream) => attachStream(stream),
       onStreamInfo: (info) => {
         setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
       },
@@ -60,7 +131,10 @@ export default function App() {
       },
     });
     playerRef.current = player;
-    return () => player.disconnect();
+    return () => {
+      clog("player unmount → disconnect");
+      player.disconnect();
+    };
   }, []);
 
   useEffect(() => {
@@ -133,7 +207,9 @@ export default function App() {
           <p className="hint">
             Plug in / pair your DualSense, then press any button so the browser
             unlocks Gamepad API. On the host it appears as a Bluetooth DualSense
-            for PCSX2 / RPCS3.
+            for PCSX2 / RPCS3. Open DevTools → Console and filter{" "}
+            <code>couchlink</code> for connection logs (<code>?debug=0</code>{" "}
+            to silence).
           </p>
         </section>
       )}
@@ -145,10 +221,16 @@ export default function App() {
             <span>{detail || "Waiting for video…"}</span>
           </div>
         )}
+        {state === "connected" && videoDiag.includes("?×?") && (
+          <div className="overlay overlay-dim">
+            <span>{detail || "Connected — waiting for first video frame…"}</span>
+          </div>
+        )}
       </div>
 
       <footer className="meta">
         <span>{streamMeta}</span>
+        <span>{videoDiag}</span>
         <span>{padMeta}</span>
         <button
           type="button"

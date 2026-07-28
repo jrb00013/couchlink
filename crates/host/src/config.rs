@@ -28,6 +28,9 @@ pub struct HostArgs {
     pub turn_user: Option<String>,
     #[arg(long, env = "COUCHLINK_TURN_PASS")]
     pub turn_pass: Option<String>,
+    /// Advertise these host IPs in ICE (WSL: set to `hostname -I` LAN address, not Docker bridges).
+    #[arg(long, env = "COUCHLINK_ICE_IPS", value_delimiter = ',')]
+    pub ice_ips: Vec<String>,
 }
 
 impl HostArgs {

@@ -1,4 +1,5 @@
 import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
+import { clog, cerror, cwarn } from "./log";
 import { send, type SignalMessage } from "./proto";
 
 export type ConnectionState =
@@ -24,6 +25,7 @@ export interface PlayerCallbacks {
 
 const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
+const MEDIA_RECOVER_DELAY_MS = 2000;
 
 export class CouchlinkPlayer {
   private ws: WebSocket | null = null;
@@ -33,6 +35,7 @@ export class CouchlinkPlayer {
   private padTimer: number | null = null;
   private connectTimer: number | null = null;
   private sessionRetryTimer: number | null = null;
+  private mediaRecoverTimer: number | null = null;
   private sessionRetries = 0;
   private pending: { sid: string; pin: string } | null = null;
   private seq = 0;
@@ -40,6 +43,7 @@ export class CouchlinkPlayer {
   private padWindowStart = 0;
   private padName = "none";
   private turn: { url: string; user: string; pass: string } | null = null;
+  private gotVideoTrack = false;
 
   constructor(private cb: PlayerCallbacks) {}
 
@@ -48,6 +52,7 @@ export class CouchlinkPlayer {
   }
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
+    clog("connect()", { signalingUrl, sessionId, pinLen: pin.length });
     this.cleanup();
     this.sessionRetries = 0;
     const url = signalingUrl.trim();
@@ -83,6 +88,7 @@ export class CouchlinkPlayer {
     }, 12_000);
 
     ws.onopen = () => {
+      clog("websocket open");
       if (this.connectTimer) clearTimeout(this.connectTimer);
       this.connectTimer = null;
       this.cb.onState("registering");
@@ -93,18 +99,22 @@ export class CouchlinkPlayer {
     ws.onmessage = async (ev) => {
       try {
         const msg = JSON.parse(ev.data as string) as SignalMessage;
+        clog("signal ←", msg.type, msg.type === "offer" ? `(sdp ${msg.sdp?.length ?? 0} chars)` : "");
         await this.handleSignal(msg);
       } catch (e) {
+        cerror("bad signal message", e, ev.data);
         this.cb.onState("error", `Bad message: ${e}`);
       }
     };
 
-    ws.onerror = () => {
+    ws.onerror = (ev) => {
+      cerror("websocket error", ev);
       if (this.connectTimer) clearTimeout(this.connectTimer);
       this.cb.onState("error", "WebSocket failed — wrong URL or cert not trusted");
     };
 
     ws.onclose = (ev) => {
+      clog("websocket close", { code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
       if (this.connectTimer) clearTimeout(this.connectTimer);
       if (ev.code !== 1000 && this.ws === ws) {
         this.cb.onState("error", ev.reason || `Closed (${ev.code})`);
@@ -115,6 +125,7 @@ export class CouchlinkPlayer {
   }
 
   disconnect() {
+    clog("disconnect()");
     this.cleanup();
     this.cb.onState("disconnected");
   }
@@ -130,20 +141,50 @@ export class CouchlinkPlayer {
   }
 
   private cleanup() {
+    clog("cleanup()", {
+      hadWs: !!this.ws,
+      hadPc: !!this.pc,
+      pcState: this.pc?.connectionState,
+      iceState: this.pc?.iceConnectionState,
+    });
     if (this.connectTimer) clearTimeout(this.connectTimer);
     if (this.sessionRetryTimer) clearTimeout(this.sessionRetryTimer);
+    if (this.mediaRecoverTimer) clearTimeout(this.mediaRecoverTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.padTimer) cancelAnimationFrame(this.padTimer);
     this.connectTimer = null;
     this.sessionRetryTimer = null;
+    this.mediaRecoverTimer = null;
     this.heartbeatTimer = null;
+    this.padTimer = null;
+    this.resetPeer();
+    this.ws?.close();
+    this.ws = null;
+  }
+
+  /** Drop WebRTC only; keep signaling socket if open. */
+  private resetPeer() {
+    if (this.padTimer) cancelAnimationFrame(this.padTimer);
     this.padTimer = null;
     this.padDc?.close();
     this.pc?.close();
-    this.ws?.close();
     this.padDc = null;
     this.pc = null;
-    this.ws = null;
+    this.gotVideoTrack = false;
+  }
+
+  private scheduleMediaRecover(reason: string) {
+    if (this.mediaRecoverTimer || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    cwarn("scheduling media recover", reason);
+    this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
+    this.mediaRecoverTimer = window.setTimeout(() => {
+      this.mediaRecoverTimer = null;
+      this.resetPeer();
+      clog("re-register player after media failure");
+      this.sendRegister(this.ws!);
+    }, MEDIA_RECOVER_DELAY_MS);
   }
 
   private startHeartbeat(ws: WebSocket) {
@@ -169,34 +210,94 @@ export class CouchlinkPlayer {
     }
     const pc = new RTCPeerConnection({ iceServers });
     this.pc = pc;
+    clog("RTCPeerConnection created", { iceServers: iceServers.map((s) => s.urls) });
+
+    pc.onconnectionstatechange = () => {
+      clog("pc.connectionState", pc.connectionState);
+      if (pc.connectionState === "failed") {
+        cwarn("WebRTC connection failed — check ICE / firewall / WSL IP in signaling URL");
+        this.scheduleMediaRecover("connection failed");
+      } else if (pc.connectionState === "connected") {
+        if (this.mediaRecoverTimer) {
+          clearTimeout(this.mediaRecoverTimer);
+          this.mediaRecoverTimer = null;
+        }
+      }
+    };
+    pc.oniceconnectionstatechange = () => {
+      clog("pc.iceConnectionState", pc.iceConnectionState);
+      if (pc.iceConnectionState === "failed") {
+        cwarn("ICE problem", pc.iceConnectionState);
+        this.scheduleMediaRecover("ICE failed");
+      } else if (pc.iceConnectionState === "disconnected") {
+        cwarn("ICE problem", pc.iceConnectionState);
+        this.scheduleMediaRecover("ICE disconnected");
+      }
+    };
+    pc.onicegatheringstatechange = () => {
+      clog("pc.iceGatheringState", pc.iceGatheringState);
+    };
+    pc.onsignalingstatechange = () => {
+      clog("pc.signalingState", pc.signalingState);
+    };
 
     pc.ontrack = (ev) => {
+      const track = ev.track;
+      clog("ontrack", {
+        kind: track.kind,
+        id: track.id,
+        readyState: track.readyState,
+        muted: track.muted,
+        streamIds: ev.streams.map((s) => s.id),
+      });
+      track.onmute = () => cwarn("track muted", track.kind, track.id);
+      track.onunmute = () => {
+        clog("track unmuted", track.kind, track.id);
+        if (track.kind === "video") this.cb.onVideo(stream);
+      };
+      track.onended = () => clog("track ended", track.kind, track.id);
       const stream =
         ev.streams[0] ?? new MediaStream(ev.track ? [ev.track] : []);
-      this.cb.onState("connected");
+      clog("attaching MediaStream", {
+        id: stream.id,
+        tracks: stream.getTracks().map((t) => `${t.kind}:${t.readyState}`),
+      });
+      this.gotVideoTrack = true;
+      this.cb.onState("connected", "video track");
       this.cb.onVideo(stream);
     };
 
     pc.onicecandidate = (ev) => {
-      if (ev.candidate && this.ws?.readyState === WebSocket.OPEN) {
-        send(this.ws, {
-          type: "ice_candidate",
-          candidate: ev.candidate.candidate,
-          sdpMid: ev.candidate.sdpMid,
-          sdpMLineIndex: ev.candidate.sdpMLineIndex ?? undefined,
-        });
+      if (ev.candidate) {
+        clog("local ICE", ev.candidate.candidate?.slice(0, 80));
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          send(this.ws, {
+            type: "ice_candidate",
+            candidate: ev.candidate.candidate,
+            sdpMid: ev.candidate.sdpMid,
+            sdpMLineIndex: ev.candidate.sdpMLineIndex ?? undefined,
+          });
+        }
+      } else {
+        clog("local ICE gathering complete (null candidate)");
       }
     };
 
     pc.ondatachannel = (ev) => {
       const ch = ev.channel;
+      clog("datachannel", ch.label, ch.readyState);
       if (ch.label === PAD_CHANNEL) {
         this.padDc = ch;
         ch.binaryType = "arraybuffer";
         ch.onopen = () => {
-          this.cb.onState("connected", "pad open");
+          clog("pad datachannel open");
+          if (!this.gotVideoTrack) {
+            this.cb.onState("connected", "pad open (no video track yet)");
+          }
           this.startPadLoop();
         };
+        ch.onclose = () => clog("pad datachannel closed");
+        ch.onerror = (e) => cerror("pad datachannel error", e);
       }
     };
 
@@ -269,27 +370,50 @@ export class CouchlinkPlayer {
       }
       case "offer": {
         this.cb.onState("negotiating");
-        const pc = await this.ensurePeer();
-        await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp! });
+        try {
+          if (this.pc) {
+            clog("new offer — resetting RTCPeerConnection");
+            this.resetPeer();
+          }
+          const pc = await this.ensurePeer();
+          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+          clog("setRemoteDescription(offer) ok", pc.signalingState);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          clog("setLocalDescription(answer) ok", pc.signalingState);
+          if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp! });
+          clog("signal → answer", `(sdp ${answer.sdp?.length ?? 0} chars)`);
+        } catch (e) {
+          cerror("offer handling failed", e);
+          this.cb.onState("error", `WebRTC offer failed: ${e}`);
+        }
         break;
       }
       case "ice_candidate":
         if (this.pc) {
-          await this.pc.addIceCandidate({
-            candidate: msg.candidate,
-            sdpMid: msg.sdpMid ?? undefined,
-            sdpMLineIndex: msg.sdpMLineIndex ?? undefined,
-          });
+          try {
+            await this.pc.addIceCandidate({
+              candidate: msg.candidate,
+              sdpMid: msg.sdpMid ?? undefined,
+              sdpMLineIndex: msg.sdpMLineIndex ?? undefined,
+            });
+            clog("addIceCandidate ok", msg.candidate?.slice(0, 60));
+          } catch (e) {
+            cwarn("addIceCandidate failed", e, msg.candidate?.slice(0, 80));
+          }
+        } else {
+          cwarn("ice_candidate before RTCPeerConnection exists");
         }
         break;
       case "stream_info":
+        clog("stream_info", msg);
         this.cb.onStreamInfo?.(msg);
         break;
       case "peer_left":
         this.cb.onState("waiting_host", "Host disconnected");
+        this.resetPeer();
+        break;
+      case "pong":
         break;
     }
   }

@@ -9,7 +9,9 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -37,13 +39,25 @@ impl WebRtcHost {
         turn_url: Option<String>,
         turn_user: Option<String>,
         turn_pass: Option<String>,
+        ice_ips: Vec<String>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<PadFrame>)> {
         let _ = as_bluetooth;
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
+        let mut setting_engine = SettingEngine::default();
+        let nat_ips: Vec<String> = ice_ips
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !nat_ips.is_empty() {
+            info!("ICE NAT 1:1 IPs: {nat_ips:?}");
+            setting_engine.set_nat_1to1_ips(nat_ips, RTCIceCandidateType::Host);
+        }
         let api = APIBuilder::new()
+            .with_setting_engine(setting_engine)
             .with_media_engine(m)
             .with_interceptor_registry(registry)
             .build();
