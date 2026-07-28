@@ -1,36 +1,60 @@
 # couchlink
 
-**HD, low-latency co-play for emulators.** You host PCSX2 / RPCS3 (or any game window).
-Your friend streams your game screen over WebRTC and plays with their own DualSense —
-on your machine it shows up as a **Bluetooth DualSense** (`BUS_BLUETOOTH`, Sony VID/PID),
-so emulators bind it like a real pad.
+**Full co-play device for emulator nights.** You run PCSX2 or RPCS3. Your friend gets an
+HD, low-latency stream of your game and plays with **their own DualSense / PC**. On your
+machine their controller shows up as a real **Bluetooth DualSense** (`BUS_BLUETOOTH`,
+Sony `054c:0ce6`) — emulators bind it like any wireless pad.
 
-Built with the same session / signaling / WebRTC methodologies as [Rohomieo](https://github.com/jrb00013/rohomieo),
-and DualSense HID report layouts from [dualsensekit](https://github.com/jrb00013/dualsensekit).
+## Stack
 
-## Why
+| Layer | Implementation |
+|-------|----------------|
+| Session / PIN / ICE relay | Rohomieo-style WebSocket signaling |
+| Video | WebRTC + OpenH264, presets up to **1080p60** |
+| Congestion / idle | WebRTC GCC + tile motion detector |
+| Path | **WireGuard** recommended (or LAN); no public STUN/TURN by default |
+| Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~250 Hz) |
+| Local pad capture | hidapi + dualsensekit report layouts (`0x01` / `0x31`) |
+| Host injection | Linux `uinput` DualSense identity, bus = Bluetooth |
 
-| Piece | How |
-|-------|-----|
-| Video | WebRTC + H.264, adaptive FPS (Rohomieo-style GCC + motion idle) |
-| Transport | Peer-to-peer media; signaling only for SDP/ICE |
-| Path | WireGuard LAN recommended (no public STUN/TURN required) |
-| Pad | Custom binary `CLPD` frames on DataChannel `pad` (~250 Hz) |
-| Host injection | Linux `uinput` device: name/VID/PID of DualSense, bus = Bluetooth |
-| Local capture | hidapi / dualsensekit-compatible USB (`0x01`) or BT (`0x31`) reports |
-
-## Quick start
+## Install
 
 ```bash
+git clone https://github.com/jrb00013/couchlink.git
+cd couchlink
 ./install.sh
 source .env.couchlink
-couchlink-signaling &
-couchlink-host --session-id demo --pin 123456 --preset 1080p60
-# friend:
-couchlink-client --signaling wss://YOU:8443 --session-id demo --pin 123456
 ```
 
-See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+## Run
+
+```bash
+# terminal 1
+./scripts/start-signaling.sh
+
+# terminal 2 (your PC — emulator host)
+./scripts/gen_session.sh   # copy into .env.couchlink
+./scripts/start-host.sh
+
+# friend
+COUCHLINK_SIGNALING=ws://YOUR_WG_IP:8443/ws ./scripts/start-client.sh
+```
+
+Then bind Player 2 in RPCS3/PCSX2 to **DualSense Wireless Controller**.
+
+## Docs
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Protocol](docs/PROTOCOL.md) (signaling + CLPD)
+- [Getting started](docs/GETTING_STARTED.md)
+- [WireGuard](docs/WIREGUARD.md)
+- [Latency](docs/LATENCY.md)
+- [Emulators](docs/EMULATORS.md)
+
+## Related
+
+- [rohomieo](https://github.com/jrb00013/rohomieo) — remote desktop methodologies
+- [dualsensekit](https://github.com/jrb00013/dualsensekit) — DualSense HID / RPCS3 pad binding
 
 ## License
 
