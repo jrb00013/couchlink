@@ -28,18 +28,13 @@ Ensure your user can write `/dev/uinput` (install udev rule from `install.sh`).
 
 ## Friend — native client (optional)
 
+See **[Desktop player install](docs/DESKTOP_CLIENT.md)** (Windows / Linux AppImage / macOS app) and **[Playing together across the internet](docs/PLAY_TOGETHER.md)**.
+
 ```bash
 ./install.sh
-couchlink-client \
-  --signaling ws://HOST_WG_IP:8443/ws \
-  --session-id friends-night \
-  --pin 482193
+couchlink-client --join-url 'PASTE_HOST_JOIN_LINK'
+# or set join_url= in the platform config file (see DESKTOP_CLIENT.md)
 ```
-
-This opens a window with the video stream. If you don't have a DualSense
-plugged in, the keyboard works as a fallback input (WASD + arrows for
-movement, Space/Shift/Ctrl/E for face buttons, Q/R for bumpers, 1/2 for
-triggers, Enter/Tab for Options/Create).
 
 ## Bind in the emulator
 

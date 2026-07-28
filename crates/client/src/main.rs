@@ -2,11 +2,13 @@ mod decode;
 mod dualsense_reader;
 mod feedback_apply;
 mod keyboard_input;
+mod config_file;
+mod invite;
 mod signaling_client;
 mod view;
 mod webrtc_player;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use couchlink_proto::SignalMessage;
 use keyboard_input::KeyboardPad;
@@ -16,12 +18,18 @@ use tracing::{info, warn};
 #[derive(Parser, Debug, Clone)]
 #[command(name = "couchlink-client", about = "Join a couchlink co-play session", version)]
 struct Args {
+    /// Full invite link from the host (same URL as the browser join page).
+    #[arg(long)]
+    join_url: Option<String>,
+    /// Invite link passed as the only argument (desktop shortcuts / AppImage %u).
+    #[arg(value_name = "JOIN_URL")]
+    positional_join: Option<String>,
     #[arg(long, env = "COUCHLINK_SIGNALING", default_value = "ws://127.0.0.1:8443/ws")]
     signaling: String,
     #[arg(long, env = "COUCHLINK_SESSION_ID")]
-    session_id: String,
+    session_id: Option<String>,
     #[arg(long, env = "COUCHLINK_PIN")]
-    pin: String,
+    pin: Option<String>,
     /// Poll DualSense and send pad frames even without video decode UI.
     #[arg(long, default_value_t = true)]
     send_pad: bool,
@@ -37,8 +45,66 @@ struct Args {
     headless: bool,
 }
 
+impl Args {
+    fn resolve(self) -> Result<ResolvedArgs> {
+        let mut args = self;
+        let join_raw = args
+            .join_url
+            .take()
+            .or(args.positional_join.take())
+            .or_else(config_file::read_join_url_from_config);
+
+        if let Some(url) = join_raw {
+            let parsed = invite::parse_join_url(&url)?;
+            if args.session_id.is_none() {
+                args.session_id = Some(parsed.session_id);
+            }
+            if args.pin.is_none() {
+                args.pin = Some(parsed.pin);
+            }
+            args.signaling = parsed.signaling;
+            if args.turn_url.is_none() {
+                args.turn_url = parsed.turn_url;
+            }
+            if args.turn_user.is_none() {
+                args.turn_user = parsed.turn_user;
+            }
+            if args.turn_pass.is_none() {
+                args.turn_pass = parsed.turn_pass;
+            }
+        }
+
+        Ok(ResolvedArgs {
+            signaling: args.signaling,
+            session_id: args
+                .session_id
+                .context("session id required — use --join-url, set join_url= in config, or pass --session-id")?,
+            pin: args
+                .pin
+                .context("PIN required — use --join-url, set join_url= in config, or pass --pin")?,
+            send_pad: args.send_pad,
+            turn_url: args.turn_url,
+            turn_user: args.turn_user,
+            turn_pass: args.turn_pass,
+            headless: args.headless,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedArgs {
+    signaling: String,
+    session_id: String,
+    pin: String,
+    send_pad: bool,
+    turn_url: Option<String>,
+    turn_user: Option<String>,
+    turn_pass: Option<String>,
+    headless: bool,
+}
+
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = Args::parse().resolve()?;
 
     if args.headless {
         run_headless(args)
@@ -49,7 +115,7 @@ fn main() -> Result<()> {
 
 /// Today's exact pad-only behavior, unchanged, just renamed and made callable
 /// as a fallback from `run_windowed`. Owns its own Tokio runtime.
-fn run_headless(args: Args) -> Result<()> {
+fn run_headless(args: ResolvedArgs) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -65,7 +131,7 @@ fn run_headless(args: Args) -> Result<()> {
 /// Opens the video window on this (main) thread; networking + decode + pad
 /// polling run on a background thread with its own Tokio runtime. Falls back
 /// to `run_headless` if window/GPU creation fails.
-fn run_windowed(args: Args) -> Result<()> {
+fn run_windowed(args: ResolvedArgs) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -116,7 +182,7 @@ fn run_windowed(args: Args) -> Result<()> {
 /// forwards decoded frames to the window thread and `keyboard` supplies the
 /// keyboard-derived pad state plus a shutdown signal from the window.
 async fn async_main(
-    args: Args,
+    args: ResolvedArgs,
     video_frame_out: Option<std_mpsc::Sender<decode::DecodedFrame>>,
     keyboard: Option<(Arc<Mutex<KeyboardPad>>, std_mpsc::Receiver<()>)>,
 ) -> Result<()> {

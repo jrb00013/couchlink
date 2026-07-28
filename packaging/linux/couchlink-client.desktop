@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Couchlink Player
+Comment=Join a couchlink co-play session (native video + pad)
+Exec=couchlink-client %u
+Icon=couchlink-player
+Terminal=false
+Categories=Game;Network;
+StartupWMClass=couchlink-client
