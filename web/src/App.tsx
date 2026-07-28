@@ -159,8 +159,11 @@ export default function App() {
     <div className={`shell ${fullscreen ? "is-fullscreen" : ""}`}>
       <header className="top">
         <div className="brand">
-          <h1>couchlink</h1>
-          <p>HD co-play · your DualSense → host Bluetooth pad</p>
+          <img className="brand-logo" src="/logo.png" alt="" width={56} height={56} />
+          <div className="brand-copy">
+            <h1>couchlink</h1>
+            <p>HD co-play · your DualSense → host Bluetooth pad</p>
+          </div>
         </div>
         <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
       </header>
