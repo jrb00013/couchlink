@@ -21,6 +21,10 @@ use tracing::{info, warn};
 /// once the encoder throttles on a static screen, stranding late joiners on black.
 const IDR_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Poll interval for the frame loop. Short so the select arm re-arms promptly; the
+/// real pacing comes from the capture read blocking until a frame exists.
+const LOOP_TICK: Duration = Duration::from_millis(2);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -113,7 +117,6 @@ async fn main() -> Result<()> {
     let mut motion_dims: (usize, usize) = (0, 0);
     let mut last_encode = std::time::Instant::now();
     let mut last_push = std::time::Instant::now();
-    let frame_dur = Duration::from_millis(1000 / preset.fps.max(1) as u64);
     let idle_dur = Duration::from_millis(1000 / args.idle_fps.max(1) as u64);
     let mut frames_out: u64 = 0;
     let mut rate_window = std::time::Instant::now();
@@ -214,7 +217,11 @@ async fn main() -> Result<()> {
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(frame_dur) => {
+            // Short tick, not frame_dur: capture_bgra already blocks until Windows has
+            // a frame, so it paces this loop by itself. Sleeping a full frame time
+            // first added up to 16ms of pure input latency and capped throughput below
+            // the rate the source was actually delivering.
+            _ = tokio::time::sleep(LOOP_TICK) => {
                 let t_capture = std::time::Instant::now();
                 let Some(bgra) = capturer.capture_bgra()? else { continue };
                 let ms_capture = t_capture.elapsed();
