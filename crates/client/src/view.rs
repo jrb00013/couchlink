@@ -303,7 +303,18 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                 .map_err(|e| anyhow::anyhow!("text prepare: {e:?}"))?;
         }
 
-        let output = self.surface.get_current_texture()?;
+        let output = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost) => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            Err(wgpu::SurfaceError::Outdated) => return Ok(()),
+            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                return Err(anyhow::anyhow!("surface out of memory"));
+            }
+        };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
@@ -450,6 +461,28 @@ struct App {
     init_error: Option<anyhow::Error>,
 }
 
+impl App {
+    /// Drains the decode channel and uploads only the newest frame (drops stale ones).
+    fn ingest_latest_frame(&mut self) -> bool {
+        let mut latest = None;
+        while let Ok(frame) = self.frame_rx.try_recv() {
+            latest = Some(frame);
+        }
+        if let (Some(renderer), Some(frame)) = (&mut self.renderer, latest) {
+            renderer.upload_frame(&frame);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -462,7 +495,8 @@ impl ApplicationHandler for App {
                 match Renderer::new(window.clone()) {
                     Ok(r) => {
                         self.renderer = Some(r);
-                        self.window = Some(window);
+                        self.window = Some(window.clone());
+                        window.request_redraw();
                     }
                     Err(e) => {
                         self.init_error = Some(e);
@@ -487,6 +521,7 @@ impl ApplicationHandler for App {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
+                self.request_redraw();
             }
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
@@ -512,6 +547,7 @@ impl ApplicationHandler for App {
                         } else {
                             Some(winit::window::Fullscreen::Borderless(None))
                         });
+                        w.request_redraw();
                     }
                     return;
                 }
@@ -519,21 +555,20 @@ impl ApplicationHandler for App {
                 kp.set_key(code, state == ElementState::Pressed);
             }
             WindowEvent::RedrawRequested => {
-                while let Ok(frame) = self.frame_rx.try_recv() {
-                    if let Some(r) = &mut self.renderer {
-                        r.upload_frame(&frame);
-                    }
-                }
+                self.ingest_latest_frame();
                 if let Some(r) = &mut self.renderer {
                     if let Err(e) = r.draw() {
                         warn!("draw error: {e}");
                     }
                 }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
             }
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.ingest_latest_frame() {
+            self.request_redraw();
         }
     }
 }
