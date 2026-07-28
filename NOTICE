@@ -1,0 +1,8 @@
+couchlink incorporates methodologies from:
+
+- Rohomieo (https://github.com/jrb00013/rohomieo) — WebRTC signaling session flow,
+  PIN lockout, motion-idle FPS, WireGuard-first posture.
+- dualsensekit (https://github.com/jrb00013/dualsensekit) — DualSense HID report IDs,
+  enumeration preferences, and RPCS3 pad-binding practices.
+
+Both projects are MIT licensed by jrb00013.
