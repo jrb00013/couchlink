@@ -52,9 +52,9 @@ style=Minimized
 echo "==> starting Windows capture (source=$source_mode → $connect)"
 # Build ArgumentList in PowerShell so quoting stays correct.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-  \$args = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode')
-  if ('$window_title' -ne '') { \$args += @('-Window','$window_title') }
-  Start-Process -WindowStyle $style powershell.exe -ArgumentList \$args
+  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode')
+  if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
+  Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
 " >/dev/null
 
 echo "==> Windows capture launched (choose a window in the picker if it appears)"
