@@ -10,7 +10,8 @@ pub const PAD_CHANNEL: &str = "pad";
 pub const PAD_MAGIC: &[u8; 4] = b"CLPD";
 pub const PAD_VERSION: u8 = 1;
 /// Packed frame size (header + body).
-pub const PAD_FRAME_LEN: usize = 4 + 1 + 4 + 4 + 6 + 2 + 8;
+/// magic(4)+ver(1)+seq(4)+buttons(4)+sticks/triggers(6)+gyro(6)+touch(5)+reserved(1)
+pub const PAD_FRAME_LEN: usize = 31;
 
 #[derive(Debug, Error)]
 pub enum PadCodecError {
