@@ -11,4 +11,6 @@ PORT="${BIND##*:}"
 trap 'upnp_close "$PORT" tcp' EXIT
 upnp_open "$PORT" tcp "signaling"
 
-couchlink-signaling --bind "$BIND" --web-root "$ROOT/web/dist"
+BIN="${COUCHLINK_SIGNALING_BIN:-$ROOT/target/debug/couchlink-signaling}"
+command -v couchlink-signaling >/dev/null 2>&1 && BIN="couchlink-signaling"
+exec "$BIN" --bind "$BIND" --web-root "$ROOT/web/dist"

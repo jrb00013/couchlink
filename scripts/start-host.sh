@@ -9,7 +9,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # On WSL, bring up Windows DXGI capture before the host connects to it.
 "$ROOT/scripts/ensure-win-capture.sh"
 
-BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/debug/couchlink-host}"
+# Release only: the BGRA→I420 conversion and scaler are per-pixel Rust loops, and
+# a debug build cannot keep up with 1080p60 — it shows up as seconds of video lag.
+BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/release/couchlink-host}"
+if [[ ! -x "$BIN" ]]; then
+  echo "==> building couchlink-host (release)"
+  cargo build --release -p couchlink-host
+fi
 ARGS=(
   --signaling "${COUCHLINK_SIGNALING:-ws://127.0.0.1:8443/ws}"
   --session-id "$COUCHLINK_SESSION_ID"

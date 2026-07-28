@@ -242,7 +242,7 @@ async fn async_main(
                     Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
                         let _ = player.add_ice(candidate, sdp_mid, sdp_mline_index).await;
                     }
-                    Some(SignalMessage::StreamInfo { width, height, fps, codec }) => {
+                    Some(SignalMessage::StreamInfo { width, height, fps, codec, .. }) => {
                         info!("stream {width}x{height}@{fps} {codec}");
                     }
                     Some(SignalMessage::PeerLeft) => warn!("host left"),
