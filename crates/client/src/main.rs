@@ -96,9 +96,14 @@ fn run_windowed(args: Args) -> Result<()> {
         Ok(()) => {}
         Err(e) => {
             warn!("windowed viewer failed ({e}), falling back to headless mode");
-            // The network thread is mid-run against a now-abandoned frame_tx;
-            // stop it and start clean in headless mode instead.
-            drop(net_thread);
+            // `shutdown_tx` was moved into `view::run` and is dropped now that
+            // it has returned; the net thread observes that as a disconnect
+            // (see the shutdown check in `async_main`) and winds down on its
+            // own. Join it before starting a second networking stack so the
+            // two never run concurrently against the same session.
+            if let Err(join_err) = net_thread.join() {
+                warn!("network thread panicked during fallback shutdown: {join_err:?}");
+            }
             return run_headless(args);
         }
     }
@@ -137,16 +142,25 @@ async fn async_main(
         None
     };
     if dualsense.is_none() && args.send_pad {
-        info!("no DualSense found — keyboard input is still available in windowed mode");
+        if keyboard.is_some() {
+            info!("no DualSense found — keyboard input is still available in windowed mode");
+        } else {
+            warn!("no DualSense found and no keyboard available (headless mode) — no pad input will be sent");
+        }
     }
 
     let mut pad_interval = tokio::time::interval(std::time::Duration::from_millis(4)); // ~250 Hz
     let mut seq: u32 = 0;
+    let mut keyboard_was_active = false;
 
     loop {
         // Non-blocking check for the window's shutdown signal (windowed mode only).
         if let Some((_, shutdown_rx)) = &keyboard {
-            if shutdown_rx.try_recv().is_ok() {
+            // Treat either an explicit shutdown message or the sender being
+            // dropped (disconnected) as "stop now" — otherwise a dropped
+            // `shutdown_tx` (e.g. windowed viewer returning early) leaves
+            // this loop running forever in the background.
+            if !matches!(shutdown_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
                 info!("window closed, shutting down network thread");
                 break;
             }
@@ -177,16 +191,27 @@ async fn async_main(
             }
             _ = pad_interval.tick() => {
                 seq = seq.wrapping_add(1);
-                // DualSense takes priority for this tick when it produces a frame;
-                // otherwise fall back to whatever the keyboard reports (which is
-                // "neutral" if no keys are held, so this is always safe to send).
+                // DualSense takes priority for this tick when it produces a frame.
+                // Otherwise, only send a keyboard-derived frame while a key is
+                // actually held, plus one extra frame on the falling edge (last
+                // key just released) so the host doesn't keep a stale input
+                // held forever. Without this gate, `read_frame()` returning
+                // `Ok(None)` on WouldBlock (the common case at 250Hz) would
+                // fall through to a neutral keyboard frame every other tick
+                // and stomp whatever the DualSense was holding.
                 let ds_frame = match dualsense.as_mut() {
                     Some(r) => r.read_frame().ok().flatten(),
                     None => None,
                 };
                 let frame = match ds_frame {
                     Some(f) => Some(f),
-                    None => keyboard.as_ref().map(|(kp, _)| kp.lock().unwrap().to_pad_frame(seq)),
+                    None => keyboard.as_ref().and_then(|(kp, _)| {
+                        let kp = kp.lock().unwrap();
+                        let active = kp.any_key_active();
+                        let send = active || keyboard_was_active;
+                        keyboard_was_active = active;
+                        send.then(|| kp.to_pad_frame(seq))
+                    }),
                 };
                 if let Some(frame) = frame {
                     if let Err(e) = player.send_pad(&frame).await {
