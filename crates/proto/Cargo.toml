@@ -1,0 +1,11 @@
+[package]
+name = "couchlink-proto"
+version.workspace = true
+edition.workspace = true
+description = "Couchlink wire protocol — signaling JSON + binary pad frames"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
