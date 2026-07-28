@@ -150,13 +150,12 @@ mod cross_button {
     fn detects_cross_on_usb() {
         let mut raw = vec![0u8; 64];
         raw[0] = INPUT_USB;
+        // body starts at raw[1]: lx,ly,rx,ry,l2,r2,_,buttons_l,buttons_h
         raw[1] = 128;
         raw[2] = 128;
         raw[3] = 128;
         raw[4] = 128;
-        raw[8] = 0x20; // CROSS in face nibble path via buttons_l — set on body[7]
-        raw[8] = 0; // buttons_h
-        raw[7] = 0x20; // CROSS
+        raw[8] = 0x20; // body[7] = CROSS
         let f = parse_input_report(&raw).unwrap();
         assert!(f.buttons & buttons::CROSS != 0);
     }
