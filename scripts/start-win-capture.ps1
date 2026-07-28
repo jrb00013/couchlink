@@ -1,20 +1,12 @@
-# Stream the Windows primary display to couchlink-host running in WSL (TCP CLFR on port 9876).
+# Stream the Windows primary display to couchlink-host in WSL.
+# Connects outbound to the WSL listener (default 127.0.0.1:9876 via localhost forwarding).
 param(
-    [string]$Bind = "0.0.0.0:9876",
+    [string]$Connect = "127.0.0.1:9876",
     [int]$MaxFps = 60
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-
-# Already serving? Reuse the existing process.
-$port = 9876
-if ($Bind -match ':(\d+)$') { $port = [int]$Matches[1] }
-$existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Windows capture already listening on port $port — nothing to do."
-    exit 0
-}
 
 $Bin = Join-Path $Root "target\release\couchlink-win-capture.exe"
 if (-not (Test-Path $Bin)) {
@@ -34,6 +26,5 @@ if (-not (Test-Path $Bin)) {
     throw "couchlink-win-capture.exe not found after build at $Bin"
 }
 
-Write-Host "Windows capture bridge on $Bind (WSL host connects automatically)"
-Write-Host "If WSL cannot connect, allow inbound TCP $port in Windows Firewall."
-& $Bin --bind $Bind --max-fps $MaxFps
+Write-Host "Windows capture connecting to $Connect (WSL must listen)"
+& $Bin --connect $Connect --max-fps $MaxFps

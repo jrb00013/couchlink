@@ -1,8 +1,9 @@
-//! TCP client for `couchlink-win-capture` (Windows desktop → WSL host).
+//! TCP accept for `couchlink-win-capture` (Windows desktop → WSL host).
+//! WSL listens; Windows connects out (avoids Windows inbound firewall).
 
 use anyhow::{Context, Result};
 use couchlink_capture_bridge::read_frame_sync;
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 pub struct WindowsBridge {
@@ -14,9 +15,22 @@ pub struct WindowsBridge {
 }
 
 impl WindowsBridge {
-    pub fn connect(addr: &str) -> Result<Self> {
-        let stream = TcpStream::connect(addr)
-            .with_context(|| format!("connect Windows capture bridge at {addr} (is couchlink-win-capture running on Windows?)"))?;
+    /// Listen for the Windows capture client (default `0.0.0.0:9876`).
+    pub fn listen(bind: &str) -> Result<Self> {
+        let listener = TcpListener::bind(bind)
+            .with_context(|| format!("bind Windows capture listener on {bind}"))?;
+        tracing::info!(
+            "waiting for couchlink-win-capture to connect (Windows → {bind})…"
+        );
+        listener
+            .set_nonblocking(false)
+            .context("set blocking accept")?;
+        // Generous accept wait — ensure-win-capture may still be building the exe.
+        let _ = listener.set_nonblocking(false);
+        let (stream, peer) = listener
+            .accept()
+            .context("accept Windows capture client (is couchlink-win-capture running?)")?;
+        tracing::info!("Windows capture client connected from {peer}");
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.set_nodelay(true).ok();
         let mut bridge = Self {

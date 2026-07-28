@@ -1,4 +1,5 @@
-//! Windows DXGI capture server — streams primary display to couchlink-host in WSL.
+//! Windows DXGI capture client — streams primary display to couchlink-host in WSL.
+//! Connects outbound to WSL (localhost forwarding) so Windows Firewall inbound is not required.
 
 #[cfg(not(windows))]
 fn main() {
@@ -13,15 +14,16 @@ mod run {
     use couchlink_capture_bridge::write_frame_sync;
     use scrap::{Capturer, Display};
     use std::io::BufWriter;
-    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::net::TcpStream;
     use std::time::Duration;
     use tracing::info;
 
     #[derive(Parser, Debug)]
     #[command(name = "couchlink-win-capture")]
     pub struct Args {
-        #[arg(long, default_value = "0.0.0.0:9876")]
-        pub bind: String,
+        /// WSL host listener (Windows localhost forwards to WSL by default).
+        #[arg(long, default_value = "127.0.0.1:9876")]
+        pub connect: String,
         #[arg(long, default_value = "60")]
         pub max_fps: u32,
     }
@@ -53,7 +55,8 @@ mod run {
             match capturer.frame() {
                 Ok(raw) => {
                     let bgra = pack_frame(&raw, w, h);
-                    write_frame_sync(&mut writer, w as u32, h as u32, &bgra).context("send frame")?;
+                    write_frame_sync(&mut writer, w as u32, h as u32, &bgra)
+                        .context("send frame")?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e.into()),
@@ -73,15 +76,23 @@ mod run {
             )
             .init();
         let args = Args::parse();
-        let addr: SocketAddr = args.bind.parse().context("bind address")?;
-        let listener = TcpListener::bind(addr).context("bind")?;
-        info!("Windows capture listening on {addr} (CLFR). WSL: COUCHLINK_WINDOWS_CAPTURE=auto");
+        info!(
+            "Windows capture connecting to {} (WSL listener)",
+            args.connect
+        );
         loop {
-            let (stream, peer) = listener.accept().context("accept")?;
-            info!("client connected from {peer}");
-            if let Err(e) = stream_to(stream, args.max_fps) {
-                tracing::warn!("client session ended: {e:#}");
+            match TcpStream::connect(&args.connect) {
+                Ok(stream) => {
+                    info!("connected to {}", args.connect);
+                    if let Err(e) = stream_to(stream, args.max_fps) {
+                        tracing::warn!("session ended: {e:#} — reconnecting…");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("connect {}: {e} — retry", args.connect);
+                }
             }
+            std::thread::sleep(Duration::from_millis(750));
         }
     }
 }

@@ -15,12 +15,12 @@ pub enum FrameCapture {
 }
 
 impl FrameCapture {
-    /// `windows_capture`: None = local display; `"auto"` = WSL → Windows IP:9876; or `host:port`.
+    /// `windows_capture`: None = local display; `"auto"` / bind addr = listen for Windows client.
     pub fn open(windows_capture: Option<&str>) -> Result<Self> {
         if let Some(spec) = windows_capture.filter(|s| !s.is_empty() && *s != "0" && *s != "false") {
-            let addr = resolve_windows_addr(spec)?;
-            info_log(&format!("using Windows desktop capture at {addr}"));
-            return Ok(Self::Windows(WindowsBridge::connect(&addr)?));
+            let bind = resolve_listen_addr(spec)?;
+            info_log(&format!("Windows desktop capture listening on {bind}"));
+            return Ok(Self::Windows(WindowsBridge::listen(&bind)?));
         }
         Ok(Self::Local(ScrapCapture::primary()?))
     }
@@ -57,29 +57,45 @@ pub fn is_wsl() -> bool {
         .unwrap_or(false)
 }
 
-pub fn resolve_windows_addr(spec: &str) -> Result<String> {
+pub fn resolve_listen_addr(spec: &str) -> Result<String> {
     if spec.eq_ignore_ascii_case("auto") {
-        let ip = wsl_windows_host_ip().context(
-            "WSL auto: could not read Windows IP from /etc/resolv.conf — set COUCHLINK_WINDOWS_CAPTURE=host:9876",
-        )?;
-        return Ok(format!("{ip}:9876"));
+        return Ok("0.0.0.0:9876".into());
     }
     Ok(spec.to_string())
 }
 
+/// Best-effort Windows host IP as seen from WSL2 (NAT gateway, not mirrored DNS).
+#[allow(dead_code)]
 pub fn wsl_windows_host_ip() -> Result<String> {
     if !is_wsl() {
         bail!("not running under WSL");
+    }
+    // Prefer default route gateway (e.g. 172.18.208.1). Mirrored WSL often puts
+    // 10.255.255.254 in resolv.conf which is NOT the capture listener.
+    if let Ok(route) = std::fs::read_to_string("/proc/net/route") {
+        for line in route.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() >= 3 && cols[1] == "00000000" {
+                if let Ok(raw) = u32::from_str_radix(cols[2], 16) {
+                    let ip = std::net::Ipv4Addr::from(raw.to_le_bytes());
+                    if !ip.is_unspecified() {
+                        return Ok(ip.to_string());
+                    }
+                }
+            }
+        }
     }
     let conf = std::fs::read_to_string("/etc/resolv.conf").context("read resolv.conf")?;
     for line in conf.lines() {
         let line = line.trim();
         if let Some(ip) = line.strip_prefix("nameserver ") {
             let ip = ip.trim();
-            if !ip.is_empty() {
-                return Ok(ip.to_string());
+            // Skip WSL mirrored stub resolver.
+            if ip == "10.255.255.254" || ip.is_empty() {
+                continue;
             }
+            return Ok(ip.to_string());
         }
     }
-    bail!("no nameserver in /etc/resolv.conf")
+    bail!("could not determine Windows host IP — set COUCHLINK_WINDOWS_CAPTURE=host:9876")
 }

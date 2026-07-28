@@ -89,23 +89,8 @@ async fn main() -> Result<()> {
     .0;
     let mut attached_player_epoch: u64 = 0;
 
-    // Wait for the first player before opening the capture/encode loop.
-    loop {
-        let Some(msg) = signaling.inbound.recv().await else {
-            return Ok(());
-        };
-        match msg {
-            SignalMessage::PeerJoined { epoch, .. } => {
-                info!("player joined — sending offer (player epoch {epoch})");
-                attached_player_epoch = epoch;
-                host.create_and_send_offer(&signal_out).await?;
-                break;
-            }
-            SignalMessage::Error { message } => warn!("signal error: {message}"),
-            _ => {}
-        }
-    }
-
+    // Open capture before the first player so Windows win-capture can connect immediately.
+    // Blocking accept is fine here — we are still in startup, before the select loop.
     let windows_spec = effective_windows_capture(&args);
     let mut capturer = capture::FrameCapture::open(windows_spec.as_deref())?;
     info!(
@@ -124,8 +109,25 @@ async fn main() -> Result<()> {
     let idle_dur = Duration::from_millis(1000 / args.idle_fps.max(1) as u64);
     let mut frames_out: u64 = 0;
     let mut force_idr = true;
-
     let mut capture_ok_announced: Option<bool> = None;
+
+    // Wait for the first player before offering WebRTC.
+    loop {
+        let Some(msg) = signaling.inbound.recv().await else {
+            return Ok(());
+        };
+        match msg {
+            SignalMessage::PeerJoined { epoch, .. } => {
+                info!("player joined — sending offer (player epoch {epoch})");
+                attached_player_epoch = epoch;
+                host.create_and_send_offer(&signal_out).await?;
+                break;
+            }
+            SignalMessage::Error { message } => warn!("signal error: {message}"),
+            _ => {}
+        }
+    }
+
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
