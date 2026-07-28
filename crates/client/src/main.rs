@@ -1,6 +1,7 @@
 mod decode;
 mod dualsense_reader;
 mod feedback_apply;
+mod keyboard_input;
 mod signaling_client;
 mod webrtc_player;
 
