@@ -4,8 +4,9 @@
 # native Windows doesn't have (roadmap: ViGEm path not yet implemented) — run
 # the host from WSL or Linux instead: wsl ./scripts/run.sh host
 #
-# Native Windows can run the friend/client role: it reads your local DualSense
-# and sends CLPD pad frames to a host running elsewhere.
+# Native Windows can run the friend/client role: it opens a window showing the
+# host's video and reads your local DualSense (or keyboard, if no DualSense is
+# connected) and sends CLPD pad frames to a host running elsewhere.
 
 param(
     [ValidateSet("client")]

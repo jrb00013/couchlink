@@ -36,6 +36,11 @@ couchlink-client \
   --pin 482193
 ```
 
+This opens a window with the video stream. If you don't have a DualSense
+plugged in, the keyboard works as a fallback input (WASD + arrows for
+movement, Space/Shift/Ctrl/E for face buttons, Q/R for bumpers, 1/2 for
+triggers, Enter/Tab for Options/Create).
+
 ## Bind in the emulator
 
 - **RPCS3**: Player 2 → DualSense Wireless Controller (the virtual BT one)

@@ -48,6 +48,10 @@ browser:
 .\scripts\run.ps1 client       # native Windows (PowerShell)
 ```
 
+The client opens a window showing the host's stream. Plug in a DualSense, or
+just use the keyboard (WASD + arrows + Space/Shift/Ctrl/E/Q/R/1/2/Enter/Tab —
+see `crates/client/src/keyboard_input.rs` for the full mapping).
+
 Host role needs Linux `uinput` for the virtual DualSense — run it from Linux
 or WSL; macOS/native Windows can only run the friend/client role.
 
