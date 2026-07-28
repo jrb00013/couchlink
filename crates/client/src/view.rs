@@ -9,7 +9,7 @@ use std::sync::{mpsc::Receiver, Arc, Mutex};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 struct Renderer {
@@ -317,7 +317,9 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
-                if state == ElementState::Pressed && logical_key == Key::Named(NamedKey::F11) {
+                if state == ElementState::Pressed
+                    && (logical_key == Key::Named(NamedKey::F11) || code == KeyCode::KeyF)
+                {
                     if let Some(w) = &self.window {
                         let fullscreen = w.fullscreen().is_some();
                         w.set_fullscreen(if fullscreen {
