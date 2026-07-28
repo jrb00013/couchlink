@@ -3,6 +3,7 @@
 
 pub mod absinfo;
 pub mod dualsense;
+pub mod feedback;
 pub mod parse;
 pub mod virtual_pad;
 
