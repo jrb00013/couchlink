@@ -2,6 +2,7 @@ mod capture;
 mod config;
 mod encode;
 mod motion;
+mod scale;
 mod signaling_client;
 mod webrtc_peer;
 
