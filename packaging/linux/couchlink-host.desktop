@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Couchlink Host
+Comment=Host a couchlink co-play session
+Exec=/usr/bin/couchlink-run-host
+Icon=applications-games
+Terminal=true
+Categories=Game;Network;
+StartupNotify=true

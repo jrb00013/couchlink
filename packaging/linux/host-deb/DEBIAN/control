@@ -1,0 +1,11 @@
+Package: couchlink-host
+Version: 0.1.1
+Section: games
+Priority: optional
+Architecture: amd64
+Maintainer: couchlink <https://github.com/jrb00013/couchlink>
+Depends: libx11-6, libxcb1, udev, policykit-1
+Recommends: coturn, zenity
+Description: Couchlink host (screen share + virtual DualSense for emulators)
+ Installs once with admin password: udev rule for /dev/uinput and desktop
+ launchers. After log-out/in, double-click Couchlink Host — no terminal.

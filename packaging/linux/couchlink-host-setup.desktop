@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Couchlink Host Setup
+Comment=One-time permission setup for virtual DualSense (password once)
+Exec=pkexec env SUDO_USER=%u DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY /usr/bin/couchlink-uinput-helper install-rules
+Icon=preferences-system
+Terminal=true
+Categories=System;Settings;
+StartupNotify=true

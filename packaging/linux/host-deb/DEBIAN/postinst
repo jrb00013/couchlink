@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+HELPER=/usr/bin/couchlink-uinput-helper
+if [ -x "$HELPER" ]; then
+  "$HELPER" install-rules || true
+fi
+# Add the user who invoked the package manager when possible
+if [ -n "${SUDO_USER:-}" ] && getent group input >/dev/null; then
+  usermod -aG input "$SUDO_USER" || true
+  echo "couchlink-host: added $SUDO_USER to group input — log out and back in once."
+fi
+exit 0
