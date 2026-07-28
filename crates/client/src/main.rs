@@ -9,9 +9,11 @@ mod webrtc_player;
 use anyhow::Result;
 use clap::Parser;
 use couchlink_proto::SignalMessage;
+use keyboard_input::KeyboardPad;
+use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use tracing::{info, warn};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "couchlink-client", about = "Join a couchlink co-play session", version)]
 struct Args {
     #[arg(long, env = "COUCHLINK_SIGNALING", default_value = "ws://127.0.0.1:8443/ws")]
@@ -29,26 +31,99 @@ struct Args {
     turn_user: Option<String>,
     #[arg(long, env = "COUCHLINK_TURN_PASS")]
     turn_pass: Option<String>,
+    /// Skip the video window entirely — pad-only, for automation/testing, or
+    /// the automatic fallback when window/GPU creation fails.
+    #[arg(long, default_value_t = false)]
+    headless: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    if args.headless {
+        run_headless(args)
+    } else {
+        run_windowed(args)
+    }
+}
+
+/// Today's exact pad-only behavior, unchanged, just renamed and made callable
+/// as a fallback from `run_windowed`. Owns its own Tokio runtime.
+fn run_headless(args: Args) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "couchlink_client=info".into()),
         )
-        .init();
+        .try_init()
+        .ok();
 
-    let args = Args::parse();
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async_main(args, None, None))
+}
+
+/// Opens the video window on this (main) thread; networking + decode + pad
+/// polling run on a background thread with its own Tokio runtime. Falls back
+/// to `run_headless` if window/GPU creation fails.
+fn run_windowed(args: Args) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "couchlink_client=info".into()),
+        )
+        .try_init()
+        .ok();
+
+    let (frame_tx, frame_rx) = std_mpsc::channel::<decode::DecodedFrame>();
+    let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
+    let keyboard_pad = Arc::new(Mutex::new(KeyboardPad::new()));
+
+    let net_args = args.clone();
+    let net_keyboard_pad = keyboard_pad.clone();
+    let net_thread = std::thread::Builder::new()
+        .name("couchlink-net".into())
+        .spawn(move || -> Result<()> {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async_main(
+                net_args,
+                Some(frame_tx),
+                Some((net_keyboard_pad, shutdown_rx)),
+            ))
+        })
+        .expect("spawn network thread");
+
+    match view::run(frame_rx, keyboard_pad, shutdown_tx) {
+        Ok(()) => {}
+        Err(e) => {
+            warn!("windowed viewer failed ({e}), falling back to headless mode");
+            // The network thread is mid-run against a now-abandoned frame_tx;
+            // stop it and start clean in headless mode instead.
+            drop(net_thread);
+            return run_headless(args);
+        }
+    }
+
+    let _ = net_thread.join();
+    Ok(())
+}
+
+/// Shared networking core for both modes. In windowed mode, `video_frame_out`
+/// forwards decoded frames to the window thread and `keyboard` supplies the
+/// keyboard-derived pad state plus a shutdown signal from the window.
+async fn async_main(
+    args: Args,
+    video_frame_out: Option<std_mpsc::Sender<decode::DecodedFrame>>,
+    keyboard: Option<(Arc<Mutex<KeyboardPad>>, std_mpsc::Receiver<()>)>,
+) -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut signaling = signaling_client::SignalingClient::connect(&args.signaling).await?;
     signaling
         .register_player(args.session_id.clone(), args.pin.clone())
         .await?;
 
     let signal_out = signaling.outbound.clone();
-    let (player, mut _video_frames) = webrtc_player::WebRtcPlayer::new(
+    let (player, mut video_frames) = webrtc_player::WebRtcPlayer::new(
         signal_out.clone(),
         args.turn_url.clone(),
         args.turn_user.clone(),
@@ -56,15 +131,27 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let mut reader = if args.send_pad {
-        Some(dualsense_reader::DualSenseReader::open_first()?)
+    let mut dualsense = if args.send_pad {
+        dualsense_reader::DualSenseReader::open_first().ok()
     } else {
         None
     };
+    if dualsense.is_none() && args.send_pad {
+        info!("no DualSense found — keyboard input is still available in windowed mode");
+    }
 
     let mut pad_interval = tokio::time::interval(std::time::Duration::from_millis(4)); // ~250 Hz
+    let mut seq: u32 = 0;
 
     loop {
+        // Non-blocking check for the window's shutdown signal (windowed mode only).
+        if let Some((_, shutdown_rx)) = &keyboard {
+            if shutdown_rx.try_recv().is_ok() {
+                info!("window closed, shutting down network thread");
+                break;
+            }
+        }
+
         tokio::select! {
             msg = signaling.inbound.recv() => {
                 match msg {
@@ -83,12 +170,27 @@ async fn main() -> Result<()> {
                     _ => {}
                 }
             }
+            frame = video_frames.recv() => {
+                if let (Some(frame), Some(out)) = (frame, &video_frame_out) {
+                    let _ = out.send(frame);
+                }
+            }
             _ = pad_interval.tick() => {
-                if let Some(r) = reader.as_mut() {
-                    if let Some(frame) = r.read_frame()? {
-                        if let Err(e) = player.send_pad(&frame).await {
-                            warn!("send pad: {e}");
-                        }
+                seq = seq.wrapping_add(1);
+                // DualSense takes priority for this tick when it produces a frame;
+                // otherwise fall back to whatever the keyboard reports (which is
+                // "neutral" if no keys are held, so this is always safe to send).
+                let ds_frame = match dualsense.as_mut() {
+                    Some(r) => r.read_frame().ok().flatten(),
+                    None => None,
+                };
+                let frame = match ds_frame {
+                    Some(f) => Some(f),
+                    None => keyboard.as_ref().map(|(kp, _)| kp.lock().unwrap().to_pad_frame(seq)),
+                };
+                if let Some(frame) = frame {
+                    if let Err(e) = player.send_pad(&frame).await {
+                        warn!("send pad: {e}");
                     }
                 }
             }
