@@ -302,6 +302,29 @@ export class CouchlinkPlayer {
 
     pc.ontrack = (ev) => {
       const track = ev.track;
+      // Chrome buffers received video before playing it — typically 100-200ms of
+      // pure added input lag that no host-side measurement can see. For a co-play
+      // stream, being a frame behind beats being smooth and late, so ask for the
+      // shallowest buffer the browser will give us. Both properties are
+      // Chromium-only and versioned, hence the guarded assignment.
+      const receiver = ev.receiver as RTCRtpReceiver & {
+        jitterBufferTarget?: number | null;
+        playoutDelayHint?: number | null;
+      };
+      if (receiver) {
+        try {
+          // Newer, standards-track name (Chrome 114+).
+          receiver.jitterBufferTarget = 0;
+          // Legacy name, still honoured by older Chromium.
+          receiver.playoutDelayHint = 0;
+          clog("requested minimum jitter buffer", {
+            jitterBufferTarget: receiver.jitterBufferTarget,
+            playoutDelayHint: receiver.playoutDelayHint,
+          });
+        } catch (e) {
+          cwarn("could not lower jitter buffer", String(e));
+        }
+      }
       clog("ontrack", {
         kind: track.kind,
         id: track.id,

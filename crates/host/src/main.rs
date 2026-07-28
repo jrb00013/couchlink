@@ -112,6 +112,7 @@ async fn main() -> Result<()> {
     // Motion is measured on the raw capture, whose size is not the preset size.
     let mut motion_dims: (usize, usize) = (0, 0);
     let mut last_encode = std::time::Instant::now();
+    let mut last_push = std::time::Instant::now();
     let frame_dur = Duration::from_millis(1000 / preset.fps.max(1) as u64);
     let idle_dur = Duration::from_millis(1000 / args.idle_fps.max(1) as u64);
     let mut frames_out: u64 = 0;
@@ -299,7 +300,17 @@ async fn main() -> Result<()> {
                 let ms_encode = t_encode.elapsed();
                 let t_push = std::time::Instant::now();
                 if let Some(nal) = nal {
-                    if let Err(e) = host.push_h264(nal, frame_dur).await {
+                    // Sample duration must be the REAL gap since the last frame, not the
+                    // preset's ideal frame time. Frames arrive whenever Windows renders
+                    // one, so claiming a constant 16ms makes RTP media time advance far
+                    // slower than wall clock: the receiver falls progressively behind and
+                    // grows its jitter buffer to compensate. That is latency that
+                    // accumulates the longer you stream.
+                    let real_gap = last_push
+                        .elapsed()
+                        .clamp(Duration::from_millis(1), Duration::from_millis(500));
+                    last_push = std::time::Instant::now();
+                    if let Err(e) = host.push_h264(nal, real_gap).await {
                         warn!("push h264: {e}");
                     } else {
                         frames_out += 1;
