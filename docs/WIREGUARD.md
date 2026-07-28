@@ -1,8 +1,10 @@
-# WireGuard path (recommended)
+# WireGuard path (optional)
 
-Same posture as Rohomieo: keep WebRTC on a private mesh. Signaling can listen on the
-WireGuard IP; media uses host candidates on that interface. **No public STUN/TURN**
-required when both peers are on the VPN.
+By default couchlink now uses public STUN for automatic NAT traversal — friends
+connect over the open internet with zero manual setup (no key exchange, no VPN).
+This section is only for people who want to keep media on a private mesh instead,
+e.g. to avoid a STUN server ever seeing your ICE candidates. Signaling can listen on
+the WireGuard IP; media uses host candidates on that interface.
 
 ## Minimal two-peer config
 

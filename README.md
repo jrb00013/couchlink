@@ -13,7 +13,7 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Session / PIN / ICE | Rohomieo-style WebSocket signaling |
 | Video | WebRTC + OpenH264, presets up to **1080p60**, scaled capture |
 | Congestion / idle | WebRTC GCC + tile motion detector |
-| Path | **WireGuard** recommended (or LAN); no public STUN/TURN by default |
+| Path | **Automatic** — public STUN plus your own local TURN relay (`scripts/start-turn.sh`) for NAT traversal, no VPN/setup needed on the friend's end; WireGuard optional for private LAN-style posture |
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
 | Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |
 | Host injection | Linux `uinput` DualSense identity, bus = Bluetooth |
@@ -34,18 +34,22 @@ source .env.couchlink
 # terminal 1 — signaling + player web UI
 ./scripts/start-signaling.sh
 
-# terminal 2 — your PC (emulator host)
-./scripts/gen_session.sh   # paste into .env.couchlink
-./scripts/start-host.sh    # prints join URL + QR
+# terminal 2 — local TURN relay (only needed once STUN alone can't reach your friend,
+# e.g. CGNAT/mobile carrier — safe to always leave running)
+./scripts/start-turn.sh
 
-# friend — open the printed URL (or http://YOUR_WG_IP:8443)
+# terminal 3 — your PC (emulator host)
+./scripts/gen_session.sh   # paste into .env.couchlink
+./scripts/start-host.sh    # prints join URL + QR (TURN creds baked in automatically)
+
+# friend — open the printed URL (works from anywhere, no VPN setup)
 # press a button on DualSense, then Join
 ```
 
 Native client alternative (hidraw pad sender):
 
 ```bash
-COUCHLINK_SIGNALING=ws://YOUR_WG_IP:8443/ws ./scripts/start-client.sh
+COUCHLINK_SIGNALING=ws://YOUR_PUBLIC_HOST:8443/ws ./scripts/start-client.sh
 ```
 
 Bind Player 2 in RPCS3/PCSX2 to **DualSense Wireless Controller**.

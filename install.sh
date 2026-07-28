@@ -15,7 +15,7 @@ if [[ "$(uname -s)" == Linux ]]; then
   if command -v apt-get >/dev/null; then
     sudo apt-get update -qq
     sudo apt-get install -y -qq build-essential pkg-config libx11-dev libxcb1-dev \
-      libxcb-shm0-dev libxcb-randr0-dev libhidapi-hidraw-dev libudev-dev udev || true
+      libxcb-shm0-dev libxcb-randr0-dev libhidapi-hidraw-dev libudev-dev udev coturn || true
   fi
   # uinput access
   sudo tee /etc/udev/rules.d/99-couchlink-uinput.rules >/dev/null <<'RULE'
@@ -38,6 +38,13 @@ install -Dm755 target/release/couchlink-client "$HOME/.local/bin/couchlink-clien
 if command -v npm >/dev/null; then
   echo "==> building player UI"
   (cd web && npm install && npm run build)
+fi
+
+if command -v poetry >/dev/null; then
+  echo "==> installing python helpers (poetry)"
+  (cd python && poetry install)
+else
+  echo "poetry not found — skipping python helpers (https://python-poetry.org/docs/#installation)"
 fi
 
 if [[ ! -f .env.couchlink ]]; then

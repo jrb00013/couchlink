@@ -40,11 +40,16 @@ async fn main() -> Result<()> {
         .replacen("wss://", "https://", 1)
         .trim_end_matches("/ws")
         .to_string();
+    let turn = match (&args.turn_url, &args.turn_user, &args.turn_pass) {
+        (Some(url), Some(user), Some(pass)) => Some(invite::TurnInfo { url, user, pass }),
+        _ => None,
+    };
     let join = invite::player_invite_url(
         &public_http,
         &args.session_id,
         &args.pin,
         &args.signaling,
+        turn,
     );
     info!("friend join URL: {join}");
     if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
@@ -68,9 +73,15 @@ async fn main() -> Result<()> {
         .await?;
 
     let signal_out = signaling.outbound.clone();
-    let (host, mut _pad_rx) =
-        webrtc_peer::WebRtcHost::new(signal_out.clone(), Arc::clone(&pad), args.bluetooth_pad)
-            .await?;
+    let (host, mut _pad_rx) = webrtc_peer::WebRtcHost::new(
+        signal_out.clone(),
+        Arc::clone(&pad),
+        args.bluetooth_pad,
+        args.turn_url.clone(),
+        args.turn_user.clone(),
+        args.turn_pass.clone(),
+    )
+    .await?;
 
     loop {
         let Some(msg) = signaling.inbound.recv().await else {

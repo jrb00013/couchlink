@@ -1,13 +1,13 @@
-[project]
+[tool.poetry]
 name = "couchlink"
 version = "0.1.0"
 description = "Couchlink DualSense helpers"
-requires-python = ">=3.10"
-dependencies = ["hidapi>=0.14"]
+packages = [{ include = "couchlink" }]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+hidapi = "^0.14"
 
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-include = ["couchlink*"]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

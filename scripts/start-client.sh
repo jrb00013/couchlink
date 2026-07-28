@@ -5,7 +5,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
 : "${COUCHLINK_SESSION_ID:?set COUCHLINK_SESSION_ID}"
 : "${COUCHLINK_PIN:?set COUCHLINK_PIN}"
-exec couchlink-client \
-  --signaling "${COUCHLINK_SIGNALING:-ws://127.0.0.1:8443/ws}" \
-  --session-id "$COUCHLINK_SESSION_ID" \
+ARGS=(
+  --signaling "${COUCHLINK_SIGNALING:-ws://127.0.0.1:8443/ws}"
+  --session-id "$COUCHLINK_SESSION_ID"
   --pin "$COUCHLINK_PIN"
+)
+[[ -n "${COUCHLINK_TURN_URL:-}" ]] && ARGS+=(--turn-url "$COUCHLINK_TURN_URL")
+[[ -n "${COUCHLINK_TURN_USER:-}" ]] && ARGS+=(--turn-user "$COUCHLINK_TURN_USER")
+[[ -n "${COUCHLINK_TURN_PASS:-}" ]] && ARGS+=(--turn-pass "$COUCHLINK_TURN_PASS")
+exec couchlink-client "${ARGS[@]}"

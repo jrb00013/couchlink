@@ -34,6 +34,9 @@ impl WebRtcHost {
         signal_out: mpsc::UnboundedSender<SignalMessage>,
         pad_device: Arc<Mutex<VirtualPad>>,
         as_bluetooth: bool,
+        turn_url: Option<String>,
+        turn_user: Option<String>,
+        turn_pass: Option<String>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<PadFrame>)> {
         let _ = as_bluetooth;
         let mut m = MediaEngine::default();
@@ -45,12 +48,25 @@ impl WebRtcHost {
             .with_interceptor_registry(registry)
             .build();
 
-        // Empty ICE servers → LAN / WireGuard only (Rohomieo security posture).
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec![],
+        // Public STUN for NAT discovery, plus our own TURN relay (scripts/start-turn.sh)
+        // for symmetric-NAT/CGNAT peers STUN alone can't punch through.
+        let mut ice_servers = vec![RTCIceServer {
+            urls: vec![
+                "stun:stun.l.google.com:19302".to_owned(),
+                "stun:stun1.l.google.com:19302".to_owned(),
+            ],
+            ..Default::default()
+        }];
+        if let (Some(url), Some(user), Some(pass)) = (turn_url, turn_user, turn_pass) {
+            ice_servers.push(RTCIceServer {
+                urls: vec![url],
+                username: user,
+                credential: pass,
                 ..Default::default()
-            }],
+            });
+        }
+        let config = RTCConfiguration {
+            ice_servers,
             ..Default::default()
         };
         let pc = Arc::new(api.new_peer_connection(config).await?);

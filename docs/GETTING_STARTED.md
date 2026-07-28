@@ -8,10 +8,8 @@ cd couchlink
 ./install.sh
 source .env.couchlink
 
-# optional but recommended for internet play
-# see docs/WIREGUARD.md
-
 couchlink-signaling &
+./scripts/start-turn.sh &   # local TURN relay — makes internet play automatic, no VPN
 couchlink-host \
   --session-id friends-night \
   --pin 482193 \

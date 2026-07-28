@@ -8,13 +8,19 @@ const DEFAULT_WS =
     : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
 function readInvite() {
-  if (typeof location === "undefined") return { sessionId: "", pin: "", auto: false };
+  if (typeof location === "undefined")
+    return { sessionId: "", pin: "", auto: false, signalingUrl: undefined, turn: null };
   const q = new URLSearchParams(location.search);
   const sessionId = (q.get("s") ?? q.get("session") ?? "").trim();
   const pin = (q.get("p") ?? q.get("pin") ?? "").trim();
   const auto = q.get("auto") === "1" || (!!sessionId && !!pin && q.get("auto") !== "0");
   const ws = q.get("ws") ?? q.get("signaling") ?? undefined;
-  return { sessionId, pin, auto, signalingUrl: ws };
+  const turnUrl = q.get("turn");
+  const turnUser = q.get("turnu");
+  const turnPass = q.get("turnp");
+  const turn =
+    turnUrl && turnUser && turnPass ? { url: turnUrl, user: turnUser, pass: turnPass } : null;
+  return { sessionId, pin, auto, signalingUrl: ws, turn };
 }
 
 export default function App() {
@@ -61,6 +67,7 @@ export default function App() {
     if (!invite.auto || autoStarted.current) return;
     if (!invite.sessionId || !invite.pin) return;
     autoStarted.current = true;
+    playerRef.current?.setTurn(invite.turn);
     playerRef.current?.connect(signalingUrl, invite.sessionId, invite.pin);
   }, [invite.auto, invite.sessionId, invite.pin, signalingUrl]);
 
@@ -108,9 +115,10 @@ export default function App() {
             <button
               type="button"
               className="primary"
-              onClick={() =>
-                playerRef.current?.connect(signalingUrl, sessionId, pin)
-              }
+              onClick={() => {
+                playerRef.current?.setTurn(invite.turn);
+                playerRef.current?.connect(signalingUrl, sessionId, pin);
+              }}
             >
               Join session
             </button>

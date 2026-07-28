@@ -1,0 +1,16 @@
+# coturn config for a self-hosted TURN relay (couchlink).
+# Copy to /etc/turnserver.conf (or pass --turnserver-conf) and fill in the values
+# scripts/start-turn.sh generates for you — see COUCHLINK_TURN_* in .env.couchlink.
+
+listening-port=3478
+fingerprint
+lt-cred-mech
+realm=couchlink
+user=COUCHLINK_TURN_USER:COUCHLINK_TURN_PASS
+
+# Only relay UDP/TCP media, no verbose logging of pad/video contents.
+no-tlsv1
+no-tlsv1_1
+no-cli
+no-loopback-peers
+no-multicast-peers

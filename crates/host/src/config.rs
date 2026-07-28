@@ -21,6 +21,13 @@ pub struct HostArgs {
     pub idle_fps: u32,
     #[arg(long, default_value_t = true)]
     pub bluetooth_pad: bool,
+    /// Local coturn relay, e.g. turn:1.2.3.4:3478 (see scripts/start-turn.sh)
+    #[arg(long, env = "COUCHLINK_TURN_URL")]
+    pub turn_url: Option<String>,
+    #[arg(long, env = "COUCHLINK_TURN_USER")]
+    pub turn_user: Option<String>,
+    #[arg(long, env = "COUCHLINK_TURN_PASS")]
+    pub turn_pass: Option<String>,
 }
 
 impl HostArgs {

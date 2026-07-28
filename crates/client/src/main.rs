@@ -20,6 +20,12 @@ struct Args {
     /// Poll DualSense and send pad frames even without video decode UI.
     #[arg(long, default_value_t = true)]
     send_pad: bool,
+    #[arg(long, env = "COUCHLINK_TURN_URL")]
+    turn_url: Option<String>,
+    #[arg(long, env = "COUCHLINK_TURN_USER")]
+    turn_user: Option<String>,
+    #[arg(long, env = "COUCHLINK_TURN_PASS")]
+    turn_pass: Option<String>,
 }
 
 #[tokio::main]
@@ -39,7 +45,13 @@ async fn main() -> Result<()> {
         .await?;
 
     let signal_out = signaling.outbound.clone();
-    let player = webrtc_player::WebRtcPlayer::new(signal_out.clone()).await?;
+    let player = webrtc_player::WebRtcPlayer::new(
+        signal_out.clone(),
+        args.turn_url.clone(),
+        args.turn_user.clone(),
+        args.turn_pass.clone(),
+    )
+    .await?;
 
     let mut reader = if args.send_pad {
         Some(dualsense_reader::DualSenseReader::open_first()?)

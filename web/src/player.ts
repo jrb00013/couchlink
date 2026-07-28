@@ -39,8 +39,13 @@ export class CouchlinkPlayer {
   private padSent = 0;
   private padWindowStart = 0;
   private padName = "none";
+  private turn: { url: string; user: string; pass: string } | null = null;
 
   constructor(private cb: PlayerCallbacks) {}
+
+  setTurn(turn: { url: string; user: string; pass: string } | null) {
+    this.turn = turn;
+  }
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
     this.cleanup();
@@ -149,8 +154,20 @@ export class CouchlinkPlayer {
 
   private async ensurePeer(): Promise<RTCPeerConnection> {
     if (this.pc) return this.pc;
-    // Empty ICE servers — WireGuard / LAN only (Rohomieo posture).
-    const pc = new RTCPeerConnection({ iceServers: [] });
+    // Public STUN for NAT discovery, plus the host's own TURN relay (if given via
+    // the invite link) for symmetric-NAT/CGNAT peers STUN alone can't punch through.
+    const iceServers: RTCIceServer[] = [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+    ];
+    if (this.turn) {
+      iceServers.push({
+        urls: this.turn.url,
+        username: this.turn.user,
+        credential: this.turn.pass,
+      });
+    }
+    const pc = new RTCPeerConnection({ iceServers });
     this.pc = pc;
 
     pc.ontrack = (ev) => {
