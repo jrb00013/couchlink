@@ -1,4 +1,5 @@
 mod dualsense_reader;
+mod feedback_apply;
 mod signaling_client;
 mod webrtc_player;
 
