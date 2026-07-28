@@ -30,3 +30,18 @@ impl FrameCapture {
         }
     }
 }
+
+/// Sample average luma from BGRA (0–255). Used once to detect empty/black capture.
+pub fn sample_avg_luma_bgra(bgra: &[u8], max_pixels: usize) -> u64 {
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    for p in bgra.chunks_exact(4).take(max_pixels) {
+        sum += (p[0] as u64 + p[1] as u64 + p[2] as u64) / 3;
+        n += 1;
+    }
+    if n == 0 {
+        0
+    } else {
+        sum / n
+    }
+}

@@ -44,6 +44,8 @@ export class CouchlinkPlayer {
   private padName = "none";
   private turn: { url: string; user: string; pass: string } | null = null;
   private gotVideoTrack = false;
+  private lastOfferEpoch = 0;
+  private mediaHealthy = false;
 
   constructor(private cb: PlayerCallbacks) {}
 
@@ -53,6 +55,8 @@ export class CouchlinkPlayer {
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
     clog("connect()", { signalingUrl, sessionId, pinLen: pin.length });
+    this.lastOfferEpoch = 0;
+    this.mediaHealthy = false;
     this.cleanup();
     this.sessionRetries = 0;
     const url = signalingUrl.trim();
@@ -171,16 +175,21 @@ export class CouchlinkPlayer {
     this.padDc = null;
     this.pc = null;
     this.gotVideoTrack = false;
+    this.mediaHealthy = false;
   }
 
   private scheduleMediaRecover(reason: string) {
     if (this.mediaRecoverTimer || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (this.mediaHealthy) {
+      clog("ICE blip while video healthy — waiting before recover", reason);
+    }
     cwarn("scheduling media recover", reason);
     this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     this.mediaRecoverTimer = window.setTimeout(() => {
       this.mediaRecoverTimer = null;
+      this.mediaHealthy = false;
       this.resetPeer();
       if (this.ws?.readyState === WebSocket.OPEN) {
         clog("signal → request_offer (media recover)");
@@ -188,6 +197,51 @@ export class CouchlinkPlayer {
         this.cb.onState("waiting_host", "Recovering media…");
       }
     }, MEDIA_RECOVER_DELAY_MS);
+  }
+
+  private async applyRemoteOffer(sdp: string, epoch: number) {
+    const pc0 = this.pc;
+    const healthy =
+      !!pc0 &&
+      this.gotVideoTrack &&
+      this.mediaHealthy &&
+      pc0.connectionState === "connected" &&
+      pc0.signalingState === "stable";
+
+    if (healthy && epoch > 0 && epoch <= this.lastOfferEpoch) {
+      clog("ignore stale offer", { epoch, last: this.lastOfferEpoch });
+      return;
+    }
+
+    // Host rebuilt peer (new player WS) or cold join → new RTCPeerConnection.
+    const hostRebuilt = epoch > this.lastOfferEpoch + 1;
+    const needNewPc =
+      !pc0 ||
+      hostRebuilt ||
+      pc0.connectionState === "failed" ||
+      pc0.connectionState === "closed";
+
+    if (pc0 && needNewPc) {
+      clog("offer — new RTCPeerConnection", { epoch, hostRebuilt, state: pc0.connectionState });
+      this.resetPeer();
+    } else if (pc0 && healthy) {
+      clog("offer — renegotiate in place", { epoch });
+    }
+
+    this.cb.onState("negotiating");
+    const pc = await this.ensurePeer();
+    await pc.setRemoteDescription({ type: "offer", sdp });
+    clog("setRemoteDescription(offer) ok", pc.signalingState);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    clog("setLocalDescription(answer) ok", pc.signalingState);
+    if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp! });
+    clog("signal → answer", `(sdp ${answer.sdp?.length ?? 0} chars)`);
+    if (epoch > 0) {
+      this.lastOfferEpoch = epoch;
+    } else {
+      this.lastOfferEpoch += 1;
+    }
   }
 
   private startHeartbeat(ws: WebSocket) {
@@ -221,6 +275,7 @@ export class CouchlinkPlayer {
         cwarn("WebRTC connection failed — check ICE / firewall / WSL IP in signaling URL");
         this.scheduleMediaRecover("connection failed");
       } else if (pc.connectionState === "connected") {
+        this.mediaHealthy = this.gotVideoTrack;
         if (this.mediaRecoverTimer) {
           clearTimeout(this.mediaRecoverTimer);
           this.mediaRecoverTimer = null;
@@ -255,7 +310,6 @@ export class CouchlinkPlayer {
       track.onmute = () => cwarn("track muted", track.kind, track.id);
       track.onunmute = () => {
         clog("track unmuted", track.kind, track.id);
-        if (track.kind === "video") this.cb.onVideo(stream);
       };
       track.onended = () => clog("track ended", track.kind, track.id);
       const stream =
@@ -371,20 +425,9 @@ export class CouchlinkPlayer {
         break;
       }
       case "offer": {
-        this.cb.onState("negotiating");
         try {
-          if (this.pc) {
-            clog("new offer — resetting RTCPeerConnection");
-            this.resetPeer();
-          }
-          const pc = await this.ensurePeer();
-          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-          clog("setRemoteDescription(offer) ok", pc.signalingState);
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          clog("setLocalDescription(answer) ok", pc.signalingState);
-          if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp! });
-          clog("signal → answer", `(sdp ${answer.sdp?.length ?? 0} chars)`);
+          const epoch = msg.epoch ?? 0;
+          await this.applyRemoteOffer(msg.sdp, epoch);
         } catch (e) {
           cerror("offer handling failed", e);
           this.cb.onState("error", `WebRTC offer failed: ${e}`);

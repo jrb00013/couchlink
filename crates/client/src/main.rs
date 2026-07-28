@@ -235,7 +235,7 @@ async fn async_main(
         tokio::select! {
             msg = signaling.inbound.recv() => {
                 match msg {
-                    Some(SignalMessage::Offer { sdp }) => {
+                    Some(SignalMessage::Offer { sdp, epoch: _ }) => {
                         info!("got offer");
                         player.handle_offer(sdp, &signal_out).await?;
                     }

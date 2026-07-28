@@ -90,7 +90,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 player_name: _,
             } => {
                 match store.register_player(sid.clone(), pin, tx.clone()) {
-                    Ok(first_player) => {
+                    Ok((first_player, player_epoch)) => {
                         session_id = Some(sid.clone());
                         role = Some(Role::Player);
                         let _ = tx.send(
@@ -106,13 +106,14 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                                 let _ = host_tx.send(
                                     SignalMessage::PeerJoined {
                                         role: Role::Player,
+                                        epoch: player_epoch,
                                     }
                                     .to_json()
                                     .unwrap(),
                                 );
                             }
                         }
-                        debug!("player registered (first={first_player})");
+                        debug!("player registered (first={first_player}, epoch={player_epoch})");
                     }
                     Err(e) => {
                         let _ = tx.send(

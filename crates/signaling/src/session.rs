@@ -23,6 +23,7 @@ pub struct Session {
     pub emulator: Option<String>,
     pub host: PeerSlot,
     pub player: PeerSlot,
+    pub player_epoch: u64,
     pub pin_failures: u32,
     pub locked_until: Option<DateTime<Utc>>,
     pub last_activity: DateTime<Utc>,
@@ -119,6 +120,7 @@ impl SessionStore {
                 emulator: emulator.clone(),
                 host: PeerSlot { tx: None },
                 player: PeerSlot { tx: None },
+                player_epoch: 0,
                 pin_failures: 0,
                 locked_until: None,
                 last_activity: Utc::now(),
@@ -146,7 +148,7 @@ impl SessionStore {
         session_id: String,
         pin: String,
         tx: WsSender,
-    ) -> Result<bool, String> {
+    ) -> Result<(bool, u64), String> {
         let Some(mut entry) = self.sessions.get_mut(&session_id) else {
             return Err("unknown session".into());
         };
@@ -157,6 +159,9 @@ impl SessionStore {
             return Err("invalid PIN for session".into());
         }
         let first_player = entry.player.tx.is_none();
+        if first_player {
+            entry.player_epoch = entry.player_epoch.saturating_add(1);
+        }
         entry.player.tx = Some(tx);
         entry.last_activity = Utc::now();
         self.metrics
@@ -164,7 +169,7 @@ impl SessionStore {
             .fetch_add(1, Ordering::Relaxed);
         self.audit
             .record(&session_id, AuditEventKind::PlayerRegistered, None);
-        Ok(first_player)
+        Ok((first_player, entry.player_epoch))
     }
 
     pub fn peer_tx(&self, session_id: &str, role: Role) -> Option<WsSender> {

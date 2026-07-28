@@ -9,11 +9,12 @@ Rohomieo-style tagged JSON (`type` in snake_case). Media never transits this ser
 | `register_host` | host → server | `session_id`, `pin`, `device_name?`, `preset?`, `emulator?` |
 | `register_player` | player → server | `session_id`, `pin`, `player_name?` |
 | `registered` | server → client | `role`, `session_id` |
-| `offer` / `answer` | relayed | `sdp` |
+| `offer` / `answer` | relayed | `sdp`; `offer` includes monotonic `epoch` |
 | `ice_candidate` | relayed | `candidate`, `sdpMid?`, `sdpMLineIndex?` |
+| `request_offer` | player → host (relayed) | — (renegotiate; host does not rebuild peer) |
 | `stream_info` | host → player | `width`, `height`, `fps`, `codec` |
 | `heartbeat` / `pong` | either | — |
-| `peer_joined` / `peer_left` | server | `role` |
+| `peer_joined` / `peer_left` | server | `role`; `peer_joined` includes `epoch` |
 
 ## DataChannel `pad` — custom binary `CLPD`
 

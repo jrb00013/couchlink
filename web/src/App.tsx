@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CouchlinkPlayer, type ConnectionState } from "./player";
 import { clog, cerror, cwarn } from "./log";
+import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import "./App.css";
 
 const DEFAULT_WS =
@@ -62,7 +63,6 @@ export default function App() {
           .then(() => logVideo(`video.play ok (${why})`))
           .catch((e: unknown) => {
             const name = e && typeof e === "object" && "name" in e ? String((e as { name: string }).name) : "";
-            // Re-attach / unmute often aborts an in-flight play(); retry once.
             if (name === "AbortError") {
               clog("play aborted (reattach)", why);
               window.setTimeout(() => {
@@ -82,7 +82,6 @@ export default function App() {
       v.onstalled = () => cwarn("video stalled");
       v.onerror = () => cerror("video element error", v.error);
 
-      // Same MediaStream on unmute — don't reset srcObject (that aborts play()).
       if (v.srcObject === stream) {
         tryPlay("same-stream");
         return;
@@ -110,31 +109,34 @@ export default function App() {
     }
   });
 
+  const playerCallbacks = usePlayerCallbacks({
+    onState: (s, d) => {
+      clog("ui state", s, d ?? "");
+      setState(s);
+      if (d) setDetail(d);
+    },
+    onVideo: (stream) => attachStream(stream),
+    onStreamInfo: (info) => {
+      setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
+    },
+    onPadStats: (hz, name) => {
+      setPadMeta(`${hz} Hz · ${name}`);
+    },
+  });
+
   useEffect(() => {
-    clog("player mount", {
-      href: typeof location !== "undefined" ? location.href : "",
-      defaultWs: DEFAULT_WS,
-      invite,
-    });
-    const player = new CouchlinkPlayer({
-      onState: (s, d) => {
-        clog("ui state", s, d ?? "");
-        setState(s);
-        if (d) setDetail(d);
-      },
-      onVideo: (stream) => attachStream(stream),
-      onStreamInfo: (info) => {
-        setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
-      },
-      onPadStats: (hz, name) => {
-        setPadMeta(`${hz} Hz · ${name}`);
-      },
-    });
+    const player = new CouchlinkPlayer(playerCallbacks);
     playerRef.current = player;
-    return () => {
-      clog("player unmount → disconnect");
+    const onPageHide = () => {
+      clog("page hide → disconnect");
       player.disconnect();
     };
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+    };
+    // playerCallbacks identity is stable for the lifetime of the tab
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional singleton player
   }, []);
 
   useEffect(() => {
@@ -206,8 +208,7 @@ export default function App() {
           {detail && <p className="detail">{detail}</p>}
           <p className="hint">
             Plug in / pair your DualSense, then press any button so the browser
-            unlocks Gamepad API. On the host it appears as a Bluetooth DualSense
-            for PCSX2 / RPCS3. Open DevTools → Console and filter{" "}
+            unlocks Gamepad API. Open DevTools → Console and filter{" "}
             <code>couchlink</code> for connection logs (<code>?debug=0</code>{" "}
             to silence).
           </p>

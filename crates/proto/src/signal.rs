@@ -29,6 +29,9 @@ pub enum SignalMessage {
     },
     Offer {
         sdp: String,
+        /// Monotonic per host session; players ignore stale offers while connected.
+        #[serde(default)]
+        epoch: u64,
     },
     Answer {
         sdp: String,
@@ -46,6 +49,9 @@ pub enum SignalMessage {
     RequestOffer,
     PeerJoined {
         role: Role,
+        /// Incremented when a new player WebSocket replaces an empty slot.
+        #[serde(default)]
+        epoch: u64,
     },
     PeerLeft,
     /// Host announces stream ready (codec / resolution).

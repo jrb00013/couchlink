@@ -19,7 +19,7 @@ export type SignalMessage =
     }
   | { type: "registered"; role: Role; session_id: string }
   | { type: "error"; message: string }
-  | { type: "offer"; sdp: string }
+  | { type: "offer"; sdp: string; epoch?: number }
   | { type: "answer"; sdp: string }
   | {
       type: "ice_candidate";
@@ -30,7 +30,7 @@ export type SignalMessage =
   | { type: "heartbeat" }
   | { type: "pong" }
   | { type: "request_offer" }
-  | { type: "peer_joined"; role: Role }
+  | { type: "peer_joined"; role: Role; epoch?: number }
   | { type: "peer_left" }
   | {
       type: "stream_info";

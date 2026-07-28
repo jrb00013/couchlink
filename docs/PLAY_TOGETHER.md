@@ -1,6 +1,10 @@
 # Playing together (host + friend across the world)
 
-One host runs the game on **Linux or WSL**. One friend joins from **anywhere** with the browser or the **Couchlink Player** desktop app (Windows / Linux / macOS). Internet play uses **STUN + your host’s TURN relay** (started automatically with `./scripts/run.sh host`) and **UPnP** when your router supports it.
+One host runs the game. One friend joins from **anywhere** with the browser or the **Couchlink Player** desktop app (Windows / Linux / macOS).
+
+> **WSL vs Windows host:** `couchlink-host` captures the **machine it runs on**. Host in **WSL2** streams the **Linux/WSLg desktop** (often black if your game runs on Windows). For PCSX2/RPCS3 on Windows, run **signaling in WSL** (or anywhere) but run **`couchlink-host` on native Windows** with `--signaling ws://<wsl-ip>:8443/ws`.
+
+Internet play uses **STUN + your host’s TURN relay** (started automatically with `./scripts/run.sh host`) and **UPnP** when your router supports it.
 
 ---
 

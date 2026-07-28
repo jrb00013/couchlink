@@ -11,6 +11,7 @@ use anyhow::Result;
 use clap::Parser;
 use config::HostArgs;
 use couchlink_proto::SignalMessage;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -73,6 +74,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let signal_out = signaling.outbound.clone();
+    let offer_epoch = Arc::new(AtomicU64::new(0));
     let mut host = webrtc_peer::WebRtcHost::new(
         signal_out.clone(),
         Arc::clone(&pad),
@@ -81,9 +83,11 @@ async fn main() -> Result<()> {
         args.turn_user.clone(),
         args.turn_pass.clone(),
         args.ice_ips.clone(),
+        Arc::clone(&offer_epoch),
     )
     .await?
     .0;
+    let mut attached_player_epoch: u64 = 0;
 
     // Wait for the first player before opening the capture/encode loop.
     loop {
@@ -91,8 +95,9 @@ async fn main() -> Result<()> {
             return Ok(());
         };
         match msg {
-            SignalMessage::PeerJoined { .. } => {
-                info!("player joined — sending offer");
+            SignalMessage::PeerJoined { epoch, .. } => {
+                info!("player joined — sending offer (player epoch {epoch})");
+                attached_player_epoch = epoch;
                 host.create_and_send_offer(&signal_out).await?;
                 break;
             }
@@ -142,11 +147,13 @@ async fn main() -> Result<()> {
                             warn!("request_offer failed: {e}");
                         }
                     }
-                    Some(SignalMessage::PeerJoined { .. }) => {
-                        // Fresh browser peer = fresh RTCPeerConnection. Reusing the
-                        // old PC after a refresh/leave sends a renegotiation offer the
-                        // new player can't answer as an initial offer → join/leave loop.
-                        info!("player rejoined — rebuilding WebRTC peer + offer");
+                    Some(SignalMessage::PeerJoined { epoch, .. }) => {
+                        if epoch < attached_player_epoch {
+                            warn!("ignoring stale PeerJoined epoch={epoch} (attached={attached_player_epoch})");
+                            continue;
+                        }
+                        attached_player_epoch = epoch;
+                        info!("player rejoined (epoch {epoch}) — rebuilding WebRTC peer + offer");
                         let _ = host.pc.close().await;
                         host = webrtc_peer::WebRtcHost::new(
                             signal_out.clone(),
@@ -156,6 +163,7 @@ async fn main() -> Result<()> {
                             args.turn_user.clone(),
                             args.turn_pass.clone(),
                             args.ice_ips.clone(),
+                            Arc::clone(&offer_epoch),
                         )
                         .await?
                         .0;
@@ -195,6 +203,18 @@ async fn main() -> Result<()> {
                 let idle = motion.is_idle(&scaled);
                 if idle {
                     tokio::time::sleep(idle_dur.saturating_sub(frame_dur / 4)).await;
+                }
+                if frames_out == 0 {
+                    let avg = capture::sample_avg_luma_bgra(&scaled, 4096);
+                    if avg < 8 {
+                        warn!(
+                            "capture looks black/empty (avg luma ~{avg}/255). \
+                             A host in WSL captures the Linux desktop only — run couchlink-host on native Windows \
+                             to stream PCSX2/RPCS3 on your Windows display. See docs/PLAY_TOGETHER.md."
+                        );
+                    } else {
+                        info!("capture avg luma ~{avg}/255 (first frames)");
+                    }
                 }
                 // Periodic IDR so late joiners / stalled decoders can resync (~2s @ 30fps).
                 if force_idr || frames_out % 60 == 0 {

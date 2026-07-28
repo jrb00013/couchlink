@@ -2,7 +2,7 @@
 //! Method mirrors Rohomieo host encode (BGRA → I420 → Annex-B).
 
 use anyhow::Result;
-use openh264::encoder::{EncodedBitStream, Encoder, EncoderConfig, RateControlMode, UsageType};
+use openh264::encoder::{EncodedBitStream, Encoder, EncoderConfig, RateControlMode, SpsPpsStrategy, UsageType};
 use openh264::formats::YUVSource;
 use openh264::Error;
 use openh264::OpenH264API;
@@ -109,7 +109,9 @@ impl H264Encoder {
             .set_bitrate_bps(bps)
             .max_frame_rate(60.0)
             .usage_type(UsageType::ScreenContentRealTime)
-            .rate_control_mode(RateControlMode::Bitrate);
+            .rate_control_mode(RateControlMode::Bitrate)
+            .enable_skip_frame(false)
+            .sps_pps_strategy(SpsPpsStrategy::IncreasingId);
         let enc = Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e: Error| anyhow::anyhow!("{e}"))?;
         Ok(Self {

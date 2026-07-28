@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use bytes::BytesMut;
 use couchlink_pad::{VirtualPad, VirtualPadConfig};
 use couchlink_proto::{PadFeedback, PadFrame, SignalMessage, PAD_CHANNEL};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
@@ -29,6 +30,7 @@ pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
     pub video: Arc<TrackLocalStaticSample>,
     pub pad_tx: mpsc::UnboundedSender<PadFrame>,
+    offer_epoch: Arc<AtomicU64>,
 }
 
 impl WebRtcHost {
@@ -40,6 +42,7 @@ impl WebRtcHost {
         turn_user: Option<String>,
         turn_pass: Option<String>,
         ice_ips: Vec<String>,
+        offer_epoch: Arc<AtomicU64>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<PadFrame>)> {
         let _ = as_bluetooth;
         let mut m = MediaEngine::default();
@@ -137,6 +140,7 @@ impl WebRtcHost {
                 pc,
                 video,
                 pad_tx,
+                offer_epoch,
             },
             pad_rx,
         ))
@@ -153,7 +157,11 @@ impl WebRtcHost {
             .local_description()
             .await
             .context("local description")?;
-        signal_out.send(SignalMessage::Offer { sdp: local.sdp })?;
+        let epoch = self.offer_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        signal_out.send(SignalMessage::Offer {
+            sdp: local.sdp,
+            epoch,
+        })?;
         Ok(())
     }
 
