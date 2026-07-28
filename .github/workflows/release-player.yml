@@ -1,0 +1,97 @@
+# Couchlink Player — release builds (friend downloadables)
+#
+# Triggers:
+#   - Push tag v*  (e.g. v0.1.1)
+#   - Manual "Run workflow" on GitHub
+#
+# Artifacts (per platform):
+#   Windows: CouchlinkPlayer-Setup-*.exe  (Inno Setup wizard)
+#   macOS:   CouchlinkPlayer-mac.dmg
+#   Linux:   CouchlinkPlayer-x86_64.AppImage + .deb
+
+name: release-player
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build client
+        run: cargo build --release -p couchlink-client
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+      - name: Build installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows\couchlink-player.iss
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: CouchlinkPlayer-Windows-Setup
+          path: build/windows/CouchlinkPlayer-Setup-*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build DMG
+        run: |
+          chmod +x packaging/macos/build-dmg.sh packaging/macos/build-app-bundle.sh
+          ./packaging/macos/build-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CouchlinkPlayer-macOS
+          path: build/CouchlinkPlayer-mac.dmg
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev pkg-config libhidapi-dev
+      - name: AppImage
+        run: |
+          chmod +x packaging/linux/build-appimage.sh
+          ./packaging/linux/build-appimage.sh || true
+      - name: Install appimagetool
+        run: |
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run build/CouchlinkPlayer-x86_64.AppDir build/CouchlinkPlayer-x86_64.AppImage
+      - name: deb
+        run: |
+          chmod +x packaging/linux/build-deb.sh
+          ./packaging/linux/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CouchlinkPlayer-Linux
+          path: |
+            build/CouchlinkPlayer-x86_64.AppImage
+            build/couchlink-player_0.1.1_amd64.deb
+
+  github-release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          generate_release_notes: true

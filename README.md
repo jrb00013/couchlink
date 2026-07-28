@@ -52,8 +52,7 @@ The client opens a window showing the host's stream. Plug in a DualSense, or
 just use the keyboard (WASD + arrows + Space/Shift/Ctrl/E/Q/R/1/2/Enter/Tab —
 see `crates/client/src/keyboard_input.rs` for the full mapping).
 
-**Desktop installers:** [docs/DESKTOP_CLIENT.md](docs/DESKTOP_CLIENT.md) (Windows zip + installer, Linux AppImage, macOS `.app`).  
-**Play with a friend online:** [docs/PLAY_TOGETHER.md](docs/PLAY_TOGETHER.md).
+**Desktop installers:** [FRIEND_INSTALL.md](docs/FRIEND_INSTALL.md) · [DESKTOP_CLIENT.md](docs/DESKTOP_CLIENT.md) (build/release) · [PLAY_TOGETHER.md](docs/PLAY_TOGETHER.md)
 
 Host role needs Linux `uinput` for the virtual DualSense — run it from Linux
 or WSL; macOS/native Windows can only run the friend/client role.

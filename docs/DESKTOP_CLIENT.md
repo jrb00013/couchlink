@@ -2,15 +2,19 @@
 
 Packaged **Couchlink Player** — native video window + DualSense/keyboard. The host still runs on **Linux/WSL** today.
 
-## Quick install
+## For friends: download like a normal app
 
-| Platform | Build (you or CI) | Friend installs |
-|----------|-------------------|-----------------|
-| **Windows** | `.\packaging\windows\build-release.ps1` | Unzip `build/windows/CouchlinkPlayer-win64.zip`, run **`install-client.ps1`**, paste join URL |
-| **Linux** | `./packaging/linux/build-appimage.sh` | Run **`CouchlinkPlayer-*.AppImage`**, set `join_url` in config (below) |
-| **macOS** | `./packaging/macos/build-app-bundle.sh` | Drag **`Couchlink Player.app`** to Applications, set config (below) |
+**[FRIEND_INSTALL.md](FRIEND_INSTALL.md)** — one-page “download the `.exe` / `.dmg` / AppImage and go.”
 
-Friends do **not** need Rust installed if you give them the zip/AppImage/app bundle.
+Build installers locally or publish via GitHub Actions (`release-player` workflow → tag `v0.1.1` → **Releases** artifacts).
+
+| Platform | Build on your machine | Friend gets |
+|----------|----------------------|-------------|
+| **Windows** | `.\packaging\windows\build-installer.ps1` (needs [Inno Setup 6](https://jrsoftware.org/isdl.php)) | **`CouchlinkPlayer-Setup-0.1.1.exe`** — real install wizard, Start Menu, uninstaller |
+| **macOS** | `./packaging/macos/build-dmg.sh` | **`CouchlinkPlayer-mac.dmg`** → drag to Applications |
+| **Linux** | `./packaging/linux/build-appimage.sh` + `./packaging/linux/build-deb.sh` | **AppImage** or **`.deb`** |
+
+Legacy zip + `install-client.ps1` still works: `.\packaging\windows\build-release.ps1`.
 
 ## Join config (no terminal)
 

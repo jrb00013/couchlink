@@ -1,0 +1,9 @@
+Package: couchlink-player
+Version: 0.1.1
+Section: games
+Priority: optional
+Architecture: amd64
+Maintainer: couchlink <https://github.com/jrb00013/couchlink>
+Depends: libx11-6, libxcb1, libhidapi-hidraw0
+Description: Couchlink native player (friend client)
+ Join a couchlink co-play session with native video and gamepad/keyboard input.
