@@ -125,6 +125,12 @@ async fn main() -> Result<()> {
                     Some(SignalMessage::PeerLeft) => {
                         warn!("player left");
                     }
+                    Some(SignalMessage::PeerJoined { .. }) => {
+                        info!("player joined — sending offer");
+                        if let Err(e) = host.create_and_send_offer(&signal_out).await {
+                            warn!("offer on rejoin failed: {e}");
+                        }
+                    }
                     Some(SignalMessage::Heartbeat) => {
                         let _ = signal_out.send(SignalMessage::Pong);
                     }
