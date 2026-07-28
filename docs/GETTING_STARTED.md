@@ -21,7 +21,14 @@ couchlink-host \
 
 Ensure your user can write `/dev/uinput` (install udev rule from `install.sh`).
 
-## Friend (player)
+## Friend (player) — browser (recommended)
+
+1. Open the **join URL / QR** printed by `couchlink-host`, or go to `http://HOST:8443`.
+2. Press any button on your DualSense so the browser unlocks Gamepad API.
+3. Click **Join session** (auto if the invite link has `?s=&p=&auto=1`).
+4. You should see the HD stream; pad state streams as `CLPD` onto the host virtual Bluetooth DualSense.
+
+## Friend — native client (optional)
 
 ```bash
 ./install.sh
@@ -30,8 +37,6 @@ couchlink-client \
   --session-id friends-night \
   --pin 482193
 ```
-
-Pair a DualSense first (USB or BT). On Windows, dualsensekit's pairing scripts help.
 
 ## Bind in the emulator
 

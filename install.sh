@@ -35,27 +35,15 @@ install -Dm755 target/release/couchlink-signaling "$HOME/.local/bin/couchlink-si
 install -Dm755 target/release/couchlink-host "$HOME/.local/bin/couchlink-host"
 install -Dm755 target/release/couchlink-client "$HOME/.local/bin/couchlink-client"
 
+if command -v npm >/dev/null; then
+  echo "==> building player UI"
+  (cd web && npm install && npm run build)
+fi
+
 if [[ ! -f .env.couchlink ]]; then
   cp .env.example .env.couchlink
 fi
 
-mkdir -p web/dist
-if [[ ! -f web/dist/index.html ]]; then
-  cat > web/dist/index.html <<'HTML'
-<!doctype html>
-<html><head><meta charset="utf-8"><title>couchlink</title>
-<style>
-  body{font-family:system-ui;background:#0b0f14;color:#e8eef7;display:grid;place-items:center;min-height:100vh;margin:0}
-  main{max-width:36rem;padding:2rem}
-  code{background:#1a2330;padding:.1rem .35rem;border-radius:4px}
-</style></head>
-<body><main>
-<h1>couchlink</h1>
-<p>Signaling is up. Run <code>couchlink-host</code> and <code>couchlink-client</code> for HD co-play.</p>
-<p>See docs/GETTING_STARTED.md</p>
-</main></body></html>
-HTML
-fi
-
 echo "OK — binaries in ~/.local/bin"
-echo "source .env.couchlink && couchlink-signaling"
+echo "source .env.couchlink && ./scripts/start-signaling.sh"
+echo "Friend opens the join URL printed by couchlink-host (or http://HOST:8443)"
