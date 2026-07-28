@@ -65,6 +65,16 @@ impl VirtualPad {
         }
     }
 
+    /// Accept pad frames but do not inject (video-only host on Windows/macOS).
+    #[cfg(not(target_os = "linux"))]
+    pub fn create_noop(cfg: VirtualPadConfig) -> Self {
+        info!(
+            "virtual pad noop — video-only host on this OS ('{}')",
+            cfg.name
+        );
+        Self { _cfg: cfg }
+    }
+
     pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
         #[cfg(target_os = "linux")]
         {

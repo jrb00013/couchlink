@@ -106,10 +106,17 @@ async fn main() -> Result<()> {
         }
     }
 
-    let mut capturer = capture::FrameCapture::primary()?;
+    let windows_spec = effective_windows_capture(&args);
+    let mut capturer = capture::FrameCapture::open(windows_spec.as_deref())?;
     info!(
-        "capturing primary display {}x{}",
-        capturer.width, capturer.height
+        "capturing {}x{} ({})",
+        capturer.width(),
+        capturer.height(),
+        if windows_spec.is_some() {
+            "Windows desktop bridge"
+        } else {
+            "local display"
+        }
     );
     let mut encoder = encode::H264Encoder::new(preset.width, preset.height, preset.bitrate_kbps)?;
     let mut motion = motion::MotionDetector::new(preset.width, preset.height);
@@ -118,12 +125,13 @@ async fn main() -> Result<()> {
     let mut frames_out: u64 = 0;
     let mut force_idr = true;
 
-    let _ = signal_out.send(SignalMessage::StreamInfo {
-        width: preset.width,
-        height: preset.height,
-        fps: preset.fps,
-        codec: "H264".into(),
-    });
+    let mut capture_ok_announced: Option<bool> = None;
+
+    let _ = signal_out.send(stream_info_message(
+        &preset,
+        None,
+        None,
+    ));
 
     loop {
         tokio::select! {
@@ -171,12 +179,11 @@ async fn main() -> Result<()> {
                             warn!("offer on rejoin failed: {e}");
                         }
                         force_idr = true;
-                        let _ = signal_out.send(SignalMessage::StreamInfo {
-                            width: preset.width,
-                            height: preset.height,
-                            fps: preset.fps,
-                            codec: "H264".into(),
-                        });
+                        let _ = signal_out.send(stream_info_message(
+                            &preset,
+                            capture_ok_announced,
+                            None,
+                        ));
                     }
                     Some(SignalMessage::Heartbeat) => {
                         let _ = signal_out.send(SignalMessage::Pong);
@@ -187,15 +194,17 @@ async fn main() -> Result<()> {
             }
             _ = tokio::time::sleep(frame_dur) => {
                 let Some(bgra) = capturer.capture_bgra()? else { continue };
-                let scaled = if capturer.width as u32 == preset.width
-                    && capturer.height as u32 == preset.height
+                let cap_w = capturer.width();
+                let cap_h = capturer.height();
+                let scaled = if cap_w as u32 == preset.width
+                    && cap_h as u32 == preset.height
                 {
                     bgra
                 } else {
                     scale::scale_bgra(
                         &bgra,
-                        capturer.width,
-                        capturer.height,
+                        cap_w,
+                        cap_h,
                         preset.width as usize,
                         preset.height as usize,
                     )
@@ -206,14 +215,30 @@ async fn main() -> Result<()> {
                 }
                 if frames_out == 0 {
                     let avg = capture::sample_avg_luma_bgra(&scaled, 4096);
-                    if avg < 8 {
-                        warn!(
-                            "capture looks black/empty (avg luma ~{avg}/255). \
-                             A host in WSL captures the Linux desktop only — run couchlink-host on native Windows \
-                             to stream PCSX2/RPCS3 on your Windows display. See docs/PLAY_TOGETHER.md."
-                        );
+                    let ok = avg >= 8;
+                    if !ok {
+                        let hint = if windows_spec.is_some() {
+                            "Windows capture bridge is connected but frames look black — check that PCSX2/RPCS3 is on the primary monitor and couchlink-win-capture is running."
+                        } else if capture::is_wsl() {
+                            "WSL is capturing the Linux desktop (usually black). Run scripts/start-win-capture.ps1 on Windows and set COUCHLINK_WINDOWS_CAPTURE=auto on the host."
+                        } else {
+                            "Capture looks black/empty — nothing visible on the host display."
+                        };
+                        warn!("capture looks black/empty (avg luma ~{avg}/255). {hint}");
+                        capture_ok_announced = Some(false);
+                        let _ = signal_out.send(stream_info_message(
+                            &preset,
+                            Some(false),
+                            Some(hint.into()),
+                        ));
                     } else {
                         info!("capture avg luma ~{avg}/255 (first frames)");
+                        capture_ok_announced = Some(true);
+                        let _ = signal_out.send(stream_info_message(
+                            &preset,
+                            Some(true),
+                            None,
+                        ));
                     }
                 }
                 // Periodic IDR so late joiners / stalled decoders can resync (~2s @ 30fps).
@@ -236,4 +261,32 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn effective_windows_capture(args: &HostArgs) -> Option<String> {
+    if let Some(ref s) = args.windows_capture {
+        if s.is_empty() || s == "0" || s == "false" {
+            return None;
+        }
+        return Some(s.clone());
+    }
+    if capture::is_wsl() {
+        return Some("auto".into());
+    }
+    None
+}
+
+fn stream_info_message(
+    preset: &couchlink_proto::StreamPreset,
+    capture_ok: Option<bool>,
+    capture_hint: Option<String>,
+) -> SignalMessage {
+    SignalMessage::StreamInfo {
+        width: preset.width,
+        height: preset.height,
+        fps: preset.fps,
+        codec: "H264".into(),
+        capture_ok,
+        capture_hint,
+    }
 }

@@ -33,6 +33,7 @@ export default function App() {
   const [state, setState] = useState<ConnectionState>("disconnected");
   const [detail, setDetail] = useState("");
   const [streamMeta, setStreamMeta] = useState("—");
+  const [captureHint, setCaptureHint] = useState<string | null>(null);
   const [padMeta, setPadMeta] = useState("press a button on your DualSense / pad");
   const [fullscreen, setFullscreen] = useState(false);
 
@@ -118,6 +119,11 @@ export default function App() {
     onVideo: (stream) => attachStream(stream),
     onStreamInfo: (info) => {
       setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
+      if (info.capture_ok === false && info.capture_hint) {
+        setCaptureHint(info.capture_hint);
+      } else if (info.capture_ok === true) {
+        setCaptureHint(null);
+      }
     },
     onPadStats: (hz, name) => {
       setPadMeta(`${hz} Hz · ${name}`);
@@ -225,6 +231,11 @@ export default function App() {
         {state === "connected" && videoDiag.includes("?×?") && (
           <div className="overlay overlay-dim">
             <span>{detail || "Connected — waiting for first video frame…"}</span>
+          </div>
+        )}
+        {state === "connected" && captureHint && (
+          <div className="overlay overlay-dim">
+            <span>{captureHint}</span>
           </div>
         )}
       </div>

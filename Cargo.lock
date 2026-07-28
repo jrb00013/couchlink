@@ -835,6 +835,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "couchlink-capture-bridge"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "scrap",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "couchlink-client"
 version = "0.1.1"
 dependencies = [
@@ -871,6 +882,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "couchlink-capture-bridge",
  "couchlink-pad",
  "couchlink-proto",
  "futures-util",

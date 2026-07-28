@@ -1,0 +1,19 @@
+[package]
+name = "couchlink-capture-bridge"
+version.workspace = true
+edition.workspace = true
+description = "Windows desktop capture bridge + CLFR wire protocol for WSL hosts"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "couchlink-win-capture"
+path = "src/bin/win_capture.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+scrap = "0.5"

@@ -31,6 +31,9 @@ pub struct HostArgs {
     /// Advertise these host IPs in ICE (WSL: set to `hostname -I` LAN address, not Docker bridges).
     #[arg(long, env = "COUCHLINK_ICE_IPS", value_delimiter = ',')]
     pub ice_ips: Vec<String>,
+    /// Windows desktop via `couchlink-win-capture` (WSL: use `auto` or `host:9876`).
+    #[arg(long, env = "COUCHLINK_WINDOWS_CAPTURE")]
+    pub windows_capture: Option<String>,
 }
 
 impl HostArgs {

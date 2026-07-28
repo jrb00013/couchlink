@@ -28,5 +28,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 url = "2"
 scrap = "0.5"
 openh264 = "0.6"
+couchlink-capture-bridge = { path = "../capture-bridge" }
 rand = "0.8"
 qrcode = { version = "0.14", default-features = false }

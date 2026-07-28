@@ -19,6 +19,8 @@ export interface PlayerCallbacks {
     height: number;
     fps: number;
     codec: string;
+    capture_ok?: boolean;
+    capture_hint?: string;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
 }

@@ -60,6 +60,11 @@ pub enum SignalMessage {
         height: u32,
         fps: u32,
         codec: String,
+        /// False when the host sees a black/empty capture (common: WSL host + Windows game).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture_ok: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capture_hint: Option<String>,
     },
 }
 

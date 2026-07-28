@@ -38,6 +38,8 @@ export type SignalMessage =
       height: number;
       fps: number;
       codec: string;
+      capture_ok?: boolean;
+      capture_hint?: string;
     };
 
 export function send(ws: WebSocket, msg: SignalMessage) {
