@@ -24,6 +24,9 @@ if ($needBuild) {
     Push-Location $Root
     try {
         cargo build -p couchlink-capture-bridge --bin couchlink-win-capture --release
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+        }
     } finally {
         Pop-Location
     }

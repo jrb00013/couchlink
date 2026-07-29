@@ -120,11 +120,19 @@ impl HardwareEncoder {
             set_ratio(&out, &MF_MT_FRAME_SIZE, width, height)?;
             set_ratio(&out, &MF_MT_FRAME_RATE, fps, 1)?;
             set_ratio(&out, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
-            // Baseline keeps decoding cheap and is universally supported by browsers.
-            out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
-            transform
-                .SetOutputType(0, &out, 0)
-                .context("SetOutputType(H264) — encoder rejected these parameters")?;
+            // Main is a big quality win over Baseline at the same bitrate (CABAC),
+            // and Chrome/WebCodecs decode it fine. Fall back to Baseline if rejected.
+            if out
+                .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)
+                .is_err()
+                || transform.SetOutputType(0, &out, 0).is_err()
+            {
+                tracing::warn!("Main profile rejected — falling back to Baseline");
+                out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+                transform
+                    .SetOutputType(0, &out, 0)
+                    .context("SetOutputType(H264) — encoder rejected these parameters")?;
+            }
 
             let inp = MFCreateMediaType().context("create input type")?;
             inp.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -170,6 +178,11 @@ impl HardwareEncoder {
 
         let sequence_header = unsafe { read_sequence_header(&transform) };
         let codec_api: Option<ICodecAPI> = transform.cast().ok();
+        if let Some(ref api) = codec_api {
+            unsafe {
+                apply_codec_api_defaults(api, bitrate_bps);
+            }
+        }
         let events: Option<IMFMediaEventGenerator> = if is_async {
             Some(
                 transform
@@ -210,14 +223,7 @@ impl HardwareEncoder {
     pub fn request_keyframe(&self) {
         let Some(api) = &self.codec_api else { return };
         unsafe {
-            // VARIANT's fields are ManuallyDrop unions; write through the deref
-            // explicitly rather than assigning, which would run a destructor on
-            // uninitialised memory.
-            let mut v = VARIANT::default();
-            let inner = &mut *v.Anonymous.Anonymous;
-            inner.vt = VT_UI4;
-            inner.Anonymous.ulVal = 1;
-            let _ = api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &v);
+            let _ = set_codec_u32(api, &CODECAPI_AVEncVideoForceKeyFrame, 1);
         }
     }
 
@@ -511,6 +517,33 @@ unsafe fn widestring_to_string(p: PWSTR, len: u32) -> String {
     let s = String::from_utf16_lossy(std::slice::from_raw_parts(p.0, len as usize));
     CoTaskMemFree(Some(p.0 as *const _));
     s
+}
+
+/// Keep encode latency low while giving the rate controller enough bits for UI text.
+unsafe fn apply_codec_api_defaults(api: &ICodecAPI, bitrate_bps: u32) {
+    // Low-latency mode must stay on — quality bumps must not reintroduce encoder delay.
+    let _ = set_codec_u32(api, &CODECAPI_AVLowLatencyMode, 1);
+    let _ = set_codec_u32(
+        api,
+        &CODECAPI_AVEncCommonRateControlMode,
+        eAVEncCommonRateControlMode_CBR.0 as u32,
+    );
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, bitrate_bps);
+    // 0 = fastest/worst, 100 = slowest/best. Mid-high keeps text readable without
+    // a big latency cliff on NVENC/QuickSync.
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQualityVsSpeed, 60);
+}
+
+unsafe fn set_codec_u32(api: &ICodecAPI, key: &GUID, value: u32) -> Result<()> {
+    // VARIANT's fields are ManuallyDrop unions; write through the deref
+    // explicitly rather than assigning, which would run a destructor on
+    // uninitialised memory.
+    let mut v = VARIANT::default();
+    let inner = &mut *v.Anonymous.Anonymous;
+    inner.vt = VT_UI4;
+    inner.Anonymous.ulVal = value;
+    api.SetValue(key, &v)?;
+    Ok(())
 }
 
 /// MF packs paired 32-bit values (size, frame rate, aspect) into one 64-bit attribute.

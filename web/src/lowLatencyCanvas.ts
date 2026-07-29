@@ -51,7 +51,9 @@ export class LowLatencyCanvasView {
 
     try {
       if ("contentHint" in track) {
-        track.contentHint = "motion";
+        // Prefer spatial detail over pure motion — UI text stays readable on LAN
+        // without adding a present queue (still desynchronized canvas).
+        track.contentHint = "detail";
       }
 
       const ctx = this.canvas.getContext("2d", {
@@ -62,6 +64,8 @@ export class LowLatencyCanvasView {
         cwarn("low-latency canvas: 2d context unavailable");
         return false;
       }
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
       this.ctx = ctx;
 
       const attrs = (

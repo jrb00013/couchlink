@@ -446,7 +446,7 @@ export class CouchlinkPlayer {
       };
       track.onended = () => clog("track ended", track.kind, track.id);
       if (track.kind === "video" && "contentHint" in track) {
-        track.contentHint = "motion";
+        track.contentHint = "detail";
       }
       const stream =
         ev.streams[0] ?? new MediaStream(ev.track ? [ev.track] : []);

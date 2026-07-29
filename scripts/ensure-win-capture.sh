@@ -42,10 +42,13 @@ if [[ -z "$connect" ]]; then
 fi
 # Send frames at the stream resolution: the WSL virtual NIC, not the encoder,
 # is what caps the frame rate when raw BGRA crosses it.
-case "${COUCHLINK_PRESET:-720p30}" in
-  1080p*) wire_w=1920; wire_h=1080 ;;
-  *)      wire_w=1280; wire_h=720 ;;
+case "${COUCHLINK_PRESET:-1080p60}" in
+  1080p60|hd60) wire_w=1920; wire_h=1080; bitrate_kbps=18000 ;;
+  1080p30|hd30) wire_w=1920; wire_h=1080; bitrate_kbps=10000 ;;
+  720p60)       wire_w=1280; wire_h=720;  bitrate_kbps=10000 ;;
+  *)             wire_w=1280; wire_h=720;  bitrate_kbps=5000 ;;
 esac
+bitrate_kbps="${COUCHLINK_BITRATE_KBPS:-$bitrate_kbps}"
 # Capture/encode cadence. Measured on an RTX 5080 at 720p: 60Hz gives
 # capture->encoded p50 11-13ms, 120Hz gives p50 8-9ms — the beat is half the
 # wait, so halving it halves that half. The cost is double the encode and
@@ -70,10 +73,10 @@ fi
 style=Minimized
 [[ "$source_mode" == "picker" ]] && style=Normal
 
-echo "==> starting Windows capture (source=$source_mode → $connect)"
+echo "==> starting Windows capture (source=$source_mode → $connect @ ${wire_w}x${wire_h} ${bitrate_kbps}kbps)"
 # Build ArgumentList in PowerShell so quoting stays correct.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps')
+  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
 " >/dev/null

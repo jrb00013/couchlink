@@ -55,9 +55,9 @@ mod run {
         /// uncompressed, so wire bytes — not the encoder — set the frame rate:
         /// 1080p BGRA is 7.9MB/frame, about 64MB/s, i.e. ~8fps. Sending at the
         /// stream's actual resolution is the single biggest win available.
-        #[arg(long, default_value_t = 1280)]
+        #[arg(long, default_value_t = 1920)]
         pub max_width: u32,
-        #[arg(long, default_value_t = 720)]
+        #[arg(long, default_value_t = 1080)]
         pub max_height: u32,
         /// Keep a minimized window rendering by parking it off-screen instead
         /// (`--source window` only — DWM stops compositing true minimized windows).
@@ -70,7 +70,7 @@ mod run {
         /// transform fails; the host handles the format changing mid-stream.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         pub gpu_encode: bool,
-        #[arg(long, default_value_t = 8000)]
+        #[arg(long, default_value_t = 18000)]
         pub bitrate_kbps: u32,
     }
 
@@ -268,18 +268,45 @@ mod run {
         raw_tx
     }
 
-    /// Nearest-neighbour box fit, preserving aspect. Cheap enough to run on the
-    /// capture thread and it removes multiples of the wire cost downstream.
+    /// Area-average box fit. Nearest-neighbour made UI text look crunchy whenever
+    /// the capture was smaller than the monitor; this keeps edges readable without
+    /// a heavyweight scaler on the capture thread.
     fn downscale_bgra(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
         let mut out = vec![0u8; (dw * dh * 4) as usize];
+        let sw = sw as usize;
+        let sh = sh as usize;
+        let dw = dw as usize;
+        let dh = dh as usize;
         for y in 0..dh {
-            let sy = (y * sh / dh).min(sh - 1) as usize;
+            let y0 = y * sh / dh;
+            let y1 = ((y + 1) * sh / dh).max(y0 + 1).min(sh);
             for x in 0..dw {
-                let sx = (x * sw / dw).min(sw - 1) as usize;
-                let si = (sy * sw as usize + sx) * 4;
-                let di = ((y * dw + x) * 4) as usize;
-                if let Some(px) = src.get(si..si + 4) {
-                    out[di..di + 4].copy_from_slice(px);
+                let x0 = x * sw / dw;
+                let x1 = ((x + 1) * sw / dw).max(x0 + 1).min(sw);
+                let mut b = 0u32;
+                let mut g = 0u32;
+                let mut r = 0u32;
+                let mut a = 0u32;
+                let mut n = 0u32;
+                for sy in y0..y1 {
+                    let row = sy * sw;
+                    for sx in x0..x1 {
+                        let si = (row + sx) * 4;
+                        if let Some(px) = src.get(si..si + 4) {
+                            b += px[0] as u32;
+                            g += px[1] as u32;
+                            r += px[2] as u32;
+                            a += px[3] as u32;
+                            n += 1;
+                        }
+                    }
+                }
+                let di = (y * dw + x) * 4;
+                if n > 0 {
+                    out[di] = (b / n) as u8;
+                    out[di + 1] = (g / n) as u8;
+                    out[di + 2] = (r / n) as u8;
+                    out[di + 3] = (a / n) as u8;
                 }
             }
         }

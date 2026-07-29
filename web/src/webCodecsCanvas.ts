@@ -53,7 +53,7 @@ export class WebCodecsCanvasView {
   private onNeedKeyframe: (() => void) | null = null;
   private lastPli = 0;
   private description: Uint8Array | null = null;
-  private codec = "avc1.42E01F";
+  private codec = "avc1.4D0028";
   private running = false;
 
   constructor(private canvas: HTMLCanvasElement) {}
@@ -90,6 +90,8 @@ export class WebCodecsCanvasView {
       cwarn("webcodecs canvas: 2d context unavailable");
       return false;
     }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     this.ctx = ctx;
     this.waitingKeyframe = true;
     this.configured = false;

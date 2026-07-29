@@ -6,8 +6,9 @@ param(
     [string]$Window = "",
     [int]$MaxFps = 60,
     [switch]$GpuEncode,
-    [int]$MaxWidth = 1280,
-    [int]$MaxHeight = 720,
+    [int]$MaxWidth = 1920,
+    [int]$MaxHeight = 1080,
+    [int]$BitrateKbps = 18000,
     [switch]$ListWindows,
     [switch]$BuildOnly
 )
@@ -27,12 +28,13 @@ if ($ListWindows) {
 }
 
 $argList = @("--connect", $Connect, "--max-fps", "$MaxFps", "--source", $Source,
-             "--max-width", "$MaxWidth", "--max-height", "$MaxHeight")
+             "--max-width", "$MaxWidth", "--max-height", "$MaxHeight",
+             "--bitrate-kbps", "$BitrateKbps")
 if ($GpuEncode) { $argList += @("--gpu-encode", "true") }
 if ($Source -eq "window") {
     if (-not $Window) { throw "-Window is required when -Source window" }
     $argList += @("--window", $Window)
 }
 
-Write-Host "Windows capture: source=$Source connect=$Connect"
+Write-Host "Windows capture: source=$Source connect=$Connect ${MaxWidth}x${MaxHeight} @ ${BitrateKbps}kbps"
 & $Bin @argList

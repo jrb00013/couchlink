@@ -127,8 +127,10 @@ impl WebRtcHost {
         let video = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
                 mime_type: MIME_TYPE_H264.to_owned(),
+                // Main @ Level 4.0 — matches the Windows MF encoder and supports 1080p60.
+                // Constrained Baseline (42e01f) was starving quality at the same bitrate.
                 sdp_fmtp_line:
-                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d0028"
                         .to_owned(),
                 ..Default::default()
             },
