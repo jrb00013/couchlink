@@ -224,7 +224,11 @@ mod run {
             return list_windows();
         }
 
-        let (tx, rx) = mpsc::sync_channel::<FrameMsg>(2);
+        // Depth 1, not 2: a queued frame is a frame the viewer will see late. With
+        // depth 2 a frame could sit behind another for a whole send time before it
+        // even reached the socket. Dropping the newest when busy costs a frame;
+        // queueing it costs latency on every frame after it.
+        let (tx, rx) = mpsc::sync_channel::<FrameMsg>(1);
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
         let flags = (tx, frame_dur, args.max_width, args.max_height);
         info!(

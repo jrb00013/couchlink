@@ -34,6 +34,9 @@ export class CouchlinkPlayer {
   private pc: RTCPeerConnection | null = null;
   private padDc: RTCDataChannel | null = null;
   private heartbeatTimer: number | null = null;
+  private statsTimer: number | null = null;
+  private lastStats: { delay: number; count: number; decoded: number } | null =
+    null;
   private padTimer: number | null = null;
   private connectTimer: number | null = null;
   private sessionRetryTimer: number | null = null;
@@ -146,6 +149,46 @@ export class CouchlinkPlayer {
     });
   }
 
+  /**
+   * The browser is the one segment the host cannot measure. jitterBufferDelay
+   * divided by jitterBufferEmittedCount is the average time each frame sat in
+   * Chrome's buffer before being shown — that is felt latency the host's stage
+   * timings are completely blind to.
+   */
+  private startStatsPolling() {
+    if (this.statsTimer) return;
+    this.statsTimer = window.setInterval(async () => {
+      const pc = this.pc;
+      if (!pc) return;
+      try {
+        const stats = await pc.getStats();
+        stats.forEach((r: any) => {
+          if (r.type !== "inbound-rtp" || r.kind !== "video") return;
+          const delay = r.jitterBufferDelay ?? 0;
+          const count = r.jitterBufferEmittedCount ?? 0;
+          const decoded = r.framesDecoded ?? 0;
+          const prev = this.lastStats;
+          this.lastStats = { delay, count, decoded };
+          if (!prev || count === prev.count) return;
+          // Delta over the window, not the session average.
+          const bufferedMs =
+            ((delay - prev.delay) / (count - prev.count)) * 1000;
+          clog("video stats", {
+            jitterBufferMs: Math.round(bufferedMs),
+            decodeFps: Math.round((decoded - prev.decoded) / 2),
+            framesDropped: r.framesDropped ?? 0,
+            frameHeight: r.frameHeight,
+            pauseCount: r.pauseCount,
+            freezeCount: r.freezeCount,
+            totalFreezesDuration: r.totalFreezesDuration,
+          });
+        });
+      } catch (e) {
+        cwarn("getStats failed", String(e));
+      }
+    }, 2000);
+  }
+
   private cleanup() {
     clog("cleanup()", {
       hadWs: !!this.ws,
@@ -157,11 +200,14 @@ export class CouchlinkPlayer {
     if (this.sessionRetryTimer) clearTimeout(this.sessionRetryTimer);
     if (this.mediaRecoverTimer) clearTimeout(this.mediaRecoverTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.statsTimer) clearInterval(this.statsTimer);
     if (this.padTimer) cancelAnimationFrame(this.padTimer);
     this.connectTimer = null;
     this.sessionRetryTimer = null;
     this.mediaRecoverTimer = null;
     this.heartbeatTimer = null;
+    this.statsTimer = null;
+    this.lastStats = null;
     this.padTimer = null;
     this.resetPeer();
     this.ws?.close();
@@ -344,6 +390,7 @@ export class CouchlinkPlayer {
         tracks: stream.getTracks().map((t) => `${t.kind}:${t.readyState}`),
       });
       this.gotVideoTrack = true;
+      this.startStatsPolling();
       this.cb.onState("connected", "video track");
       this.cb.onVideo(stream);
     };

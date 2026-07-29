@@ -21,9 +21,6 @@ use tracing::{info, warn};
 /// once the encoder throttles on a static screen, stranding late joiners on black.
 const IDR_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Poll interval for the frame loop. Short so the select arm re-arms promptly; the
-/// real pacing comes from the capture read blocking until a frame exists.
-const LOOP_TICK: Duration = Duration::from_millis(2);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -149,6 +146,14 @@ async fn main() -> Result<()> {
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // The metronome the video is sent on. Delay (not Burst) on a missed tick so a slow
+    // frame never causes a catch-up flurry — a burst is exactly the jitter we are
+    // trying to remove.
+    let mut cadence = tokio::time::interval(Duration::from_millis(
+        1000 / preset.fps.max(1) as u64,
+    ));
+    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     let _ = signal_out.send(stream_info_message(
         &preset,
         None,
@@ -217,11 +222,12 @@ async fn main() -> Result<()> {
                     _ => {}
                 }
             }
-            // Short tick, not frame_dur: capture_bgra already blocks until Windows has
-            // a frame, so it paces this loop by itself. Sleeping a full frame time
-            // first added up to 16ms of pure input latency and capped throughput below
-            // the rate the source was actually delivering.
-            _ = tokio::time::sleep(LOOP_TICK) => {
+            // Fixed cadence, deliberately NOT driven by frame arrival. WGC hands over
+            // frames whenever DWM happens to composite, so arrival-paced sending wobbles
+            // between ~20ms and ~60ms gaps. A receiver sizes its jitter buffer from that
+            // wobble, and measured buffer grew to ~100ms during motion. Encoding on a
+            // metronome makes delivery uniform, which is what lets the buffer stay small.
+            _ = cadence.tick() => {
                 let t_capture = std::time::Instant::now();
                 let Some(bgra) = capturer.capture_bgra()? else { continue };
                 let ms_capture = t_capture.elapsed();
@@ -238,6 +244,9 @@ async fn main() -> Result<()> {
                 // is what made input feel laggy: a keystroke landing during an idle sleep
                 // waited it out before anything was encoded. Polling stays at frame_dur,
                 // so motion is picked up within one frame regardless.
+                // On a metronome, a truly static screen still gets a refresh every
+                // idle_dur so the cadence never develops holes; only genuinely
+                // redundant frames between refreshes are skipped.
                 let refresh_due = last_encode.elapsed() >= idle_dur;
                 if idle && !force_idr && idr_burst == 0 && !refresh_due && frames_out > 0 {
                     idle_frames += 1;

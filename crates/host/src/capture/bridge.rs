@@ -7,9 +7,11 @@ use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-/// Poll interval for the start of a frame. Short so the host's async loop keeps
-/// servicing signaling while a static window sends nothing.
-const IDLE_POLL: Duration = Duration::from_millis(120);
+/// How long to wait for a frame to start arriving. Deliberately tiny: the caller
+/// sends on a fixed cadence, so this must return promptly with either a fresh frame
+/// or the previous one. Blocking here would stall that metronome and reintroduce the
+/// arrival jitter the cadence exists to remove.
+const IDLE_POLL: Duration = Duration::from_millis(2);
 /// Poll used while draining a backlog — only frames already buffered count.
 const DRAIN_POLL: Duration = Duration::from_millis(1);
 /// Once a frame has started, the rest is already in flight — allow plenty of time.

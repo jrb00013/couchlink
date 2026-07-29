@@ -9,6 +9,28 @@ const DEFAULT_WS =
     ? `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:8443/ws`
     : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
+type ConnectedPad = {
+  index: number;
+  id: string;
+  label: string;
+};
+
+/** Strip vendor/product noise from Gamepad.id for a readable label. */
+function cleanPadLabel(id: string): string {
+  const cut = id.indexOf(" (");
+  return (cut > 0 ? id.slice(0, cut) : id).trim() || id;
+}
+
+function readConnectedPads(): ConnectedPad[] {
+  const pads = navigator.getGamepads?.() ?? [];
+  const out: ConnectedPad[] = [];
+  for (const p of pads) {
+    if (!p) continue;
+    out.push({ index: p.index, id: p.id, label: cleanPadLabel(p.id) });
+  }
+  return out;
+}
+
 function readInvite() {
   if (typeof location === "undefined")
     return { sessionId: "", pin: "", auto: false, signalingUrl: undefined, turn: null };
@@ -35,6 +57,7 @@ export default function App() {
   const [streamMeta, setStreamMeta] = useState("—");
   const [captureHint, setCaptureHint] = useState<string | null>(null);
   const [padMeta, setPadMeta] = useState("press a button on your DualSense / pad");
+  const [pads, setPads] = useState<ConnectedPad[]>([]);
   const [fullscreen, setFullscreen] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -155,6 +178,24 @@ export default function App() {
 
   const connected = state === "connected" || state === "negotiating";
 
+  useEffect(() => {
+    if (!connected) {
+      setPads([]);
+      return;
+    }
+    const refresh = () => setPads(readConnectedPads());
+    refresh();
+    window.addEventListener("gamepadconnected", refresh);
+    window.addEventListener("gamepaddisconnected", refresh);
+    // Browsers often only expose pads after a button press; poll lightly.
+    const timer = window.setInterval(refresh, 1000);
+    return () => {
+      window.removeEventListener("gamepadconnected", refresh);
+      window.removeEventListener("gamepaddisconnected", refresh);
+      window.clearInterval(timer);
+    };
+  }, [connected]);
+
   return (
     <div className={`shell ${fullscreen ? "is-fullscreen" : ""}`}>
       <header className="top">
@@ -224,22 +265,58 @@ export default function App() {
         </section>
       )}
 
-      <div className="stage-wrap" ref={stageRef}>
-        <video ref={videoRef} className="stage" playsInline muted autoPlay />
-        {state !== "connected" && (
-          <div className="overlay">
-            <span>{detail || "Waiting for video…"}</span>
-          </div>
-        )}
-        {state === "connected" && videoDiag.includes("?×?") && (
-          <div className="overlay overlay-dim">
-            <span>{detail || "Connected — waiting for first video frame…"}</span>
-          </div>
-        )}
-        {state === "connected" && captureHint && (
-          <div className="overlay overlay-dim">
-            <span>{captureHint}</span>
-          </div>
+      <div className="broadcast">
+        <div className="stage-wrap" ref={stageRef}>
+          <video ref={videoRef} className="stage" playsInline muted autoPlay />
+          {state !== "connected" && (
+            <div className="overlay">
+              <span>{detail || "Waiting for video…"}</span>
+            </div>
+          )}
+          {state === "connected" && videoDiag.includes("?×?") && (
+            <div className="overlay overlay-dim">
+              <span>{detail || "Connected — waiting for first video frame…"}</span>
+            </div>
+          )}
+          {state === "connected" && captureHint && (
+            <div className="overlay overlay-dim">
+              <span>{captureHint}</span>
+            </div>
+          )}
+        </div>
+
+        {connected && (
+          <section className="pads" aria-live="polite">
+            <div className="pads-head">
+              <span className="pads-count">
+                {pads.length === 0
+                  ? "No controllers"
+                  : `${pads.length} controller${pads.length === 1 ? "" : "s"}`}
+              </span>
+              {pads.length > 0 && (
+                <span className="pads-hint">first pad is sent to the host</span>
+              )}
+            </div>
+            {pads.length === 0 ? (
+              <p className="pads-empty">
+                Pair a pad, then press any button so the browser unlocks it.
+              </p>
+            ) : (
+              <ul className="pads-list">
+                {pads.map((pad, i) => (
+                  <li
+                    key={`${pad.index}-${pad.id}`}
+                    className={`pads-item${i === 0 ? " is-active" : ""}`}
+                    title={pad.id}
+                  >
+                    <span className="pads-slot">P{pad.index + 1}</span>
+                    <span className="pads-name">{pad.label}</span>
+                    {i === 0 && <span className="pads-active">active</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         )}
       </div>
 

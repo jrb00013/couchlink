@@ -165,6 +165,13 @@ button.ghost {
   line-height: 1.45;
 }
 
+.broadcast {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 0.65rem;
+  min-height: 0;
+}
+
 .stage-wrap {
   position: relative;
   min-height: 48vh;
@@ -196,6 +203,86 @@ button.ghost {
 
 .overlay-dim {
   background: rgba(0, 0, 0, 0.55);
+}
+
+.pads {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.pads-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
+}
+
+.pads-count {
+  font-size: 0.8rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.pads-hint,
+.pads-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.pads-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.pads-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  max-width: 100%;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(8, 12, 18, 0.55);
+  font-size: 0.88rem;
+}
+
+.pads-item.is-active {
+  border-color: rgba(62, 207, 142, 0.4);
+  background: rgba(62, 207, 142, 0.08);
+}
+
+.pads-slot {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.pads-item.is-active .pads-slot {
+  color: var(--accent);
+}
+
+.pads-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pads-active {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
 }
 
 .meta {

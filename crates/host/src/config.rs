@@ -16,8 +16,15 @@ pub struct HostArgs {
     pub preset: String,
     #[arg(long, default_value = "auto")]
     pub emulator: String,
-    /// Idle FPS when motion detector sees a still frame (Rohomieo method).
-    #[arg(long, default_value = "8")]
+    /// Refresh rate while the screen is static.
+    ///
+    /// This is a *pacing* control, not a bandwidth one. A receiver sizes its jitter
+    /// buffer from how irregularly frames arrive, so alternating long idle gaps with
+    /// sudden bursts of motion is the worst case: measured jitter buffer grew from
+    /// ~5ms at rest to ~120ms the moment anything moved. Keeping the idle cadence
+    /// close to the active one makes arrival near-uniform and the buffer stays small.
+    /// Static frames encode to almost nothing, so the cost is CPU, not bandwidth.
+    #[arg(long, default_value = "30")]
     pub idle_fps: u32,
     #[arg(long, default_value_t = true)]
     pub bluetooth_pad: bool,
