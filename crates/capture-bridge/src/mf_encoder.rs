@@ -45,6 +45,7 @@ pub struct HardwareEncoder {
     sequence_header: Vec<u8>,
     frame_index: i64,
     frame_duration: i64,
+    started: std::time::Instant,
     nv12: Vec<u8>,
     /// Set once we have seen how this encoder formats its output.
     annex_b_confirmed: bool,
@@ -75,6 +76,15 @@ pub struct EncodedFrame {
 }
 
 impl HardwareEncoder {
+    /// `fps` is the rate frames are submitted, and it sets the floor on latency:
+    /// the transform asks for input at roughly that rate, so a frame arriving at an
+    /// arbitrary moment waits about half an interval before it is taken. Measured,
+    /// capture->encoded tracks 1/(2*fps) + encode: ~12ms at 60, ~8ms at 120.
+    ///
+    /// Tried and rejected: raising MF_MT_FRAME_RATE above the submit rate to make the
+    /// transform ask more often. It changes rate-control accounting and does not move
+    /// the latency, because the request rate follows how fast the encoder actually
+    /// drains, not the declared nominal rate.
     pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Result<Self> {
         if width % 2 != 0 || height % 2 != 0 {
             bail!("hardware encoder needs even dimensions, got {width}x{height}");
@@ -207,6 +217,7 @@ impl HardwareEncoder {
             frame_index: 0,
             // Media Foundation time is in 100ns units.
             frame_duration: 10_000_000 / fps as i64,
+            started: std::time::Instant::now(),
             nv12: vec![0u8; nv12_len(width, height)],
             annex_b_confirmed: false,
             provides_samples,
@@ -315,7 +326,11 @@ impl HardwareEncoder {
 
         let sample = MFCreateSample().context("MFCreateSample")?;
         sample.AddBuffer(&buffer)?;
-        sample.SetSampleTime(self.frame_index * self.frame_duration)?;
+        // Real elapsed time rather than frame_index * nominal duration: frames are
+        // submitted whenever the source produces them, so a frame counter drifts away
+        // from the wall clock and rate control mis-allocates bits.
+        let elapsed = self.started.elapsed();
+        sample.SetSampleTime((elapsed.as_nanos() / 100) as i64)?;
         sample.SetSampleDuration(self.frame_duration)?;
         self.frame_index += 1;
         Ok(sample)
