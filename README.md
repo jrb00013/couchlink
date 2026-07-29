@@ -1,5 +1,6 @@
 # couchlink
-<img width="955" height="388" alt="image" src="https://github.com/user-attachments/assets/e1b3ed3c-0a90-42dc-8d22-7ef70d673b38" />
+<img width="1918" height="898" alt="image" src="https://github.com/user-attachments/assets/5f855a69-77e1-4d20-8bf6-b5a90e00fcae" />
+
 
 **Full co-play device for emulator nights.** You run PCSX2 or RPCS3. Your friend opens a
 browser (or native client), gets an **HD low-latency** stream of your game, and plays with
