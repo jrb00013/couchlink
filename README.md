@@ -36,13 +36,14 @@ background child processes, auto-generates a session if you don't have one,
 and tears everything down together on Ctrl-C. Detects Linux / WSL / macOS.
 
 ```bash
-./scripts/run.sh host
-# prints the friend's join URL + QR (session, PIN, and TURN creds baked in)
+./scripts/run.sh host --local    # same Wi‑Fi (default) — LAN join URL, no UPnP/TURN
+./scripts/run.sh host --online   # internet — public IP + TURN + UPnP
+# prints the friend's join URL + QR (session, PIN, and TURN creds baked in when online)
 ```
 
-Friend — open the printed URL from anywhere, no VPN/router setup needed, press
-a button on their DualSense, then Join. Or, for a native client instead of the
-browser:
+Friend — open the printed URL. For `--online`, no VPN needed if UPnP (or manual
+port forward of **8443/tcp** + **3478/udp+tcp**) works. Press a button on their
+DualSense, then Join. Or, for a native client instead of the browser:
 
 ```bash
 ./scripts/run.sh client        # Linux / WSL / macOS

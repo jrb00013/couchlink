@@ -26,13 +26,17 @@ source .env.couchlink
 ### 2. Start a session
 
 ```bash
-./scripts/run.sh host
+./scripts/run.sh host --local     # couch / same Wi‑Fi
+./scripts/run.sh host --online    # friend over the internet
 ```
+
+`--local` (default) prints a LAN join URL and skips UPnP/TURN.  
+`--online` fetches your public IP, starts TURN, and opens ports via UPnP.
 
 This starts, in one terminal:
 
 - Signaling + web UI on **`:8443`**
-- **TURN** on **`:3478`**
+- **TURN** on **`:3478`** (online only)
 - **couchlink-host** (capture + encode + virtual DualSense for player 2)
 
 Watch the log for:
@@ -41,19 +45,18 @@ Watch the log for:
 friend join URL: http://…/?s=…&p=…&auto=1&ws=ws://…&turn=turn:…&turnu=…&turnp=…
 ```
 
-Copy that **entire URL** (or QR) and send it to your friend (Discord, Signal, etc.). That link already includes session, PIN, signaling WebSocket, and TURN credentials.
+Copy that **entire URL** (or QR) and send it to your friend (Discord, Signal, etc.). That link already includes session, PIN, signaling WebSocket, and TURN credentials (when online).
 
-### 3. Make yourself reachable from the internet
+### 3. Make yourself reachable from the internet (`--online`)
 
 The join URL must use addresses your friend can reach—not `127.0.0.1`.
 
-1. **Router:** Ensure **TCP 8443** (signaling/web) and **UDP+TCP 3478** (TURN) reach your PC. `run.sh host` tries **UPnP** automatically; if it fails, forward those ports manually to your gaming machine’s LAN IP.
-2. **Public IP:** TURN is configured with your public IP when possible (`ifconfig.me`). If you’re on CGNAT or UPnP fails, set in `.env.couchlink` before starting host:
+1. **Router:** Ensure **TCP 8443** (signaling/web) and **UDP+TCP 3478** (TURN) reach your PC. `run.sh host --online` tries **UPnP** automatically; if it fails, forward those ports manually to your gaming machine’s LAN IP.
+2. **Public IP:** Detected via `ifconfig.me`. If that fails or you’re on CGNAT, set in `.env.couchlink` before starting:
    - `COUCHLINK_PUBLIC_IP=your.public.ip`
-   - `COUCHLINK_SIGNALING=ws://your.public.ip:8443/ws`
 3. **Firewall on the host OS:** Allow inbound **8443/tcp** and **3478/udp+tcp**.
 
-If the printed join URL still shows `127.0.0.1`, edit `.env.couchlink` so `COUCHLINK_SIGNALING=ws://YOUR_PUBLIC_IP:8443/ws`, restart host, and send the **new** join URL.
+If the printed join URL still shows a bad address, set `COUCHLINK_PUBLIC_IP`, restart with `--online`, and send the **new** join URL.
 
 ### 4. Emulator
 
@@ -111,8 +114,8 @@ No second VPN required if TURN + port forwarding (or UPnP) work.
 
 ## Minimal checklist
 
-1. Host: `./scripts/run.sh host` on Linux/WSL.  
-2. Host: send **full join URL** with public reachability.  
+1. Host: `./scripts/run.sh host --online` (or `--local` on the same Wi‑Fi).  
+2. Host: send **full join URL** from the log/QR.  
 3. Friend: open URL **or** install desktop player + `join_url` config.  
 4. Friend: pad or keyboard.  
 5. Host: Player 2 = virtual DualSense in emulator.  
