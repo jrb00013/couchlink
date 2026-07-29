@@ -152,9 +152,16 @@ async fn main() -> Result<()> {
     // The metronome the video is sent on. Delay (not Burst) on a missed tick so a slow
     // frame never causes a catch-up flurry — a burst is exactly the jitter we are
     // trying to remove.
-    let mut cadence = tokio::time::interval(Duration::from_millis(
-        1000 / preset.fps.max(1) as u64,
-    ));
+    // When frames arrive pre-encoded, the Windows side owns the cadence and this
+    // loop is only a relay — so poll fast and forward immediately. Holding an
+    // already-encoded frame for the rest of a 16ms beat is pure added latency.
+    // On the raw path this interval *is* the metronome and must stay at frame time.
+    let tick = if capturer.is_preencoded() {
+        Duration::from_millis(2)
+    } else {
+        Duration::from_millis(1000 / preset.fps.max(1) as u64)
+    };
+    let mut cadence = tokio::time::interval(tick);
     cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let _ = signal_out.send(stream_info_message(
