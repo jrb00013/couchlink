@@ -374,7 +374,18 @@ async fn setup_pad_channel(
 pub fn create_virtual_pad(as_bluetooth: bool) -> Result<VirtualPad> {
     let mut cfg = VirtualPadConfig::default();
     cfg.as_bluetooth = as_bluetooth;
-    VirtualPad::create(cfg)
+    #[cfg(target_os = "linux")]
+    {
+        VirtualPad::create(cfg)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Video-only host: stream + WebRTC work; pad injection needs Linux uinput / ViGEm.
+        tracing::warn!(
+            "virtual DualSense injection is Linux-only on this build — running video-only host"
+        );
+        Ok(VirtualPad::create_noop(cfg))
+    }
 }
 
 /// Helper kept for tests / demos without WebRTC.

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-platform.sh"
+export PATH="$(couchlink_tool_path "${HOME:-}")${PATH:+:$PATH}"
 # Preserve reachability overrides exported by run.sh (--local / --online).
 _KEEP_MODE="${COUCHLINK_MODE:-}"
 _KEEP_SIGNALING="${COUCHLINK_SIGNALING:-}"

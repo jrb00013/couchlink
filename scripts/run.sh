@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One command to run couchlink: ./scripts/run.sh [host|client] [--local|--online]
-# Detects platform (WSL / Linux native / macOS), starts signaling + TURN + host
+# Auto-detects platform (Linux / WSL / macOS), starts signaling + TURN + host
 # (or just the client) as background child processes of this one script, and
 # tears them all down together on Ctrl-C. No separate terminals needed.
 #
@@ -11,6 +11,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-platform.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-upnp.sh"
 
@@ -24,6 +26,8 @@ usage: $0 [host|client] [--local|--online]
   --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
   --online  Internet. Host: public IP + TURN + UPnP. Client: prompts for the
             host join URL if unset (TURN required for NAT/WSL).
+
+Platform is auto-detected (linux / wsl / macos).
 EOF
 }
 
@@ -43,18 +47,15 @@ for arg in "$@"; do
   esac
 done
 
-PLATFORM="linux"
-if grep -qi microsoft /proc/version 2>/dev/null; then
-  PLATFORM="wsl"
-elif [[ "$(uname -s)" == "Darwin" ]]; then
-  PLATFORM="macos"
-fi
+PLATFORM="$(couchlink_detect_platform)"
 echo "==> platform: $PLATFORM · role: $ROLE · mode: $MODE"
 
+# Put Homebrew / cargo on PATH for macOS (system bash often lacks them).
+export PATH="$(couchlink_tool_path "${HOME:-}")${PATH:+:$PATH}"
+
 if [[ "$ROLE" == "host" && "$PLATFORM" == "macos" ]]; then
-  echo "macOS has no uinput — the host's virtual DualSense injection needs Linux or WSL."
-  echo "Run the host role from a Linux machine or WSL; macOS can still run './scripts/run.sh client'."
-  exit 1
+  echo "note: macOS host is video-only — no virtual DualSense (uinput is Linux/WSL)."
+  echo "      Friend pad input will not inject; use Linux/WSL host for full co-play."
 fi
 
 [[ -f .env.couchlink ]] || cp .env.example .env.couchlink
@@ -152,4 +153,18 @@ else
   PIDS+=($!)
 fi
 
-wait -n "${PIDS[@]}"
+# wait -n needs bash ≥ 4.3; macOS /bin/bash is still 3.2.
+if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] \
+  || { [[ "${BASH_VERSINFO[0]}" -eq 4 ]] && [[ "${BASH_VERSINFO[1]}" -ge 3 ]]; }; then
+  wait -n "${PIDS[@]}"
+else
+  while true; do
+    for pid in "${PIDS[@]}"; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid"
+        exit $?
+      fi
+    done
+    sleep 0.5
+  done
+fi

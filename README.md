@@ -60,8 +60,9 @@ see `crates/client/src/keyboard_input.rs` for the full mapping).
 
 **Desktop installers:** [FRIEND_INSTALL.md](docs/FRIEND_INSTALL.md) · [NO_COMPUTER_UX.md](docs/NO_COMPUTER_UX.md) · [DESKTOP_CLIENT.md](docs/DESKTOP_CLIENT.md) · [PLAY_TOGETHER.md](docs/PLAY_TOGETHER.md)
 
-Host role needs Linux `uinput` for the virtual DualSense — run it from Linux
-or WSL; macOS/native Windows can only run the friend/client role.
+Host role needs Linux `uinput` for the virtual DualSense — run full co-play
+from Linux or WSL. macOS auto-detects and can run **client**, signaling, and a
+**video-only host** (no pad injection).
 
 <details>
 <summary>Individual scripts (if you want separate terminals/logs)</summary>

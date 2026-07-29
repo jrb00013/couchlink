@@ -26,11 +26,27 @@ if [[ "$MODE" != "online" ]]; then
 fi
 
 if ! command -v turnserver >/dev/null; then
-  echo "coturn not installed — installing (needs sudo)"
+  echo "coturn not installed — attempting install"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/lib-platform.sh"
+  PLATFORM="$(couchlink_detect_platform)"
   if command -v apt-get >/dev/null; then
     sudo apt-get update -qq && sudo apt-get install -y -qq coturn
+  elif [[ "$PLATFORM" == "macos" ]]; then
+    BREW="$(couchlink_brew_bin || true)"
+    if [[ -n "$BREW" ]]; then
+      "$BREW" install coturn
+      export PATH="$(couchlink_tool_path "${HOME:-}"):${PATH:-}"
+    else
+      echo "Install Homebrew (https://brew.sh) then: brew install coturn" >&2
+      exit 1
+    fi
   else
-    echo "Install coturn manually: https://github.com/coturn/coturn"
+    echo "Install coturn manually: https://github.com/coturn/coturn" >&2
+    exit 1
+  fi
+  if ! command -v turnserver >/dev/null; then
+    echo "coturn install finished but turnserver is still not on PATH" >&2
     exit 1
   fi
 fi

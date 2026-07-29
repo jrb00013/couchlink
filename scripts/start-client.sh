@@ -2,6 +2,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
+source "$ROOT/scripts/lib-platform.sh"
+export PATH="$(couchlink_tool_path "${HOME:-}")${PATH:+:$PATH}"
+# shellcheck disable=SC1091
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
 
 # Prefer a full invite link. Missing pieces → couchlink-client prompts interactively.

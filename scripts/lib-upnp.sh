@@ -3,6 +3,20 @@
 # falls back to whatever ports are already reachable.
 
 upnp_local_ip() {
+  # Prefer shared detector (Linux + macOS); fall back to hostname -I.
+  if declare -F couchlink_local_ip >/dev/null 2>&1; then
+    couchlink_local_ip
+    return 0
+  fi
+  local _root
+  _root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  # shellcheck disable=SC1091
+  if [[ -f "$_root/scripts/lib-platform.sh" ]]; then
+    # shellcheck source=lib-platform.sh
+    source "$_root/scripts/lib-platform.sh"
+    couchlink_local_ip
+    return 0
+  fi
   hostname -I 2>/dev/null | awk '{print $1}'
 }
 
