@@ -166,12 +166,21 @@ impl WindowsBridge {
         Ok(Some(info))
     }
 
-    /// Read the newest available frame, discarding any backlog. The socket buffers
-    /// whole frames when the encoder falls behind; consuming them in order would add
-    /// permanent, ever-growing latency, so only the most recent one is kept.
+    /// Read the next frame.
+    ///
+    /// For raw pixels, skip to the newest one: the socket buffers whole frames when
+    /// the encoder falls behind and consuming them in order would add permanent,
+    /// growing latency.
+    ///
+    /// For H.264 every frame must be delivered in order. P-frames reference the
+    /// frames before them, so discarding one corrupts the decoder until the next
+    /// keyframe — up to IDR_INTERVAL of stutter for a few bytes saved.
     fn latest_frame(&mut self) -> Result<bool> {
         if self.read_frame(IDLE_POLL)?.is_none() {
             return Ok(false);
+        }
+        if self.format == FrameFormat::H264 {
+            return Ok(true);
         }
         let mut dropped = 0u32;
         while self.read_frame(DRAIN_POLL)?.is_some() {

@@ -42,6 +42,10 @@ pub struct HardwareEncoder {
     nv12: Vec<u8>,
     /// Set once we have seen how this encoder formats its output.
     annex_b_confirmed: bool,
+    /// True when the transform allocates its own output samples. When false we must
+    /// hand it a buffer of at least `output_sample_size` on every ProcessOutput.
+    provides_samples: bool,
+    output_sample_size: u32,
 }
 
 // SAFETY: COM is initialised as a multithreaded apartment (COINIT_MULTITHREADED),
@@ -134,6 +138,29 @@ impl HardwareEncoder {
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
         }
 
+        // Whether the transform allocates output samples decides how ProcessOutput
+        // must be called. Getting this wrong is E_UNEXPECTED partway into a stream.
+        let (provides_samples, output_sample_size) = unsafe {
+            match transform.GetOutputStreamInfo(0) {
+                Ok(info) => {
+                    const PROVIDES: u32 = 0x100; // MFT_OUTPUT_STREAM_PROVIDES_SAMPLES
+                    const CAN_PROVIDE: u32 = 0x200; // MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES
+                    let provides = info.dwFlags & (PROVIDES | CAN_PROVIDE) != 0;
+                    tracing::info!(
+                        "output stream: flags={:#x} size={} provides_samples={}",
+                        info.dwFlags,
+                        info.cbSize,
+                        provides
+                    );
+                    (provides, info.cbSize.max(1))
+                }
+                Err(e) => {
+                    tracing::warn!("GetOutputStreamInfo failed ({e}); assuming self-allocating");
+                    (true, 1)
+                }
+            }
+        };
+
         let sequence_header = unsafe { read_sequence_header(&transform) };
         let codec_api: Option<ICodecAPI> = transform.cast().ok();
         let events: Option<IMFMediaEventGenerator> = if is_async {
@@ -162,6 +189,8 @@ impl HardwareEncoder {
             frame_duration: 10_000_000 / fps as i64,
             nv12: vec![0u8; nv12_len(width, height)],
             annex_b_confirmed: false,
+            provides_samples,
+            output_sample_size,
         })
     }
 
@@ -251,6 +280,14 @@ impl HardwareEncoder {
         Ok(())
     }
 
+    unsafe fn alloc_output_sample(&self) -> Result<IMFSample> {
+        let buffer = MFCreateMemoryBuffer(self.output_sample_size)
+            .context("allocate output buffer")?;
+        let sample = MFCreateSample().context("allocate output sample")?;
+        sample.AddBuffer(&buffer)?;
+        Ok(sample)
+    }
+
     unsafe fn make_sample(&mut self, bgra: &[u8]) -> Result<IMFSample> {
         bgra_to_nv12(bgra, self.width as usize, self.height as usize, &mut self.nv12);
         let buffer =
@@ -279,13 +316,21 @@ impl HardwareEncoder {
         Ok(out)
     }
 
-    /// One ProcessOutput call. `None` means the transform has nothing to give right
-    /// now (it wants more input).
+    /// Exactly one ProcessOutput call. `None` means the transform has nothing to give
+    /// right now — it wants more input, or it just renegotiated its output type.
     fn process_output_once(&mut self) -> Result<Option<EncodedFrame>> {
-        loop {
+        {
+            // A transform that does not allocate its own samples expects one from us,
+            // sized by GetOutputStreamInfo. Passing None to such a transform is what
+            // produces E_UNEXPECTED once its internal pool is exhausted.
+            let supplied = if self.provides_samples {
+                None
+            } else {
+                Some(unsafe { self.alloc_output_sample()? })
+            };
             let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: 0,
-                pSample: std::mem::ManuallyDrop::new(None),
+                pSample: std::mem::ManuallyDrop::new(supplied),
                 dwStatus: 0,
                 pEvents: std::mem::ManuallyDrop::new(None),
             }];
@@ -299,10 +344,12 @@ impl HardwareEncoder {
                     return Ok(None);
                 }
                 if e.code() == MF_E_TRANSFORM_STREAM_CHANGE {
-                    // The transform renegotiated its output type, which also
-                    // invalidates the SPS/PPS we cached. Re-read and retry.
+                    // Renegotiate, but do NOT call ProcessOutput again here. On an
+                    // asynchronous MFT every ProcessOutput must be invited by its own
+                    // METransformHaveOutput event; an unsolicited second call is
+                    // exactly what returns E_UNEXPECTED. Wait for the next event.
                     self.renegotiate_output()?;
-                    continue;
+                    return Ok(None);
                 }
                 return Err(anyhow!("ProcessOutput failed: {e}"));
             }

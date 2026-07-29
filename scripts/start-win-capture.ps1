@@ -5,6 +5,7 @@ param(
     [string]$Source = "picker",
     [string]$Window = "",
     [int]$MaxFps = 60,
+    [switch]$GpuEncode,
     [int]$MaxWidth = 1280,
     [int]$MaxHeight = 720,
     [switch]$ListWindows,
@@ -27,6 +28,7 @@ if ($ListWindows) {
 
 $argList = @("--connect", $Connect, "--max-fps", "$MaxFps", "--source", $Source,
              "--max-width", "$MaxWidth", "--max-height", "$MaxHeight")
+if ($GpuEncode) { $argList += @("--gpu-encode", "true") }
 if ($Source -eq "window") {
     if (-not $Window) { throw "-Window is required when -Source window" }
     $argList += @("--window", $Window)

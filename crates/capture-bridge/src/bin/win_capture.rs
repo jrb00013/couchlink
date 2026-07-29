@@ -66,11 +66,9 @@ mod run {
         /// Encode H.264 on the GPU here instead of shipping raw pixels for the host
         /// to encode.
         ///
-        /// Off by default: the hardware MFT on this machine rejects our ProcessOutput
-        /// sequence with E_UNEXPECTED partway into a stream, and falling back after
-        /// frames have already been sent leaves the host waiting. Opt in with
-        /// `--gpu-encode true` while that is being worked out.
-        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        /// Falls back to raw BGRA automatically if no hardware encoder exists or the
+        /// transform fails; the host handles the format changing mid-stream.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         pub gpu_encode: bool,
         #[arg(long, default_value_t = 8000)]
         pub bitrate_kbps: u32,
@@ -141,6 +139,15 @@ mod run {
                     }
                 };
                 let mut latest = Some((w, h, pixels));
+                // Feed the encoder on a fixed beat rather than whenever WGC happens
+                // to deliver. Output cadence follows input cadence, and a receiver
+                // sizes its jitter buffer from irregularity, not from rate — this is
+                // the same fix that took the raw path's buffer from 97ms to 6ms.
+                let tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
+                let mut next_submit = Instant::now();
+                let mut encoded = 0u32;
+                let mut stalled = 0u32;
+                let mut encoded_window = Instant::now();
 
                 loop {
                     if IDR_REQUESTED.swap(false, Ordering::Relaxed) {
@@ -148,6 +155,20 @@ mod run {
                     }
                     match encoder.next_request() {
                         Ok(EncoderRequest::NeedInput) => {
+                            // Hold the beat. Sleeping here is safe: the encoder is
+                            // idle until fed, and the capture thread keeps replacing
+                            // `latest` meanwhile, so we always submit the freshest
+                            // frame rather than an older queued one.
+                            let now = Instant::now();
+                            if next_submit > now {
+                                std::thread::sleep(next_submit - now);
+                            }
+                            next_submit = Instant::now() + tick;
+
+                            // Take the newest frame available, not the oldest.
+                            while let Ok(newer) = raw_rx.try_recv() {
+                                latest = Some(newer);
+                            }
                             let Some((fw, fh, px)) =
                                 latest.take().or_else(|| raw_rx.recv().ok())
                             else {
@@ -167,9 +188,25 @@ mod run {
                         Ok(EncoderRequest::HaveOutput(frames)) => {
                             let (w, h) = encoder.dimensions();
                             for f in frames {
+                                let bytes = f.data.len();
+                                let key = f.keyframe;
                                 // Socket writer behind? Skip rather than queue.
-                                let _ =
-                                    out.try_send((w, h, f.data, FrameFormat::H264, f.keyframe));
+                                let queued = out
+                                    .try_send((w, h, f.data, FrameFormat::H264, key))
+                                    .is_ok();
+                                encoded += 1;
+                                if !queued {
+                                    stalled += 1;
+                                }
+                                if encoded_window.elapsed() >= Duration::from_secs(5) {
+                                    info!(
+                                        "encoded {:.1} fps ({bytes} bytes/frame, {stalled} not queued)",
+                                        encoded as f64 / encoded_window.elapsed().as_secs_f64()
+                                    );
+                                    encoded = 0;
+                                    stalled = 0;
+                                    encoded_window = Instant::now();
+                                }
                             }
                             latest = raw_rx.try_recv().ok();
                         }
@@ -382,11 +419,13 @@ mod run {
             return list_windows();
         }
 
-        // Depth 1, not 2: a queued frame is a frame the viewer will see late. With
-        // depth 2 a frame could sit behind another for a whole send time before it
-        // even reached the socket. Dropping the newest when busy costs a frame;
-        // queueing it costs latency on every frame after it.
-        let (tx, rx) = mpsc::sync_channel::<FrameMsg>(1);
+        // Depth is a latency/throughput trade and it depends on frame size. A raw
+        // 3.3MB frame takes ~50ms to push, so queueing one costs real latency —
+        // depth 1. An encoded frame is under 70KB and often under 1KB, so a couple
+        // of slots cost microseconds and stop the encoder's output being thrown away
+        // whenever the writer is mid-flush.
+        let queue_depth = if args.gpu_encode { 2 } else { 1 };
+        let (tx, rx) = mpsc::sync_channel::<FrameMsg>(queue_depth);
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
         // Encoding on the GPU here rather than on the host removes both the software
         // encoder and almost all of the wire cost; if anything about it fails we

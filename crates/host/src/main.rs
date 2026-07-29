@@ -237,28 +237,34 @@ async fn main() -> Result<()> {
                 // encode. Everything below this block exists only for raw pixels.
                 let bgra = match frame {
                     capture::Captured::H264 { nal, keyframe } => {
-                        if force_idr || idr_burst > 0 {
-                            // The Windows encoder owns keyframe timing here, so ask it
-                            // rather than pretending we control the GOP.
-                            capturer.request_idr();
-                            force_idr = false;
-                            idr_burst = 0;
+                        // Relay every encoded frame that has arrived, not one per
+                        // tick. The encoder's cadence is set on the Windows side; a
+                        // backlog here would be shown late, and H.264 frames cannot
+                        // be skipped to catch up without corrupting the decoder.
+                        let mut queue = vec![(nal, keyframe)];
+                        while let Some(capture::Captured::H264 { nal, keyframe }) =
+                            capturer.capture()?
+                        {
+                            queue.push((nal, keyframe));
+                            if queue.len() >= 8 {
+                                break;
+                            }
                         }
-                        if keyframe {
-                            last_idr = std::time::Instant::now();
-                        } else if last_idr.elapsed() >= IDR_INTERVAL {
-                            capturer.request_idr();
-                            last_idr = std::time::Instant::now();
-                        }
-                        if capture_ok_announced.is_none() {
-                            capture_ok_announced = Some(true);
-                            let _ = signal_out.send(stream_info_message(&preset, Some(true), None));
-                        }
-                        let real_gap = last_push
+                        // Spread the real elapsed time across the burst. Timing each
+                        // frame from the previous *push* would report ~1ms for every
+                        // frame after the first, so RTP media time would advance far
+                        // slower than the wall clock and the receiver would grow its
+                        // buffer to cover the drift — delay that accumulates.
+                        let burst_gap = last_push
                             .elapsed()
                             .clamp(Duration::from_millis(1), Duration::from_millis(500));
+                        let per_frame = burst_gap / queue.len().max(1) as u32;
                         last_push = std::time::Instant::now();
-                        if let Err(e) = host.push_h264(nal, real_gap).await {
+                        for (nal, keyframe) in queue {
+                        if keyframe {
+                            last_idr = std::time::Instant::now();
+                        }
+                        if let Err(e) = host.push_h264(nal, per_frame).await {
                             warn!("push h264: {e}");
                         } else {
                             frames_out += 1;
@@ -278,6 +284,21 @@ async fn main() -> Result<()> {
                                 idle_frames = 0;
                                 stage_capture = Duration::ZERO;
                             }
+                        }
+                        }
+                        // Keyframe control lives on the Windows side here, so ask for
+                        // one rather than pretending we own the GOP.
+                        if force_idr || idr_burst > 0 {
+                            capturer.request_idr();
+                            force_idr = false;
+                            idr_burst = 0;
+                        } else if last_idr.elapsed() >= IDR_INTERVAL {
+                            capturer.request_idr();
+                            last_idr = std::time::Instant::now();
+                        }
+                        if capture_ok_announced.is_none() {
+                            capture_ok_announced = Some(true);
+                            let _ = signal_out.send(stream_info_message(&preset, Some(true), None));
                         }
                         continue;
                     }
