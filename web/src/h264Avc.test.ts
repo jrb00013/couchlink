@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  annexBHasIdr,
   annexBToLengthPrefixed,
   buildAvcC,
   extractParamSets,
@@ -47,6 +48,18 @@ describe("h264Avc", () => {
     expect(lp[2]).toBe(0);
     expect(lp[3]).toBe(idr.length);
     expect(Array.from(lp.subarray(4))).toEqual(Array.from(idr));
+  });
+
+  it("omits param sets when requested", () => {
+    const data = annexB(sps, pps, idr);
+    const lp = annexBToLengthPrefixed(data, { omitParamSets: true });
+    expect(lp[3]).toBe(idr.length);
+    expect(Array.from(lp.subarray(4))).toEqual(Array.from(idr));
+  });
+
+  it("detects IDR NALs", () => {
+    expect(annexBHasIdr(annexB(sps, pps, idr))).toBe(true);
+    expect(annexBHasIdr(annexB(sps, pps))).toBe(false);
   });
 });
 

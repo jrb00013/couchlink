@@ -99,8 +99,47 @@ await page.waitForFunction(
   },
   { timeout: 60_000 }
 );
-console.log("UI state: connected — settling 3s…");
-await page.waitForTimeout(3000);
+console.log("UI state: connected — waiting for present path…");
+
+// WebCodecs may need an IDR + 1s stats window; RTP canvas may also take a beat.
+// Prefer a painted present path over a premature "webcodecs" label with no frames.
+let present = "unknown";
+let wcDiag = null;
+for (let i = 0; i < 12; i++) {
+  await page.waitForTimeout(1000);
+  const snap = await page.evaluate(() => {
+    const spans = Array.from(document.querySelectorAll("footer.meta span"));
+    const text = spans.map((s) => s.textContent || "").join(" ");
+    const wcLine = spans
+      .map((s) => s.textContent || "")
+      .find((t) => /webcodecs:\s*\d+/i.test(t));
+    const canvasLine = spans
+      .map((s) => s.textContent || "")
+      .find((t) => /canvas:\s*\d+/i.test(t));
+    let path = "unknown";
+    if (wcLine) path = "webcodecs";
+    else if (canvasLine || /present:\s*canvas/i.test(text)) path = "canvas";
+    else if (/present:\s*video/i.test(text)) path = "video";
+    else if (/present:\s*webcodecs/i.test(text)) path = "webcodecs-pending";
+    let diag = null;
+    if (wcLine) {
+      const fps = /@\s*(\d+)fps/i.exec(wcLine);
+      const drop = /drop=(\d+)/i.exec(wcLine);
+      diag = {
+        presentFps: fps ? Number(fps[1]) : 0,
+        dropped: drop ? Number(drop[1]) : -1,
+        raw: wcLine,
+      };
+    }
+    return { path, diag, text };
+  });
+  present = snap.path;
+  wcDiag = snap.diag;
+  if (present === "webcodecs" && wcDiag && wcDiag.presentFps >= 50) break;
+  if (present === "canvas" || present === "video") break;
+}
+if (present === "webcodecs-pending") present = "webcodecs";
+console.log("present path:", present);
 
 async function readInbound() {
   return page.evaluate(async () => {
@@ -155,31 +194,9 @@ for (let i = 0; i < 4; i++) {
   prev = next;
 }
 
-const present = await page.evaluate(() => {
-  const spans = Array.from(document.querySelectorAll("footer.meta span"));
-  const text = spans.map((s) => s.textContent || "").join(" ");
-  if (/present:\s*webcodecs/i.test(text) || /webcodecs:/i.test(text)) return "webcodecs";
-  if (/present:\s*canvas/i.test(text) || /canvas:/i.test(text)) return "canvas";
-  if (/present:\s*video/i.test(text) || /video:/i.test(text)) return "video";
-  return "unknown";
-});
-
-const wcDiag = await page.evaluate(() => {
-  const spans = Array.from(document.querySelectorAll("footer.meta span"));
-  const line = spans.map((s) => s.textContent || "").find((t) => /webcodecs:/i.test(t));
-  if (!line) return null;
-  const fps = /@\s*(\d+)fps/i.exec(line);
-  const drop = /drop=(\d+)/i.exec(line);
-  return {
-    presentFps: fps ? Number(fps[1]) : 0,
-    dropped: drop ? Number(drop[1]) : -1,
-    raw: line,
-  };
-});
-
 await browser.close();
 
-console.log("present path:", present);
+console.log("present path (final):", present);
 if (present === "webcodecs") {
   console.log("webcodecs diag:", wcDiag);
   // WebCodecs bypasses inbound-rtp JB — gate on present FPS from the UI diag.

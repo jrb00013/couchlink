@@ -88,15 +88,41 @@ export default function App() {
   const viewRef = useRef<LowLatencyCanvasView | null>(null);
   const wcRef = useRef<WebCodecsCanvasView | null>(null);
   const webcodecsActiveRef = useRef(false);
+  const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
   const [videoDiag, setVideoDiag] = useState("video: —");
+
+  function clearRtpFallbackTimer() {
+    if (rtpFallbackTimer.current) {
+      clearTimeout(rtpFallbackTimer.current);
+      rtpFallbackTimer.current = null;
+    }
+  }
+
+  /** If WebCodecs never paints, fall back to the RTP media track. */
+  function armWebCodecsFallback() {
+    clearRtpFallbackTimer();
+    rtpFallbackTimer.current = window.setTimeout(() => {
+      rtpFallbackTimer.current = null;
+      if (!webcodecsActiveRef.current) return;
+      if (wcRef.current?.hasPainted()) return;
+      const stream = pendingStreamRef.current;
+      cwarn("WebCodecs produced no frames — falling back to RTP canvas");
+      webcodecsActiveRef.current = false;
+      playerRef.current?.preferRtpPresent();
+      wcRef.current?.stop();
+      setVideoDiag("webcodecs: no frames — RTP fallback");
+      if (stream) attachStream(stream);
+    }, 2500);
+  }
 
   function ensureWebCodecs(): boolean {
     if (preferLegacyVideo() || !canUseWebCodecs() || !canvasRef.current) return false;
     if (!wcRef.current) {
       wcRef.current = new WebCodecsCanvasView(canvasRef.current);
       wcRef.current.setStatsHandler((s) => {
+        clearRtpFallbackTimer();
         setVideoDiag(
           `webcodecs: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped} dec=${s.decodeMs.toFixed(1)}ms`
         );
@@ -106,7 +132,8 @@ export default function App() {
         playerRef.current?.requestVideoKeyframe();
       });
     }
-    if (!wcRef.current.start()) return false;
+    // Don't tear down a live decoder on every callback.
+    if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
     webcodecsActiveRef.current = true;
     viewRef.current?.stop();
     if (videoRef.current) {
@@ -116,15 +143,18 @@ export default function App() {
     canvasRef.current.classList.remove("is-hidden");
     setPresentMode("webcodecs");
     clog("present mode: WebCodecs + CLVD");
+    armWebCodecsFallback();
     return true;
   }
 
   function attachStream(stream: MediaStream) {
-    // WebCodecs path owns the canvas — don't steal it for RTP.
+    pendingStreamRef.current = stream;
+    // WebCodecs path owns the canvas — keep the RTP stream for fallback only.
     if (webcodecsActiveRef.current) {
-      clog("RTP stream ignored — WebCodecs present active");
+      clog("RTP stream held for fallback — WebCodecs present active");
       return;
     }
+    clearRtpFallbackTimer();
     wcRef.current?.stop();
     const track = stream.getVideoTracks()[0];
     const wantCanvas =
@@ -246,6 +276,7 @@ export default function App() {
       setState(s);
       if (d) setDetail(d);
       if (s === "disconnected" || s === "error" || s === "waiting_host") {
+        clearRtpFallbackTimer();
         viewRef.current?.stop();
         wcRef.current?.stop();
         webcodecsActiveRef.current = false;
@@ -258,6 +289,8 @@ export default function App() {
         if (!ensureWebCodecs()) {
           cwarn("WebCodecs present failed to start — waiting for RTP fallback");
           webcodecsActiveRef.current = false;
+          const stream = pendingStreamRef.current;
+          if (stream) attachStream(stream);
         }
       }
       setCtxHint(secureContextHint());
@@ -286,6 +319,7 @@ export default function App() {
     playerRef.current = player;
     const onPageHide = () => {
       clog("page hide → disconnect");
+      clearRtpFallbackTimer();
       viewRef.current?.stop();
       wcRef.current?.stop();
       webcodecsActiveRef.current = false;
@@ -294,6 +328,7 @@ export default function App() {
     window.addEventListener("pagehide", onPageHide);
     return () => {
       window.removeEventListener("pagehide", onPageHide);
+      clearRtpFallbackTimer();
       viewRef.current?.stop();
       wcRef.current?.stop();
       webcodecsActiveRef.current = false;

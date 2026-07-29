@@ -457,8 +457,10 @@ export class CouchlinkPlayer {
       this.gotVideoTrack = true;
       this.startStatsPolling();
       this.cb.onState("connected", "video track");
+      // Always deliver the stream so the UI can fall back if WebCodecs never paints.
       if (this.webcodecsPath) {
-        clog("RTP track received — ignored for present (WebCodecs/CLVD active)");
+        clog("RTP track received — held for fallback (WebCodecs/CLVD preferred)");
+        this.cb.onVideo(stream);
         return;
       }
       this.cb.onPresentPath?.("rtp");
@@ -563,6 +565,12 @@ export class CouchlinkPlayer {
     } catch (e) {
       cwarn("pli send failed", String(e));
     }
+  }
+
+  /** Stop preferring CLVD/WebCodecs — UI is switching to the RTP present path. */
+  preferRtpPresent() {
+    this.webcodecsPath = false;
+    this.cb.onPresentPath?.("rtp", "WebCodecs fallback");
   }
 
   private startPadLoop() {

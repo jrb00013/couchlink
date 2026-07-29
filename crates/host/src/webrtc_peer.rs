@@ -192,14 +192,15 @@ impl WebRtcHost {
             .await?;
         setup_pad_channel(pad_dc, pad_tx_dc, pad_device_dc).await;
 
-        // Video: same reliability profile. Browser WebCodecs consumes this and
-        // skips Chrome's media jitter buffer (~7ms floor on the RTP path).
+        // Video: unordered, but allow a short retransmit window so fragmented
+        // IDRs (often >64 KiB) are not permanently lost on a single drop.
+        // Browser WebCodecs consumes this and skips Chrome's media JB.
         let video_dc = pc2
             .create_data_channel(
                 VIDEO_CHANNEL,
                 Some(webrtc::data_channel::data_channel_init::RTCDataChannelInit {
                     ordered: Some(false),
-                    max_retransmits: Some(0),
+                    max_packet_life_time: Some(100),
                     ..Default::default()
                 }),
             )

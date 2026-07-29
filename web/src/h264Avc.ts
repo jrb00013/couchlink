@@ -8,7 +8,6 @@ export type AvcParamSets = {
 /** Find 3- or 4-byte start codes; return NAL payloads (no start code). */
 export function splitAnnexB(data: Uint8Array): Uint8Array[] {
   const nals: Uint8Array[] = [];
-  let i = 0;
   const findStart = (from: number): { at: number; len: number } | null => {
     for (let j = from; j + 3 < data.length; j++) {
       if (data[j] === 0 && data[j + 1] === 0) {
@@ -25,9 +24,7 @@ export function splitAnnexB(data: Uint8Array): Uint8Array[] {
     const nalEnd = next ? next.at : data.length;
     if (nalEnd > nalStart) nals.push(data.subarray(nalStart, nalEnd));
     start = next;
-    i = nalEnd;
   }
-  void i;
   return nals;
 }
 
@@ -42,6 +39,14 @@ export function extractParamSets(annexB: Uint8Array): AvcParamSets | null {
   }
   if (sps && pps) return { sps, pps };
   return null;
+}
+
+/** True if the AU contains an IDR slice (NAL type 5). */
+export function annexBHasIdr(annexB: Uint8Array): boolean {
+  for (const nal of splitAnnexB(annexB)) {
+    if (nal.length && (nal[0] & 0x1f) === 5) return true;
+  }
+  return false;
 }
 
 /** ISO/IEC 14496-15 avcC box body (no box header). */
@@ -65,13 +70,23 @@ export function buildAvcC(sps: Uint8Array, pps: Uint8Array): Uint8Array {
   return out;
 }
 
+export type AvccOptions = {
+  /** When avcC description is supplied, omit in-band SPS/PPS from samples. */
+  omitParamSets?: boolean;
+};
+
 /** Convert Annex-B AU to length-prefixed AVCC (4-byte big-endian lengths). */
-export function annexBToLengthPrefixed(annexB: Uint8Array): Uint8Array {
+export function annexBToLengthPrefixed(
+  annexB: Uint8Array,
+  opts: AvccOptions = {}
+): Uint8Array {
   const nals = splitAnnexB(annexB).filter((n) => {
     if (!n.length) return false;
     const t = n[0] & 0x1f;
-    // Skip AUD / filler; keep SPS/PPS/IDR/non-IDR/SEI
-    return t !== 9 && t !== 12;
+    // Skip AUD / filler
+    if (t === 9 || t === 12) return false;
+    if (opts.omitParamSets && (t === 7 || t === 8)) return false;
+    return true;
   });
   let size = 0;
   for (const n of nals) size += 4 + n.length;

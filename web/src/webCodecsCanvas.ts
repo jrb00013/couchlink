@@ -6,6 +6,7 @@
 import { clog, cwarn } from "./log";
 import type { VideoAccessUnit } from "./clvd";
 import {
+  annexBHasIdr,
   annexBToLengthPrefixed,
   buildAvcC,
   codecStringFromSps,
@@ -42,6 +43,7 @@ export class WebCodecsCanvasView {
   private configured = false;
   private waitingKeyframe = true;
   private painted = 0;
+  private paintedTotal = 0;
   private dropped = 0;
   private decodeMsAccum = 0;
   private windowStart = 0;
@@ -52,6 +54,7 @@ export class WebCodecsCanvasView {
   private lastPli = 0;
   private description: Uint8Array | null = null;
   private codec = "avc1.42E01F";
+  private running = false;
 
   constructor(private canvas: HTMLCanvasElement) {}
 
@@ -63,7 +66,19 @@ export class WebCodecsCanvasView {
     this.onNeedKeyframe = cb;
   }
 
+  /** True once at least one frame has been painted. */
+  hasPainted(): boolean {
+    return this.paintedTotal > 0;
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
   start(): boolean {
+    if (this.running && this.decoder && this.decoder.state !== "closed") {
+      return true;
+    }
     this.stop();
     if (!canUseWebCodecs()) return false;
 
@@ -80,10 +95,29 @@ export class WebCodecsCanvasView {
     this.configured = false;
     this.description = null;
     this.painted = 0;
+    this.paintedTotal = 0;
     this.dropped = 0;
     this.decodeMsAccum = 0;
     this.windowStart = performance.now();
 
+    if (!this.createDecoder()) {
+      this.stop();
+      return false;
+    }
+    this.running = true;
+    clog("webcodecs canvas ready", {
+      secureContext: window.isSecureContext,
+      desynchronized:
+        (
+          ctx as CanvasRenderingContext2D & {
+            getContextAttributes?: () => { desynchronized?: boolean };
+          }
+        ).getContextAttributes?.()?.desynchronized ?? "unknown",
+    });
+    return true;
+  }
+
+  private createDecoder(): boolean {
     try {
       this.decoder = new VideoDecoder({
         output: (frame) => {
@@ -92,40 +126,45 @@ export class WebCodecsCanvasView {
         },
         error: (e) => {
           cwarn("VideoDecoder error", String(e));
-          this.waitingKeyframe = true;
-          this.configured = false;
-          this.requestKeyframe();
+          this.resetForKeyframe();
         },
-      });
-      clog("webcodecs canvas ready", {
-        secureContext: window.isSecureContext,
-        desynchronized:
-          (
-            ctx as CanvasRenderingContext2D & {
-              getContextAttributes?: () => { desynchronized?: boolean };
-            }
-          ).getContextAttributes?.()?.desynchronized ?? "unknown",
       });
       return true;
     } catch (e) {
       cwarn("VideoDecoder construct failed", String(e));
-      this.stop();
+      this.decoder = null;
       return false;
     }
+  }
+
+  /** Close and rebuild decoder after a fatal decode error — keep canvas/ctx. */
+  private resetForKeyframe() {
+    this.waitingKeyframe = true;
+    this.configured = false;
+    try {
+      this.decoder?.close();
+    } catch {
+      /* ignore */
+    }
+    this.decoder = null;
+    this.createDecoder();
+    this.requestKeyframe();
   }
 
   push(au: VideoAccessUnit) {
     const dec = this.decoder;
     if (!dec || dec.state === "closed") return;
 
-    if (this.waitingKeyframe && !au.keyframe) {
+    const keyframe = au.keyframe || annexBHasIdr(au.annexB);
+
+    if (this.waitingKeyframe && !keyframe) {
       this.dropped += 1;
       this.requestKeyframe();
       return;
     }
 
     try {
-      if (au.keyframe) {
+      if (keyframe) {
         const params = extractParamSets(au.annexB);
         if (params) {
           this.description = buildAvcC(params.sps, params.pps);
@@ -134,8 +173,13 @@ export class WebCodecsCanvasView {
       }
 
       if (!this.configured || dec.state === "unconfigured") {
-        if (!au.keyframe || !this.description) {
+        if (!keyframe || !this.description) {
           this.requestKeyframe();
+          return;
+        }
+        if (dec.state === "configured") {
+          // Shouldn't happen — recreate rather than double-configure.
+          this.resetForKeyframe();
           return;
         }
         dec.configure({
@@ -150,18 +194,19 @@ export class WebCodecsCanvasView {
           codec: this.codec,
           w: au.width,
           h: au.height,
+          annexB: au.annexB.byteLength,
         });
       }
 
       if (dec.decodeQueueSize > 2) {
+        // Prefer newest over catch-up — drop this AU; keep decoder configured.
         this.dropped += 1;
         this.waitingKeyframe = true;
-        this.configured = false;
         this.requestKeyframe();
         return;
       }
 
-      const avcc = annexBToLengthPrefixed(au.annexB);
+      const avcc = annexBToLengthPrefixed(au.annexB, { omitParamSets: true });
       if (!avcc.length) {
         this.dropped += 1;
         return;
@@ -169,7 +214,7 @@ export class WebCodecsCanvasView {
 
       const t0 = performance.now();
       const chunk = new EncodedVideoChunk({
-        type: au.keyframe ? "key" : "delta",
+        type: keyframe ? "key" : "delta",
         timestamp: au.seq * 16_666,
         data: avcc,
       });
@@ -178,9 +223,7 @@ export class WebCodecsCanvasView {
       this.waitingKeyframe = false;
     } catch (e) {
       cwarn("decode push failed", String(e));
-      this.waitingKeyframe = true;
-      this.configured = false;
-      this.requestKeyframe();
+      this.resetForKeyframe();
     }
   }
 
@@ -204,6 +247,7 @@ export class WebCodecsCanvasView {
     }
     ctx.drawImage(frame, 0, 0);
     this.painted += 1;
+    this.paintedTotal += 1;
 
     const now = performance.now();
     if (now - this.windowStart >= 1000) {
@@ -225,6 +269,7 @@ export class WebCodecsCanvasView {
   }
 
   stop() {
+    this.running = false;
     try {
       this.decoder?.close();
     } catch {
