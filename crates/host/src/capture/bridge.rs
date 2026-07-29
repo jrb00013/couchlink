@@ -166,8 +166,12 @@ impl WindowsBridge {
         }
         match self.latest_frame() {
             Ok(true) => {
-                self.last = Some(self.buf.clone());
-                Ok(Some(self.buf.clone()))
+                // One copy, not two. At 720p each clone is 3.3MB and this runs on
+                // every frame; the old code cloned once for `last` and again for the
+                // caller.
+                let frame = std::mem::take(&mut self.buf);
+                self.last = Some(frame.clone());
+                Ok(Some(frame))
             }
             Ok(false) => Ok(self.last.clone()),
             // A dead client must not kill the session: keep showing the last frame
