@@ -2,7 +2,9 @@ mod bridge;
 mod local;
 
 use anyhow::{bail, Context, Result};
+pub use bridge::Captured;
 use bridge::WindowsBridge;
+use couchlink_capture_bridge::FrameFormat;
 use local::ScrapCapture;
 
 pub fn sample_avg_luma_bgra(bgra: &[u8], max_pixels: usize) -> u64 {
@@ -39,10 +41,25 @@ impl FrameCapture {
         }
     }
 
-    pub fn capture_bgra(&mut self) -> Result<Option<Vec<u8>>> {
+    pub fn capture(&mut self) -> Result<Option<Captured>> {
         match self {
-            Self::Local(c) => c.capture_bgra(),
-            Self::Windows(c) => c.capture_bgra(),
+            Self::Local(c) => Ok(c.capture_bgra()?.map(Captured::Bgra)),
+            Self::Windows(c) => c.capture(),
+        }
+    }
+
+    /// True when frames arrive already encoded and the host is only a relay.
+    pub fn is_preencoded(&self) -> bool {
+        match self {
+            Self::Local(_) => false,
+            Self::Windows(c) => c.format() == FrameFormat::H264,
+        }
+    }
+
+    /// Ask the source for a keyframe. Only meaningful when pre-encoded.
+    pub fn request_idr(&mut self) {
+        if let Self::Windows(c) = self {
+            c.request_idr();
         }
     }
 }

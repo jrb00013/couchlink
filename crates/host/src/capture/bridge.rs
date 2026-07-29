@@ -2,8 +2,10 @@
 //! WSL listens; Windows connects out (avoids Windows inbound firewall).
 
 use anyhow::{bail, Context, Result};
-use couchlink_capture_bridge::{read_frame_body_sync, FrameInfo, FRAME_MAGIC};
-use std::io::Read;
+use couchlink_capture_bridge::{
+    read_frame_body_sync, FrameFormat, FrameInfo, FRAME_MAGIC, REQUEST_IDR,
+};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
@@ -26,6 +28,12 @@ fn is_timeout(e: &std::io::Error) -> bool {
     )
 }
 
+/// What the Windows side delivered. H264 means the host does no pixel work at all.
+pub enum Captured {
+    Bgra(Vec<u8>),
+    H264 { nal: Vec<u8>, keyframe: bool },
+}
+
 pub struct WindowsBridge {
     listener: TcpListener,
     /// `None` while the Windows client is away; the bridge keeps serving the last
@@ -35,10 +43,15 @@ pub struct WindowsBridge {
     pub height: usize,
     buf: Vec<u8>,
     pending: Option<Vec<u8>>,
-    /// Last frame received, re-served when the captured window is static or the
-    /// client is reconnecting. Without this the encoder never runs, so a requested
-    /// IDR never reaches a late-joining browser and the player sits on black.
+    /// Last raw frame, re-served when the captured window is static or the client is
+    /// reconnecting. Without this the encoder never runs, so a requested IDR never
+    /// reaches a late-joining browser and the player sits on black.
+    ///
+    /// Only used for BGRA. An encoded frame must never be re-sent: H.264 frames are
+    /// differential, so replaying one corrupts the decoder's reference state.
     last: Option<Vec<u8>>,
+    format: FrameFormat,
+    keyframe: bool,
 }
 
 impl WindowsBridge {
@@ -64,6 +77,8 @@ impl WindowsBridge {
             buf: Vec::new(),
             pending: None,
             last: None,
+            format: FrameFormat::Bgra,
+            keyframe: false,
         };
         bridge.read_one()?;
         Ok(bridge)
@@ -117,6 +132,19 @@ impl WindowsBridge {
         }
         stream.set_read_timeout(Some(FRAME_BODY_TIMEOUT))?;
         let info = read_frame_body_sync(stream, &mut self.buf)?;
+        if self.format != info.format {
+            tracing::info!(
+                "capture stream format is now {:?} ({})",
+                info.format,
+                match info.format {
+                    FrameFormat::H264 => "GPU-encoded on Windows, host relays only",
+                    FrameFormat::Bgra => "raw pixels, host encodes",
+                }
+            );
+            self.format = info.format;
+            self.last = None;
+        }
+        self.keyframe = info.keyframe;
         // Dimensions can change mid-stream when the captured window is resized.
         // Callers scale against width()/height(), so these must track every frame
         // or they will index past the end of a smaller buffer.
@@ -155,14 +183,31 @@ impl WindowsBridge {
         Ok(true)
     }
 
-    pub fn capture_bgra(&mut self) -> Result<Option<Vec<u8>>> {
+    /// Ask the Windows encoder for a keyframe. No-op on the raw path, where the host
+    /// controls its own encoder.
+    pub fn request_idr(&mut self) {
+        if self.format != FrameFormat::H264 {
+            return;
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            if let Err(e) = stream.write_all(&[REQUEST_IDR]) {
+                tracing::warn!("could not request IDR from Windows encoder: {e}");
+            }
+        }
+    }
+
+    pub fn format(&self) -> FrameFormat {
+        self.format
+    }
+
+    pub fn capture(&mut self) -> Result<Option<Captured>> {
         if let Some(p) = self.pending.take() {
             self.last = Some(p.clone());
-            return Ok(Some(p));
+            return Ok(Some(Captured::Bgra(p)));
         }
         if self.stream.is_none() {
             self.try_reconnect();
-            return Ok(self.last.clone());
+            return Ok(self.stale_frame());
         }
         match self.latest_frame() {
             Ok(true) => {
@@ -170,19 +215,33 @@ impl WindowsBridge {
                 // every frame; the old code cloned once for `last` and again for the
                 // caller.
                 let frame = std::mem::take(&mut self.buf);
+                if self.format == FrameFormat::H264 {
+                    return Ok(Some(Captured::H264 {
+                        nal: frame,
+                        keyframe: self.keyframe,
+                    }));
+                }
                 self.last = Some(frame.clone());
-                Ok(Some(frame))
+                Ok(Some(Captured::Bgra(frame)))
             }
-            Ok(false) => Ok(self.last.clone()),
+            Ok(false) => Ok(self.stale_frame()),
             // A dead client must not kill the session: keep showing the last frame
             // and wait for win-capture to come back.
             Err(e) => {
                 tracing::warn!("Windows capture client lost ({e:#}) — waiting for reconnect");
                 self.stream = None;
                 self.try_reconnect();
-                Ok(self.last.clone())
+                Ok(self.stale_frame())
             }
         }
+    }
+
+    /// Re-serving only makes sense for raw pixels; see `last`.
+    fn stale_frame(&self) -> Option<Captured> {
+        if self.format == FrameFormat::H264 {
+            return None;
+        }
+        self.last.clone().map(Captured::Bgra)
     }
 }
 

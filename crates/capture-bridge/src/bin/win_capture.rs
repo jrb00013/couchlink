@@ -11,7 +11,9 @@ fn main() {
 mod run {
     use anyhow::{bail, Context as AnyhowContext, Result};
     use clap::{Parser, ValueEnum};
-    use couchlink_capture_bridge::write_frame_sync;
+    use couchlink_capture_bridge::mf_encoder::HardwareEncoder;
+    use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::io::BufWriter;
     use std::net::TcpStream;
     use std::sync::mpsc;
@@ -61,9 +63,21 @@ mod run {
         /// (`--source window` only — DWM stops compositing true minimized windows).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         pub keep_rendering: bool,
+        /// Encode H.264 on the GPU here instead of shipping raw pixels for the host
+        /// to encode. Falls back automatically if no hardware encoder is present.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        pub gpu_encode: bool,
+        #[arg(long, default_value_t = 8000)]
+        pub bitrate_kbps: u32,
     }
 
-    type FrameMsg = (u32, u32, Vec<u8>);
+    /// width, height, payload, format, keyframe
+    type FrameMsg = (u32, u32, Vec<u8>, FrameFormat, bool);
+
+    /// Set by the socket reader when the host asks for an IDR (a player joined and
+    /// needs something it can decode from scratch). Read by the capture thread,
+    /// which owns the encoder.
+    static IDR_REQUESTED: AtomicBool = AtomicBool::new(false);
     type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 
     struct BridgeCapture {
@@ -73,10 +87,23 @@ mod run {
         scratch: Vec<u8>,
         max_w: u32,
         max_h: u32,
+        /// Built lazily: COM objects are not Send, so the encoder must be created on
+        /// this thread, and its size is only known once a frame has been captured.
+        encoder: Option<HardwareEncoder>,
+        enc_cfg: EncoderConfig,
+        /// Latched after a failure so we do not retry COM setup every frame.
+        enc_failed: bool,
         arrived: u32,
         sent: u32,
         dropped: u32,
         rate_window: Instant,
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct EncoderConfig {
+        pub enabled: bool,
+        pub fps: u32,
+        pub bitrate_bps: u32,
     }
 
     /// Nearest-neighbour box fit, preserving aspect. Cheap enough to run on the
@@ -97,20 +124,25 @@ mod run {
         out
     }
 
-    /// Target size that fits (sw, sh) inside the box without upscaling.
+    /// Target size that fits (sw, sh) inside the box without upscaling. Rounded down
+    /// to even in both axes: H.264 chroma is subsampled 2x2, so odd dimensions are
+    /// rejected outright by hardware encoders.
     fn fit(sw: u32, sh: u32, max_w: u32, max_h: u32) -> (u32, u32) {
-        if sw == 0 || sh == 0 || (sw <= max_w && sh <= max_h) {
+        if sw == 0 || sh == 0 {
             return (sw, sh);
         }
-        if sw * max_h <= max_w * sh {
+        let (w, h) = if sw <= max_w && sh <= max_h {
+            (sw, sh)
+        } else if sw * max_h <= max_w * sh {
             ((sw * max_h / sh).max(1), max_h)
         } else {
             (max_w, (sh * max_w / sw).max(1))
-        }
+        };
+        ((w & !1).max(2), (h & !1).max(2))
     }
 
     impl GraphicsCaptureApiHandler for BridgeCapture {
-        type Flags = (mpsc::SyncSender<FrameMsg>, Duration, u32, u32);
+        type Flags = (mpsc::SyncSender<FrameMsg>, Duration, u32, u32, EncoderConfig);
         type Error = CaptureError;
 
         fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
@@ -121,6 +153,9 @@ mod run {
                 scratch: Vec::new(),
                 max_w: ctx.flags.2,
                 max_h: ctx.flags.3,
+                encoder: None,
+                enc_cfg: ctx.flags.4,
+                enc_failed: false,
                 arrived: 0,
                 sent: 0,
                 dropped: 0,
@@ -163,7 +198,57 @@ mod run {
             } else {
                 (dw, dh, downscale_bgra(raw, w, h, dw, dh))
             };
-            match self.tx.try_send((w, h, pixels)) {
+
+            // An encoder is bound to one frame size, so (re)build it whenever the
+            // capture dimensions change.
+            if self.enc_cfg.enabled
+                && !self.enc_failed
+                && self.encoder.as_ref().map(|e| e.dimensions()) != Some((w, h))
+            {
+                match HardwareEncoder::new(w, h, self.enc_cfg.fps, self.enc_cfg.bitrate_bps) {
+                    Ok(e) => {
+                        info!("GPU H.264 encoding at {w}x{h} — host receives NALs, not pixels");
+                        self.encoder = Some(e);
+                    }
+                    Err(e) => {
+                        warn!("no GPU encoder ({e:#}) — falling back to raw BGRA");
+                        self.enc_failed = true;
+                        self.encoder = None;
+                    }
+                }
+            }
+
+            if let Some(encoder) = self.encoder.as_mut() {
+                if IDR_REQUESTED.swap(false, Ordering::Relaxed) {
+                    encoder.request_keyframe();
+                }
+                match encoder.encode_bgra(&pixels) {
+                    Ok(frames) => {
+                        for f in frames {
+                            match self.tx.try_send((
+                                w,
+                                h,
+                                f.data,
+                                FrameFormat::H264,
+                                f.keyframe,
+                            )) {
+                                Ok(()) => self.sent += 1,
+                                Err(_) => self.dropped += 1,
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // One bad frame is not worth killing the stream over, but a
+                        // broken encoder is: fall back rather than emit nothing.
+                        warn!("hardware encode failed ({e:#}) — reverting to raw BGRA");
+                        self.enc_failed = true;
+                        self.encoder = None;
+                    }
+                }
+                return Ok(());
+            }
+
+            match self.tx.try_send((w, h, pixels, FrameFormat::Bgra, true)) {
                 Ok(()) => self.sent += 1,
                 Err(_) => self.dropped += 1,
             }
@@ -189,15 +274,38 @@ mod run {
         Ok(())
     }
 
+    /// One byte per request; anything else means the link died.
+    fn watch_for_idr_requests(mut reader: TcpStream) {
+        use std::io::Read;
+        let mut byte = [0u8; 1];
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    if byte[0] == couchlink_capture_bridge::REQUEST_IDR {
+                        IDR_REQUESTED.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+
     fn spawn_tcp_writer(connect: String, rx: mpsc::Receiver<FrameMsg>) {
         std::thread::spawn(move || loop {
             match TcpStream::connect(&connect) {
                 Ok(stream) => {
                     let _ = stream.set_nodelay(true);
                     info!("connected to {connect}");
+                    // The host writes back on this socket to request keyframes; read
+                    // it on its own thread so writes never block on it.
+                    if let Ok(reader) = stream.try_clone() {
+                        std::thread::spawn(move || watch_for_idr_requests(reader));
+                    }
                     let mut writer = BufWriter::new(stream);
-                    while let Ok((w, h, bgra)) = rx.recv() {
-                        if let Err(e) = write_frame_sync(&mut writer, w, h, &bgra) {
+                    while let Ok((w, h, payload, format, keyframe)) = rx.recv() {
+                        if let Err(e) =
+                            write_frame_with_format(&mut writer, w, h, format, keyframe, &payload)
+                        {
                             warn!("send frame failed: {e:#} — reconnecting");
                             break;
                         }
@@ -230,11 +338,22 @@ mod run {
         // queueing it costs latency on every frame after it.
         let (tx, rx) = mpsc::sync_channel::<FrameMsg>(1);
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
-        let flags = (tx, frame_dur, args.max_width, args.max_height);
+        // Encoding on the GPU here rather than on the host removes both the software
+        // encoder and almost all of the wire cost; if anything about it fails we
+        // simply keep sending raw pixels as before. Built on the capture thread.
+        let enc_cfg = EncoderConfig {
+            enabled: args.gpu_encode,
+            fps: args.max_fps,
+            bitrate_bps: args.bitrate_kbps * 1000,
+        };
+        if !enc_cfg.enabled {
+            info!("GPU encoding disabled by flag — sending raw BGRA");
+        }
         info!(
-            "sending at most {}x{} over the wire (raw BGRA)",
+            "capturing at most {}x{} (wire format decided on the first frame)",
             args.max_width, args.max_height
         );
+        let flags = (tx, frame_dur, args.max_width, args.max_height, enc_cfg);
 
         match args.source {
             CaptureSource::Desktop => {

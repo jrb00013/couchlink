@@ -229,8 +229,60 @@ async fn main() -> Result<()> {
             // metronome makes delivery uniform, which is what lets the buffer stay small.
             _ = cadence.tick() => {
                 let t_capture = std::time::Instant::now();
-                let Some(bgra) = capturer.capture_bgra()? else { continue };
+                let Some(frame) = capturer.capture()? else { continue };
                 let ms_capture = t_capture.elapsed();
+
+                // Pre-encoded path: Windows already did the expensive work on its GPU,
+                // so the host is a pure relay — no scale, no colour conversion, no
+                // encode. Everything below this block exists only for raw pixels.
+                let bgra = match frame {
+                    capture::Captured::H264 { nal, keyframe } => {
+                        if force_idr || idr_burst > 0 {
+                            // The Windows encoder owns keyframe timing here, so ask it
+                            // rather than pretending we control the GOP.
+                            capturer.request_idr();
+                            force_idr = false;
+                            idr_burst = 0;
+                        }
+                        if keyframe {
+                            last_idr = std::time::Instant::now();
+                        } else if last_idr.elapsed() >= IDR_INTERVAL {
+                            capturer.request_idr();
+                            last_idr = std::time::Instant::now();
+                        }
+                        if capture_ok_announced.is_none() {
+                            capture_ok_announced = Some(true);
+                            let _ = signal_out.send(stream_info_message(&preset, Some(true), None));
+                        }
+                        let real_gap = last_push
+                            .elapsed()
+                            .clamp(Duration::from_millis(1), Duration::from_millis(500));
+                        last_push = std::time::Instant::now();
+                        if let Err(e) = host.push_h264(nal, real_gap).await {
+                            warn!("push h264: {e}");
+                        } else {
+                            frames_out += 1;
+                            stage_capture += ms_capture;
+                            if rate_window.elapsed() >= Duration::from_secs(5) {
+                                let window_frames = frames_out - rate_mark;
+                                let fps =
+                                    window_frames as f64 / rate_window.elapsed().as_secs_f64();
+                                info!(
+                                    "streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
+                                     | per frame: relay {:.1}ms",
+                                    (stage_capture / window_frames.max(1) as u32).as_secs_f64()
+                                        * 1000.0
+                                );
+                                rate_window = std::time::Instant::now();
+                                rate_mark = frames_out;
+                                idle_frames = 0;
+                                stage_capture = Duration::ZERO;
+                            }
+                        }
+                        continue;
+                    }
+                    capture::Captured::Bgra(b) => b,
+                };
                 let cap_w = capturer.width();
                 let cap_h = capturer.height();
                 if (cap_w, cap_h) != motion_dims {

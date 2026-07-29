@@ -22,6 +22,10 @@ windows-capture = "2.0.0"
 # Must track the version windows-capture links, so HWNDs are the same type.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
     "Win32_System_Console",
+    "Win32_System_Variant",
     "Win32_UI_WindowsAndMessaging",
 ] }
