@@ -11,7 +11,9 @@ fn main() {
 mod run {
     use anyhow::{bail, Context as AnyhowContext, Result};
     use clap::{Parser, ValueEnum};
+    use couchlink_capture_bridge::gpu_convert::{self, GpuConverter};
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
+    use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
     use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::io::BufWriter;
@@ -77,6 +79,32 @@ mod run {
     /// width, height, payload, format, keyframe
     type FrameMsg = (u32, u32, Vec<u8>, FrameFormat, bool);
 
+    /// What the capture thread hands the encoder. The texture variant never touches
+    /// system memory; the pixel variant is the fallback that works everywhere.
+    pub enum Surface {
+        /// NV12 already on the GPU, converted by the video processor.
+        Texture(SendTexture),
+        Pixels(Vec<u8>),
+    }
+
+    /// SAFETY: the D3D11 device is created without D3D11_CREATE_DEVICE_SINGLETHREADED,
+    /// so its objects are safe to use from another thread; the runtime serialises
+    /// access. This only crosses from the capture thread to the encoder thread.
+    pub struct SendTexture(pub ID3D11Texture2D);
+    unsafe impl Send for SendTexture {}
+
+    /// Same reasoning as SendTexture: a multithreaded D3D11 device may be used from
+    /// any thread, and this only moves it to the encoder thread once at startup.
+    pub struct SendDevice(pub ID3D11Device);
+    unsafe impl Send for SendDevice {}
+
+    #[derive(Clone, Copy)]
+    pub struct EncoderCfg {
+        pub enabled: bool,
+        pub fps: u32,
+        pub bitrate_bps: u32,
+    }
+
     /// Set by the socket reader when the host asks for an IDR (a player joined and
     /// needs something it can decode from scratch). Read by the capture thread,
     /// which owns the encoder.
@@ -86,6 +114,11 @@ mod run {
     /// thread back to shipping raw pixels. Latched: we do not retry COM setup on
     /// every frame.
     static GPU_FALLBACK: AtomicBool = AtomicBool::new(false);
+
+    /// Cleared when the encoder turns out not to accept D3D11 textures, so the
+    /// capture thread stops converting on the GPU and goes back to readback. Without
+    /// this the two halves disagree and every frame fails to submit.
+    static ZERO_COPY_OK: AtomicBool = AtomicBool::new(true);
     type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 
     struct BridgeCapture {
@@ -97,7 +130,12 @@ mod run {
         max_h: u32,
         /// Raw frames handed to the encoder thread. Depth 1: a newer frame replacing
         /// an unconsumed one is exactly what a live stream wants.
-        raw_tx: Option<mpsc::SyncSender<(u32, u32, Vec<u8>, Instant)>>,
+        raw_tx: Option<mpsc::SyncSender<(u32, u32, Surface, Instant)>>,
+        /// None until the GPU conversion path is proven on the first frame.
+        converter: Option<GpuConverter>,
+        device: ID3D11Device,
+        /// Latched once the GPU path is ruled out, so we stop retrying per frame.
+        gpu_convert_failed: bool,
         arrived: u32,
         sent: u32,
         dropped: u32,
@@ -115,14 +153,15 @@ mod run {
     /// usually smaller (a 1280x720 box holding a 16:10 monitor gives 1152x720), and
     /// an MFT is bound to exactly one frame size.
     fn spawn_encoder_thread(
+        device: SendDevice,
         fps: u32,
         bitrate_bps: u32,
         out: mpsc::SyncSender<FrameMsg>,
-    ) -> mpsc::SyncSender<(u32, u32, Vec<u8>, Instant)> {
-        let (raw_tx, raw_rx) = mpsc::sync_channel::<(u32, u32, Vec<u8>, Instant)>(1);
+    ) -> mpsc::SyncSender<(u32, u32, Surface, Instant)> {
+        let (raw_tx, raw_rx) = mpsc::sync_channel::<(u32, u32, Surface, Instant)>(1);
 
         std::thread::spawn(move || {
-            let mut seed: Option<(u32, u32, Vec<u8>, Instant)> = None;
+            let mut seed: Option<(u32, u32, Surface, Instant)> = None;
             // Round-trip through the encoder for the frame currently being encoded,
             // so the reported latency is capture-to-encoded, not just encode time.
             let mut submitted_at: Option<Instant> = None;
@@ -131,9 +170,26 @@ mod run {
                 let Some((w, h, pixels, _t)) = seed.take().or_else(|| raw_rx.recv().ok()) else {
                     return;
                 };
-                let mut encoder = match HardwareEncoder::new(w, h, fps, bitrate_bps) {
+                // Prefer the device-backed encoder so textures can go straight in;
+                // fall back to the system-memory encoder if it will not take a device.
+                let zero_copy_wanted = matches!(pixels, Surface::Texture(_));
+                let built = if zero_copy_wanted {
+                    HardwareEncoder::new_with_device(&device.0, w, h, fps, bitrate_bps).or_else(|e| {
+                        warn!("encoder refused the D3D11 device ({e:#}) — system memory it is");
+                        HardwareEncoder::new(w, h, fps, bitrate_bps)
+                    })
+                } else {
+                    HardwareEncoder::new(w, h, fps, bitrate_bps)
+                };
+                let mut encoder = match built {
                     Ok(e) => {
-                        info!("GPU H.264 encoding at {w}x{h} — host receives NALs, not pixels");
+                        if !e.is_zero_copy() {
+                            ZERO_COPY_OK.store(false, Ordering::Relaxed);
+                        }
+                        info!(
+                            "GPU H.264 encoding at {w}x{h} ({}) — host receives NALs, not pixels",
+                            if e.is_zero_copy() { "zero-copy textures" } else { "system memory" }
+                        );
                         e
                     }
                     Err(e) => {
@@ -142,7 +198,7 @@ mod run {
                         return;
                     }
                 };
-                let mut latest: Option<(u32, u32, Vec<u8>, Instant)> =
+                let mut latest: Option<(u32, u32, Surface, Instant)> =
                     Some((w, h, pixels, Instant::now()));
                 // Feed the encoder on a fixed beat rather than whenever WGC happens
                 // to deliver. Output cadence follows input cadence, and a receiver
@@ -150,7 +206,10 @@ mod run {
                 // the same fix that took the raw path's buffer from 97ms to 6ms.
                 let tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
                 let mut next_submit = Instant::now();
+                // Only pixel frames can be re-encoded to fill a gap: a pooled texture
+                // is recycled by the capture thread and would be overwritten.
                 let mut previous: Option<(u32, u32, Vec<u8>, Instant)> = None;
+                let mut previous_texture: Option<(u32, u32, SendTexture, Instant)> = None;
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
                 let mut encoded_window = Instant::now();
@@ -176,31 +235,62 @@ mod run {
                                 latest = Some(newer);
                             }
                             // Nothing new this beat? Re-encode the frame we already
-                            // have. A static screen costs a few hundred bytes and
-                            // keeps the cadence hole-free, which is the entire point
-                            // of a metronome; blocking here would make the cadence
-                            // source-paced again.
-                            // A re-encode of the frame we already have carries no new
-                            // content, so its age is not latency anyone can perceive.
-                            // Only time frames that actually changed, or the number
-                            // measures how idle the desktop is rather than how
-                            // responsive the pipeline is.
-                            let fresh = latest.is_some();
-                            let Some((fw, fh, px, captured_at)) = latest
-                                .take()
-                                .or_else(|| previous.clone())
-                                .or_else(|| raw_rx.recv().ok())
-                            else {
+                            // have, so a static screen keeps the cadence hole-free
+                            // for a few hundred bytes. Only pixel frames can be
+                            // replayed: a pooled texture gets recycled by the capture
+                            // thread and would be overwritten underneath us.
+                            //
+                            // A replayed frame carries no new content, so its age is
+                            // not latency anyone perceives — only frames that actually
+                            // changed are timed, or the number would measure how idle
+                            // the desktop is rather than how responsive we are.
+                            // Replay the frame we already hold when nothing new
+                            // arrived, so a static screen keeps the cadence hole-free.
+                            // Replaying a pooled texture is safe precisely because
+                            // "nothing new arrived" means the capture thread has not
+                            // recycled it.
+                            let replay = previous_texture
+                                .as_ref()
+                                .map(|(w, h, t, at)| (*w, *h, Surface::Texture(SendTexture(t.0.clone())), *at))
+                                .or_else(|| {
+                                    previous
+                                        .clone()
+                                        .map(|(w, h, px, t)| (w, h, Surface::Pixels(px), t))
+                                });
+                            let (from_source, next) = match latest.take() {
+                                Some(f) => (true, Some(f)),
+                                None => match replay {
+                                    Some(r) => (false, Some(r)),
+                                    // Blocking here still yields a genuinely new frame,
+                                    // so it counts as fresh for timing.
+                                    None => (true, raw_rx.recv().ok()),
+                                },
+                            };
+                            let Some((fw, fh, surface, captured_at)) = next else {
                                 return;
                             };
-                            previous = Some((fw, fh, px.clone(), captured_at));
-                            submitted_at = fresh.then_some(captured_at);
+                            submitted_at = from_source.then_some(captured_at);
                             if (fw, fh) != encoder.dimensions() {
                                 info!("capture resized to {fw}x{fh} — rebuilding the encoder");
-                                seed = Some((fw, fh, px, captured_at));
+                                seed = Some((fw, fh, surface, captured_at));
                                 continue 'build;
                             }
-                            if let Err(e) = encoder.submit(&px) {
+                            let submitted = match &surface {
+                                // A texture arriving at a system-memory encoder means
+                                // the two halves disagreed; drop it and let the capture
+                                // thread notice the flag rather than fail the encode.
+                                Surface::Texture(_) if !encoder.is_zero_copy() => Ok(()),
+                                Surface::Texture(t) => {
+                                    previous_texture =
+                                        Some((fw, fh, SendTexture(t.0.clone()), captured_at));
+                                    encoder.submit_texture(&t.0)
+                                }
+                                Surface::Pixels(px) => {
+                                    previous = Some((fw, fh, px.clone(), captured_at));
+                                    encoder.submit(px)
+                                }
+                            };
+                            if let Err(e) = submitted {
                                 warn!("encoder submit failed ({e:#}) — falling back to raw BGRA");
                                 GPU_FALLBACK.store(true, Ordering::Relaxed);
                                 return;
@@ -331,24 +421,31 @@ mod run {
     }
 
     impl GraphicsCaptureApiHandler for BridgeCapture {
-        type Flags = (
-            mpsc::SyncSender<FrameMsg>,
-            Duration,
-            u32,
-            u32,
-            Option<mpsc::SyncSender<(u32, u32, Vec<u8>, Instant)>>,
-        );
+        type Flags = (mpsc::SyncSender<FrameMsg>, Duration, u32, u32, EncoderCfg);
         type Error = CaptureError;
 
         fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+            let cfg = ctx.flags.4;
             Ok(Self {
-                tx: ctx.flags.0,
+                tx: ctx.flags.0.clone(),
                 frame_dur: ctx.flags.1,
                 last: Instant::now() - Duration::from_secs(1),
                 scratch: Vec::new(),
                 max_w: ctx.flags.2,
                 max_h: ctx.flags.3,
-                raw_tx: ctx.flags.4,
+                // Spawned here rather than in main: the encoder needs the very device
+                // the capture runs on, and that only exists once capture has started.
+                raw_tx: cfg.enabled.then(|| {
+                    spawn_encoder_thread(
+                        SendDevice(ctx.device.clone()),
+                        cfg.fps,
+                        cfg.bitrate_bps,
+                        ctx.flags.0.clone(),
+                    )
+                }),
+                converter: None,
+                device: ctx.device.clone(),
+                gpu_convert_failed: false,
                 arrived: 0,
                 sent: 0,
                 dropped: 0,
@@ -381,9 +478,60 @@ mod run {
                 return Ok(());
             }
             self.last = Instant::now();
+            let (w, h, _) = gpu_convert::texture_size(frame.as_raw_texture());
+            // Zero-copy first: if the captured surface can be converted to NV12 on
+            // the GPU, the pixels never touch system memory. This only applies when
+            // no downscale is needed — scaling still happens on the CPU path, and
+            // adding it to the video processor is a separate change.
+            if self.raw_tx.is_some()
+                && !self.gpu_convert_failed
+                && ZERO_COPY_OK.load(Ordering::Relaxed)
+            {
+                let (tw, th) = fit(w, h, self.max_w, self.max_h);
+                let texture = frame.as_raw_texture().clone();
+                if gpu_convert::is_bgra(&texture) {
+                    if self.converter.as_ref().map(|c| c.dimensions())
+                        != Some(((w, h), (tw, th)))
+                    {
+                        match GpuConverter::new(&self.device, w, h, tw, th) {
+                            Ok(c) => {
+                                info!(
+                                    "GPU scale+convert active: {w}x{h} -> {tw}x{th} NV12, no readback"
+                                );
+                                self.converter = Some(c);
+                            }
+                            Err(e) => {
+                                warn!("no GPU colour conversion ({e:#}) — using CPU readback");
+                                self.gpu_convert_failed = true;
+                            }
+                        }
+                    }
+                    if let Some(converter) = self.converter.as_mut() {
+                        match converter.to_nv12(&texture) {
+                            Ok(nv12) => {
+                                let raw = self.raw_tx.as_ref().expect("checked above");
+                                match raw.try_send((
+                                    tw,
+                                    th,
+                                    Surface::Texture(SendTexture(nv12)),
+                                    Instant::now(),
+                                )) {
+                                    Ok(()) => self.sent += 1,
+                                    Err(_) => self.dropped += 1,
+                                }
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!("GPU conversion failed ({e:#}) — using CPU readback");
+                                self.gpu_convert_failed = true;
+                                self.converter = None;
+                            }
+                        }
+                    }
+                }
+            }
+
             let buffer = frame.buffer()?;
-            let w = buffer.width();
-            let h = buffer.height();
             let raw = buffer.as_nopadding_buffer(&mut self.scratch);
             let (dw, dh) = fit(w, h, self.max_w, self.max_h);
             let (w, h, pixels) = if (dw, dh) == (w, h) {
@@ -399,7 +547,7 @@ mod run {
                 Some(raw) if !GPU_FALLBACK.load(Ordering::Relaxed) => {
                     // A full queue means the GPU is still busy with the previous
                     // frame; dropping this one keeps latency flat.
-                    match raw.try_send((w, h, pixels, Instant::now())) {
+                    match raw.try_send((w, h, Surface::Pixels(pixels), Instant::now())) {
                         Ok(()) => self.sent += 1,
                         Err(_) => self.dropped += 1,
                     }
@@ -503,21 +651,19 @@ mod run {
         // Encoding on the GPU here rather than on the host removes both the software
         // encoder and almost all of the wire cost; if anything about it fails we
         // simply keep sending raw pixels as before.
-        let raw_tx = if args.gpu_encode {
-            Some(spawn_encoder_thread(
-                args.max_fps,
-                args.bitrate_kbps * 1000,
-                tx.clone(),
-            ))
-        } else {
-            info!("GPU encoding disabled by flag — sending raw BGRA");
-            None
+        let enc_cfg = EncoderCfg {
+            enabled: args.gpu_encode,
+            fps: args.max_fps,
+            bitrate_bps: args.bitrate_kbps * 1000,
         };
+        if !enc_cfg.enabled {
+            info!("GPU encoding disabled by flag — sending raw BGRA");
+        }
         info!(
             "capturing at most {}x{} (wire format settles on the first frame)",
             args.max_width, args.max_height
         );
-        let flags = (tx, frame_dur, args.max_width, args.max_height, raw_tx);
+        let flags = (tx, frame_dur, args.max_width, args.max_height, enc_cfg);
 
         match args.source {
             CaptureSource::Desktop => {

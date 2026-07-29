@@ -14,6 +14,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use windows::core::{Interface, GUID, PWSTR};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 
 /// Annex-B start code. WebRTC wants byte-stream format; some encoders emit AVCC
@@ -54,6 +55,9 @@ pub struct HardwareEncoder {
     provides_samples: bool,
     output_sample_size: u32,
     learned_parameter_sets: bool,
+    /// Held for the lifetime of the transform when running zero-copy; dropping it
+    /// would pull the device out from under the encoder.
+    dxgi_manager: Option<IMFDXGIDeviceManager>,
 }
 
 // SAFETY: COM is initialised as a multithreaded apartment (COINIT_MULTITHREADED),
@@ -85,7 +89,69 @@ impl HardwareEncoder {
     /// transform ask more often. It changes rate-control accounting and does not move
     /// the latency, because the request rate follows how fast the encoder actually
     /// drains, not the declared nominal rate.
+    /// Zero-copy variant: the transform is given the D3D11 device the capture runs
+    /// on, so it can read NV12 textures directly instead of us reading the surface
+    /// back to system memory, converting on the CPU, and uploading it again.
+    ///
+    /// Returns an error if the transform is not D3D-aware or refuses the device, and
+    /// the caller is expected to fall back to the system-memory path.
+    pub fn new_with_device(
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Result<Self> {
+        Self::build(width, height, fps, bitrate_bps, Some(device))
+    }
+
+    /// True when frames may be submitted as textures.
+    pub fn is_zero_copy(&self) -> bool {
+        self.dxgi_manager.is_some()
+    }
+
+    /// Submit an NV12 texture the GPU already holds. No readback, no CPU conversion,
+    /// no upload.
+    pub fn submit_texture(&mut self, texture: &ID3D11Texture2D) -> Result<()> {
+        unsafe {
+            let buffer = MFCreateDXGISurfaceBuffer(
+                &ID3D11Texture2D::IID,
+                texture,
+                0,
+                false,
+            )
+            .context("MFCreateDXGISurfaceBuffer")?;
+            // A DXGI-backed buffer knows its own size, but the transform still wants
+            // the current length set.
+            if let Ok(len) = buffer.GetMaxLength() {
+                let _ = buffer.SetCurrentLength(len);
+            }
+
+            let sample = MFCreateSample().context("MFCreateSample")?;
+            sample.AddBuffer(&buffer)?;
+            let elapsed = self.started.elapsed();
+            sample.SetSampleTime((elapsed.as_nanos() / 100) as i64)?;
+            sample.SetSampleDuration(self.frame_duration)?;
+            self.frame_index += 1;
+
+            self.transform
+                .ProcessInput(0, &sample, 0)
+                .context("ProcessInput (texture)")?;
+        }
+        Ok(())
+    }
+
     pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Result<Self> {
+        Self::build(width, height, fps, bitrate_bps, None)
+    }
+
+    fn build(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_bps: u32,
+        device: Option<&windows::Win32::Graphics::Direct3D11::ID3D11Device>,
+    ) -> Result<Self> {
         if width % 2 != 0 || height % 2 != 0 {
             bail!("hardware encoder needs even dimensions, got {width}x{height}");
         }
@@ -116,6 +182,42 @@ impl HardwareEncoder {
                 Err(_) => false,
             }
         };
+
+        // The device has to go in before the media types are negotiated: a transform
+        // asked to accept a device after it has already been configured for system
+        // memory answers with a bare E_FAIL that names nothing.
+        let mut dxgi_manager = None;
+        if let Some(device) = device {
+            unsafe {
+                let aware = transform
+                    .GetAttributes()
+                    .ok()
+                    .and_then(|a| a.GetUINT32(&MF_SA_D3D11_AWARE).ok())
+                    .unwrap_or(0);
+                if aware == 0 {
+                    bail!("encoder is not D3D11-aware; keeping the system-memory path");
+                }
+                // Media Foundation drives the device from its own threads and refuses
+                // one that is not multithread-protected.
+                let multithread: windows::Win32::Graphics::Direct3D10::ID3D10Multithread =
+                    device.cast().context("device has no ID3D10Multithread")?;
+                multithread.SetMultithreadProtected(true);
+
+                let mut manager: Option<IMFDXGIDeviceManager> = None;
+                let mut reset_token = 0u32;
+                MFCreateDXGIDeviceManager(&mut reset_token, &mut manager)
+                    .context("MFCreateDXGIDeviceManager")?;
+                let manager = manager.context("no DXGI device manager")?;
+                manager
+                    .ResetDevice(device, reset_token)
+                    .context("ResetDevice")?;
+                transform
+                    .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+                    .context("MFT_MESSAGE_SET_D3D_MANAGER")?;
+                tracing::info!("encoder accepted the D3D11 device — textures go in directly");
+                dxgi_manager = Some(manager);
+            }
+        }
 
         unsafe {
             // Output type must be set before input type for encoder MFTs.
@@ -223,6 +325,7 @@ impl HardwareEncoder {
             provides_samples,
             output_sample_size,
             learned_parameter_sets: false,
+            dxgi_manager,
         })
     }
 
