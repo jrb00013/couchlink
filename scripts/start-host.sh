@@ -28,6 +28,8 @@ fi
 BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/release/couchlink-host}"
 if [[ ! -x "$BIN" ]]; then
   echo "==> building couchlink-host (release)"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/ensure-linux-link-libs.sh"
   cargo build --release -p couchlink-host
 fi
 ARGS=(

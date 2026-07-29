@@ -22,4 +22,13 @@ fi
 [[ -n "${COUCHLINK_TURN_USER:-}" ]] && ARGS+=(--turn-user "$COUCHLINK_TURN_USER")
 [[ -n "${COUCHLINK_TURN_PASS:-}" ]] && ARGS+=(--turn-pass "$COUCHLINK_TURN_PASS")
 [[ -n "${COUCHLINK_ICE_IPS:-}" ]] && ARGS+=(--ice-ips "$COUCHLINK_ICE_IPS")
-exec couchlink-client "${ARGS[@]}"
+
+# Same resolution as start-host.sh — workspace binaries before PATH.
+BIN="${COUCHLINK_CLIENT_BIN:-$ROOT/target/release/couchlink-client}"
+if [[ ! -x "$BIN" ]]; then
+  echo "==> building couchlink-client (release)"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/ensure-linux-link-libs.sh"
+  cargo build --release -p couchlink-client
+fi
+exec "$BIN" "${ARGS[@]}"

@@ -21,6 +21,19 @@ else
   echo "==> local mode — signaling on $BIND (no UPnP)"
 fi
 
-BIN="${COUCHLINK_SIGNALING_BIN:-$ROOT/target/debug/couchlink-signaling}"
-command -v couchlink-signaling >/dev/null 2>&1 && BIN="couchlink-signaling"
+BIN="${COUCHLINK_SIGNALING_BIN:-}"
+if [[ -z "$BIN" ]]; then
+  if [[ -x "$ROOT/target/release/couchlink-signaling" ]]; then
+    BIN="$ROOT/target/release/couchlink-signaling"
+  elif command -v couchlink-signaling >/dev/null 2>&1; then
+    BIN="couchlink-signaling"
+  else
+    BIN="$ROOT/target/debug/couchlink-signaling"
+  fi
+fi
+if [[ ! -x "$BIN" && "$BIN" != "couchlink-signaling" ]]; then
+  echo "==> building couchlink-signaling (release)"
+  cargo build --release -p couchlink-signaling
+  BIN="$ROOT/target/release/couchlink-signaling"
+fi
 exec "$BIN" --bind "$BIND" --web-root "$ROOT/web/dist"
