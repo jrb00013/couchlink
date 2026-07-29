@@ -20,9 +20,17 @@ use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 /// (4-byte big-endian lengths) instead, which we convert.
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
+/// MF_E_NO_EVENTS — the async MFT has nothing further to report right now. Not
+/// exported by the windows crate, so spelled out here.
+const NO_EVENTS: windows::core::HRESULT = windows::core::HRESULT(0xC00D3E80u32 as i32);
+
 pub struct HardwareEncoder {
     transform: IMFTransform,
     codec_api: Option<ICodecAPI>,
+    /// Hardware encoders are asynchronous MFTs: they will not accept a blocking
+    /// ProcessInput/ProcessOutput pair and instead announce readiness through
+    /// events. None for a synchronous (software) transform.
+    events: Option<IMFMediaEventGenerator>,
     width: u32,
     height: u32,
     /// SPS/PPS from the output media type. Some encoders only emit these out of
@@ -42,6 +50,12 @@ pub struct HardwareEncoder {
 // capture thread; the bound exists only because the capture handler type must be
 // Send. Do not weaken the CoInitializeEx call above without revisiting this.
 unsafe impl Send for HardwareEncoder {}
+
+/// What an asynchronous MFT is asking for.
+pub enum EncoderRequest {
+    NeedInput,
+    HaveOutput(Vec<EncodedFrame>),
+}
 
 /// One encoded access unit.
 pub struct EncodedFrame {
@@ -63,6 +77,24 @@ impl HardwareEncoder {
 
         let transform = find_hardware_encoder()?;
         let fps = fps.max(1);
+
+        // A hardware MFT stays locked until the caller declares it can drive the
+        // asynchronous model; without this every SetInputType fails with
+        // MF_E_TRANSFORM_ASYNC_LOCKED.
+        let is_async = unsafe {
+            match transform.GetAttributes() {
+                Ok(attrs) => {
+                    let is_async = attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) == 1;
+                    if is_async {
+                        attrs
+                            .SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
+                            .context("unlock async MFT")?;
+                    }
+                    is_async
+                }
+                Err(_) => false,
+            }
+        };
 
         unsafe {
             // Output type must be set before input type for encoder MFTs.
@@ -104,10 +136,24 @@ impl HardwareEncoder {
 
         let sequence_header = unsafe { read_sequence_header(&transform) };
         let codec_api: Option<ICodecAPI> = transform.cast().ok();
+        let events: Option<IMFMediaEventGenerator> = if is_async {
+            Some(
+                transform
+                    .cast()
+                    .context("async MFT without an event generator")?,
+            )
+        } else {
+            None
+        };
+        tracing::info!(
+            "hardware encoder ready ({} model)",
+            if is_async { "asynchronous" } else { "synchronous" }
+        );
 
         Ok(Self {
             transform,
             codec_api,
+            events,
             width,
             height,
             sequence_header,
@@ -141,26 +187,8 @@ impl HardwareEncoder {
     /// Feed one BGRA frame, collect whatever the encoder is ready to emit. An
     /// encoder may return nothing for a frame (pipelining) or more than one.
     pub fn encode_bgra(&mut self, bgra: &[u8]) -> Result<Vec<EncodedFrame>> {
-        bgra_to_nv12(bgra, self.width as usize, self.height as usize, &mut self.nv12);
-
         unsafe {
-            let buffer = MFCreateMemoryBuffer(self.nv12.len() as u32)
-                .context("MFCreateMemoryBuffer")?;
-            {
-                let mut dst = std::ptr::null_mut();
-                let mut max = 0u32;
-                buffer.Lock(&mut dst, Some(&mut max), None)?;
-                std::ptr::copy_nonoverlapping(self.nv12.as_ptr(), dst, self.nv12.len());
-                buffer.Unlock()?;
-                buffer.SetCurrentLength(self.nv12.len() as u32)?;
-            }
-
-            let sample = MFCreateSample().context("MFCreateSample")?;
-            sample.AddBuffer(&buffer)?;
-            sample.SetSampleTime(self.frame_index * self.frame_duration)?;
-            sample.SetSampleDuration(self.frame_duration)?;
-            self.frame_index += 1;
-
+            let sample = self.make_sample(bgra)?;
             match self.transform.ProcessInput(0, &sample, 0) {
                 Ok(()) => {}
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
@@ -174,8 +202,86 @@ impl HardwareEncoder {
         self.drain()
     }
 
+    pub fn is_async(&self) -> bool {
+        self.events.is_some()
+    }
+
+    /// Block until the asynchronous MFT says what it wants next.
+    ///
+    /// Polling this queue with MF_EVENT_FLAG_NO_WAIT returns MF_E_NO_EVENTS forever —
+    /// the transform posts events on its own schedule and expects a caller parked on
+    /// the queue. Hence the dedicated encoder thread.
+    pub fn next_request(&mut self) -> Result<EncoderRequest> {
+        let events = self
+            .events
+            .clone()
+            .ok_or_else(|| anyhow!("next_request on a synchronous transform"))?;
+        loop {
+            // Zero flags = block until an event is available, which is the whole
+            // point of this thread.
+            let event = match unsafe {
+                events.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))
+            } {
+                Ok(e) => e,
+                Err(e) if e.code() == NO_EVENTS => continue,
+                Err(e) => return Err(anyhow!("GetEvent: {e}")),
+            };
+            let kind = unsafe { event.GetType()? };
+            if kind == METransformNeedInput.0 as u32 {
+                return Ok(EncoderRequest::NeedInput);
+            }
+            if kind == METransformHaveOutput.0 as u32 {
+                // Exactly one ProcessOutput per HaveOutput event. An async MFT
+                // returns E_UNEXPECTED for a second call it did not invite.
+                let frame = self.process_output_once()?;
+                return Ok(EncoderRequest::HaveOutput(frame.into_iter().collect()));
+            }
+            // Anything else (format change, drain complete) is not interesting here.
+        }
+    }
+
+    /// Feed one frame to an asynchronous MFT that has just asked for input.
+    pub fn submit(&mut self, bgra: &[u8]) -> Result<()> {
+        let sample = unsafe { self.make_sample(bgra)? };
+        unsafe {
+            self.transform
+                .ProcessInput(0, &sample, 0)
+                .context("ProcessInput (async)")?;
+        }
+        Ok(())
+    }
+
+    unsafe fn make_sample(&mut self, bgra: &[u8]) -> Result<IMFSample> {
+        bgra_to_nv12(bgra, self.width as usize, self.height as usize, &mut self.nv12);
+        let buffer =
+            MFCreateMemoryBuffer(self.nv12.len() as u32).context("MFCreateMemoryBuffer")?;
+        let mut dst = std::ptr::null_mut();
+        let mut max = 0u32;
+        buffer.Lock(&mut dst, Some(&mut max), None)?;
+        std::ptr::copy_nonoverlapping(self.nv12.as_ptr(), dst, self.nv12.len());
+        buffer.Unlock()?;
+        buffer.SetCurrentLength(self.nv12.len() as u32)?;
+
+        let sample = MFCreateSample().context("MFCreateSample")?;
+        sample.AddBuffer(&buffer)?;
+        sample.SetSampleTime(self.frame_index * self.frame_duration)?;
+        sample.SetSampleDuration(self.frame_duration)?;
+        self.frame_index += 1;
+        Ok(sample)
+    }
+
+    /// Synchronous transforms are drained until they ask for more input.
     fn drain(&mut self) -> Result<Vec<EncodedFrame>> {
         let mut out = Vec::new();
+        while let Some(frame) = self.process_output_once()? {
+            out.push(frame);
+        }
+        Ok(out)
+    }
+
+    /// One ProcessOutput call. `None` means the transform has nothing to give right
+    /// now (it wants more input).
+    fn process_output_once(&mut self) -> Result<Option<EncodedFrame>> {
         loop {
             let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: 0,
@@ -190,22 +296,33 @@ impl HardwareEncoder {
                 let sample = unsafe { std::mem::ManuallyDrop::take(&mut buffers[0].pSample) };
                 drop(sample);
                 if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
-                    return Ok(out);
+                    return Ok(None);
                 }
                 if e.code() == MF_E_TRANSFORM_STREAM_CHANGE {
-                    // Renegotiating the output type mid-stream also invalidates the
-                    // SPS/PPS we cached.
-                    self.sequence_header = unsafe { read_sequence_header(&self.transform) };
+                    // The transform renegotiated its output type, which also
+                    // invalidates the SPS/PPS we cached. Re-read and retry.
+                    self.renegotiate_output()?;
                     continue;
                 }
                 return Err(anyhow!("ProcessOutput failed: {e}"));
             }
 
             let sample = unsafe { std::mem::ManuallyDrop::take(&mut buffers[0].pSample) };
-            let Some(sample) = sample else { return Ok(out) };
-            let frame = unsafe { self.read_sample(&sample)? };
-            out.push(frame);
+            let Some(sample) = sample else { return Ok(None) };
+            return Ok(Some(unsafe { self.read_sample(&sample)? }));
         }
+    }
+
+    /// After MF_E_TRANSFORM_STREAM_CHANGE the transform expects the output type to be
+    /// set again before it will produce anything.
+    fn renegotiate_output(&mut self) -> Result<()> {
+        unsafe {
+            if let Ok(ty) = self.transform.GetOutputAvailableType(0, 0) {
+                let _ = self.transform.SetOutputType(0, &ty, 0);
+            }
+            self.sequence_header = read_sequence_header(&self.transform);
+        }
+        Ok(())
     }
 
     unsafe fn read_sample(&mut self, sample: &IMFSample) -> Result<EncodedFrame> {

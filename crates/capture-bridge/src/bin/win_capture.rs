@@ -11,7 +11,7 @@ fn main() {
 mod run {
     use anyhow::{bail, Context as AnyhowContext, Result};
     use clap::{Parser, ValueEnum};
-    use couchlink_capture_bridge::mf_encoder::HardwareEncoder;
+    use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
     use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::io::BufWriter;
@@ -64,8 +64,13 @@ mod run {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         pub keep_rendering: bool,
         /// Encode H.264 on the GPU here instead of shipping raw pixels for the host
-        /// to encode. Falls back automatically if no hardware encoder is present.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        /// to encode.
+        ///
+        /// Off by default: the hardware MFT on this machine rejects our ProcessOutput
+        /// sequence with E_UNEXPECTED partway into a stream, and falling back after
+        /// frames have already been sent leaves the host waiting. Opt in with
+        /// `--gpu-encode true` while that is being worked out.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
         pub gpu_encode: bool,
         #[arg(long, default_value_t = 8000)]
         pub bitrate_kbps: u32,
@@ -78,6 +83,11 @@ mod run {
     /// needs something it can decode from scratch). Read by the capture thread,
     /// which owns the encoder.
     static IDR_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+    /// Set when GPU encoding is unavailable or has failed, switching the capture
+    /// thread back to shipping raw pixels. Latched: we do not retry COM setup on
+    /// every frame.
+    static GPU_FALLBACK: AtomicBool = AtomicBool::new(false);
     type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 
     struct BridgeCapture {
@@ -87,23 +97,92 @@ mod run {
         scratch: Vec<u8>,
         max_w: u32,
         max_h: u32,
-        /// Built lazily: COM objects are not Send, so the encoder must be created on
-        /// this thread, and its size is only known once a frame has been captured.
-        encoder: Option<HardwareEncoder>,
-        enc_cfg: EncoderConfig,
-        /// Latched after a failure so we do not retry COM setup every frame.
-        enc_failed: bool,
+        /// Raw frames handed to the encoder thread. Depth 1: a newer frame replacing
+        /// an unconsumed one is exactly what a live stream wants.
+        raw_tx: Option<mpsc::SyncSender<(u32, u32, Vec<u8>)>>,
         arrived: u32,
         sent: u32,
         dropped: u32,
         rate_window: Instant,
     }
 
-    #[derive(Clone, Copy)]
-    pub struct EncoderConfig {
-        pub enabled: bool,
-        pub fps: u32,
-        pub bitrate_bps: u32,
+    /// Own the encoder on a dedicated thread parked on the MFT's event queue.
+    ///
+    /// An asynchronous (hardware) MFT posts METransformNeedInput / METransformHaveOutput
+    /// on its own schedule and expects a caller blocked on GetEvent; polling it with
+    /// MF_EVENT_FLAG_NO_WAIT returns MF_E_NO_EVENTS forever and nothing is ever encoded.
+    ///
+    /// The encoder is built from the first frame's dimensions rather than the
+    /// requested maximum, because aspect-preserving fit means the real frame is
+    /// usually smaller (a 1280x720 box holding a 16:10 monitor gives 1152x720), and
+    /// an MFT is bound to exactly one frame size.
+    fn spawn_encoder_thread(
+        fps: u32,
+        bitrate_bps: u32,
+        out: mpsc::SyncSender<FrameMsg>,
+    ) -> mpsc::SyncSender<(u32, u32, Vec<u8>)> {
+        let (raw_tx, raw_rx) = mpsc::sync_channel::<(u32, u32, Vec<u8>)>(1);
+
+        std::thread::spawn(move || {
+            let mut seed: Option<(u32, u32, Vec<u8>)> = None;
+            'build: loop {
+                let Some((w, h, pixels)) = seed.take().or_else(|| raw_rx.recv().ok()) else {
+                    return;
+                };
+                let mut encoder = match HardwareEncoder::new(w, h, fps, bitrate_bps) {
+                    Ok(e) => {
+                        info!("GPU H.264 encoding at {w}x{h} — host receives NALs, not pixels");
+                        e
+                    }
+                    Err(e) => {
+                        warn!("no GPU encoder ({e:#}) — falling back to raw BGRA");
+                        GPU_FALLBACK.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                let mut latest = Some((w, h, pixels));
+
+                loop {
+                    if IDR_REQUESTED.swap(false, Ordering::Relaxed) {
+                        encoder.request_keyframe();
+                    }
+                    match encoder.next_request() {
+                        Ok(EncoderRequest::NeedInput) => {
+                            let Some((fw, fh, px)) =
+                                latest.take().or_else(|| raw_rx.recv().ok())
+                            else {
+                                return;
+                            };
+                            if (fw, fh) != encoder.dimensions() {
+                                info!("capture resized to {fw}x{fh} — rebuilding the encoder");
+                                seed = Some((fw, fh, px));
+                                continue 'build;
+                            }
+                            if let Err(e) = encoder.submit(&px) {
+                                warn!("encoder submit failed ({e:#}) — falling back to raw BGRA");
+                                GPU_FALLBACK.store(true, Ordering::Relaxed);
+                                return;
+                            }
+                        }
+                        Ok(EncoderRequest::HaveOutput(frames)) => {
+                            let (w, h) = encoder.dimensions();
+                            for f in frames {
+                                // Socket writer behind? Skip rather than queue.
+                                let _ =
+                                    out.try_send((w, h, f.data, FrameFormat::H264, f.keyframe));
+                            }
+                            latest = raw_rx.try_recv().ok();
+                        }
+                        Err(e) => {
+                            warn!("encoder event loop ended ({e:#}) — falling back to raw BGRA");
+                            GPU_FALLBACK.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        raw_tx
     }
 
     /// Nearest-neighbour box fit, preserving aspect. Cheap enough to run on the
@@ -142,7 +221,13 @@ mod run {
     }
 
     impl GraphicsCaptureApiHandler for BridgeCapture {
-        type Flags = (mpsc::SyncSender<FrameMsg>, Duration, u32, u32, EncoderConfig);
+        type Flags = (
+            mpsc::SyncSender<FrameMsg>,
+            Duration,
+            u32,
+            u32,
+            Option<mpsc::SyncSender<(u32, u32, Vec<u8>)>>,
+        );
         type Error = CaptureError;
 
         fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
@@ -153,9 +238,7 @@ mod run {
                 scratch: Vec::new(),
                 max_w: ctx.flags.2,
                 max_h: ctx.flags.3,
-                encoder: None,
-                enc_cfg: ctx.flags.4,
-                enc_failed: false,
+                raw_tx: ctx.flags.4,
                 arrived: 0,
                 sent: 0,
                 dropped: 0,
@@ -199,54 +282,21 @@ mod run {
                 (dw, dh, downscale_bgra(raw, w, h, dw, dh))
             };
 
-            // An encoder is bound to one frame size, so (re)build it whenever the
-            // capture dimensions change.
-            if self.enc_cfg.enabled
-                && !self.enc_failed
-                && self.encoder.as_ref().map(|e| e.dimensions()) != Some((w, h))
-            {
-                match HardwareEncoder::new(w, h, self.enc_cfg.fps, self.enc_cfg.bitrate_bps) {
-                    Ok(e) => {
-                        info!("GPU H.264 encoding at {w}x{h} — host receives NALs, not pixels");
-                        self.encoder = Some(e);
+            // The encoder thread may give up at any point (no hardware, a mid-stream
+            // failure); when it does, this switches back to raw pixels rather than
+            // stopping the stream.
+            let pixels = match &self.raw_tx {
+                Some(raw) if !GPU_FALLBACK.load(Ordering::Relaxed) => {
+                    // A full queue means the GPU is still busy with the previous
+                    // frame; dropping this one keeps latency flat.
+                    match raw.try_send((w, h, pixels)) {
+                        Ok(()) => self.sent += 1,
+                        Err(_) => self.dropped += 1,
                     }
-                    Err(e) => {
-                        warn!("no GPU encoder ({e:#}) — falling back to raw BGRA");
-                        self.enc_failed = true;
-                        self.encoder = None;
-                    }
+                    return Ok(());
                 }
-            }
-
-            if let Some(encoder) = self.encoder.as_mut() {
-                if IDR_REQUESTED.swap(false, Ordering::Relaxed) {
-                    encoder.request_keyframe();
-                }
-                match encoder.encode_bgra(&pixels) {
-                    Ok(frames) => {
-                        for f in frames {
-                            match self.tx.try_send((
-                                w,
-                                h,
-                                f.data,
-                                FrameFormat::H264,
-                                f.keyframe,
-                            )) {
-                                Ok(()) => self.sent += 1,
-                                Err(_) => self.dropped += 1,
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // One bad frame is not worth killing the stream over, but a
-                        // broken encoder is: fall back rather than emit nothing.
-                        warn!("hardware encode failed ({e:#}) — reverting to raw BGRA");
-                        self.enc_failed = true;
-                        self.encoder = None;
-                    }
-                }
-                return Ok(());
-            }
+                _ => pixels,
+            };
 
             match self.tx.try_send((w, h, pixels, FrameFormat::Bgra, true)) {
                 Ok(()) => self.sent += 1,
@@ -340,20 +390,22 @@ mod run {
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
         // Encoding on the GPU here rather than on the host removes both the software
         // encoder and almost all of the wire cost; if anything about it fails we
-        // simply keep sending raw pixels as before. Built on the capture thread.
-        let enc_cfg = EncoderConfig {
-            enabled: args.gpu_encode,
-            fps: args.max_fps,
-            bitrate_bps: args.bitrate_kbps * 1000,
-        };
-        if !enc_cfg.enabled {
+        // simply keep sending raw pixels as before.
+        let raw_tx = if args.gpu_encode {
+            Some(spawn_encoder_thread(
+                args.max_fps,
+                args.bitrate_kbps * 1000,
+                tx.clone(),
+            ))
+        } else {
             info!("GPU encoding disabled by flag — sending raw BGRA");
-        }
+            None
+        };
         info!(
-            "capturing at most {}x{} (wire format decided on the first frame)",
+            "capturing at most {}x{} (wire format settles on the first frame)",
             args.max_width, args.max_height
         );
-        let flags = (tx, frame_dur, args.max_width, args.max_height, enc_cfg);
+        let flags = (tx, frame_dur, args.max_width, args.max_height, raw_tx);
 
         match args.source {
             CaptureSource::Desktop => {
