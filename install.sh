@@ -184,13 +184,17 @@ fi
 if run_as_user bash -lc 'command -v npm >/dev/null'; then
   echo "==> building player UI"
   run_as_user bash -c "cd '$ROOT/web' && npm install && npm run build"
+else
+  echo "npm not found — skipping player UI (browser client needs: cd web && npm install && npm run build)"
 fi
 
-if run_as_user bash -lc 'command -v poetry >/dev/null'; then
+# Optional helpers only — not required for host/client. Skip unless opted in;
+# a global `poetry` from unrelated projects makes this look like a hang.
+if [[ "${COUCHLINK_INSTALL_PYTHON:-0}" == "1" ]] && run_as_user bash -lc 'command -v poetry >/dev/null'; then
   echo "==> installing python helpers (poetry)"
   run_as_user bash -c "cd '$ROOT/python' && poetry install"
 else
-  echo "poetry not found — skipping python helpers (https://python-poetry.org/docs/#installation)"
+  echo "==> skipping python helpers (optional; set COUCHLINK_INSTALL_PYTHON=1 to enable)"
 fi
 
 if [[ ! -f .env.couchlink ]]; then
@@ -200,22 +204,24 @@ if [[ ! -f .env.couchlink ]]; then
   fi
 fi
 
-echo "OK — binaries in $REAL_HOME/.local/bin"
+echo ""
+echo "OK — install finished"
+echo "  binaries: $REAL_HOME/.local/bin"
 case "$PLATFORM" in
   macos)
-    echo "Run friend/client:  ./scripts/run.sh client"
-    echo "Run video-only host: ./scripts/run.sh host --local   (pad injection needs Linux/WSL)"
+    echo "  next:    ./scripts/run.sh client"
+    echo "           ./scripts/run.sh host --local   (video-only on macOS)"
     ;;
   *)
-    echo "Run everything with: ./scripts/run.sh host   (or ./scripts/run.sh client to join a friend)"
+    echo "  next:    ./scripts/run.sh host --local"
+    echo "           ./scripts/run.sh client"
     ;;
 esac
+echo ""
 
-# Auto-source .env.couchlink for you: a script can't export vars into the shell
-# that launched it, so instead we hand you back an interactive shell that
-# already has it sourced — only when run interactively (not from CI/non-tty).
-# Skip handoff when root — drop back to the invoking user instead of a root shell.
-if [[ -t 0 && -t 1 && -z "${COUCHLINK_NO_SHELL_HANDOFF:-}" && "${EUID:-$(id -u)}" -ne 0 ]]; then
+# Auto-source .env.couchlink only when explicitly requested — the interactive
+# shell handoff looks like a hang / mysterious prompt after a long cargo build.
+if [[ -t 0 && -t 1 && "${COUCHLINK_SHELL_HANDOFF:-0}" == "1" && "${EUID:-$(id -u)}" -ne 0 ]]; then
   case "${SHELL:-}" in
     */bash|"")
       echo "==> dropping you into a bash shell with .env.couchlink already sourced"
@@ -232,5 +238,7 @@ if [[ -t 0 && -t 1 && -z "${COUCHLINK_NO_SHELL_HANDOFF:-}" && "${EUID:-$(id -u)}
       ;;
   esac
 elif [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-  echo "Installed as root for $REAL_USER — open a new shell (or re-login for the 'input' group) then: source .env.couchlink"
+  echo "Installed as root for $REAL_USER — open a normal shell, then: source .env.couchlink"
+else
+  echo "Load env vars with: source .env.couchlink"
 fi
