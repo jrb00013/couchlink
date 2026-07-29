@@ -7,6 +7,8 @@ pub struct ScrapCapture {
     capturer: Capturer,
     pub width: usize,
     pub height: usize,
+    #[cfg(target_os = "linux")]
+    cursor: Option<super::cursor_x11::CursorOverlay>,
 }
 
 impl ScrapCapture {
@@ -15,16 +17,27 @@ impl ScrapCapture {
         let width = display.width();
         let height = display.height();
         let capturer = Capturer::new(display).context("create capturer")?;
+        #[cfg(target_os = "linux")]
+        let cursor = super::cursor_x11::CursorOverlay::try_open(width, height);
         Ok(Self {
             capturer,
             width,
             height,
+            #[cfg(target_os = "linux")]
+            cursor,
         })
     }
 
     pub fn capture_bgra(&mut self) -> Result<Option<Vec<u8>>> {
         match self.capturer.frame() {
-            Ok(frame) => Ok(Some(pack_tight_bgra(&frame, self.width, self.height))),
+            Ok(frame) => {
+                let mut tight = pack_tight_bgra(&frame, self.width, self.height);
+                #[cfg(target_os = "linux")]
+                if let Some(cursor) = &mut self.cursor {
+                    cursor.blend(&mut tight, self.width, self.height);
+                }
+                Ok(Some(tight))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(e) => Err(e.into()),
         }

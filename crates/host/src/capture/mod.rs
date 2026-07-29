@@ -1,5 +1,7 @@
 mod bridge;
 mod local;
+#[cfg(target_os = "linux")]
+mod cursor_x11;
 
 use anyhow::{bail, Context, Result};
 pub use bridge::Captured;
