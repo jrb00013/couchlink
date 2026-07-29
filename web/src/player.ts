@@ -1,5 +1,6 @@
 import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
 import { clog, cerror, cwarn } from "./log";
+import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
 
 export type ConnectionState =
@@ -175,15 +176,28 @@ export class CouchlinkPlayer {
           const prev = this.lastStats;
           this.lastStats = { delay, count, decoded };
           if (!prev || count === prev.count) return;
-          // Delta over the window, not the session average.
-          const bufferedMs =
-            ((delay - prev.delay) / (count - prev.count)) * 1000;
+          const window = jitterWindow(
+            {
+              jitterBufferDelay: prev.delay,
+              jitterBufferEmittedCount: prev.count,
+              framesDecoded: prev.decoded,
+              framesDropped: 0,
+            },
+            {
+              jitterBufferDelay: delay,
+              jitterBufferEmittedCount: count,
+              framesDecoded: decoded,
+              framesDropped: r.framesDropped ?? 0,
+            },
+            2
+          );
+          if (!window) return;
           // Chrome will grow the JB after packet jitter; pin it back every poll.
           this.pinJitterBuffer();
           clog("video stats", {
-            jitterBufferMs: Math.round(bufferedMs),
-            decodeFps: Math.round((decoded - prev.decoded) / 2),
-            framesDropped: r.framesDropped ?? 0,
+            jitterBufferMs: Math.round(window.jitterBufferMs),
+            decodeFps: Math.round(window.decodeFps),
+            framesDropped: window.framesDropped,
             frameHeight: r.frameHeight,
             pauseCount: r.pauseCount,
             freezeCount: r.freezeCount,

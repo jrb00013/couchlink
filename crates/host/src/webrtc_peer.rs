@@ -59,7 +59,7 @@ impl WebRtcHost {
         // Ask Chrome to keep playout delay at 0 when we stamp RTP packets (gaming).
         m.register_header_extension(
             webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability {
-                uri: "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay".into(),
+                uri: crate::latency::PLAYOUT_DELAY_URI.into(),
             },
             webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video,
             None,
@@ -234,10 +234,11 @@ impl WebRtcHost {
 
         // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
         // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
+        let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
         self.video
             .sample_writer()
             .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
-                0, 0,
+                min_delay, max_delay,
             )))
             .write_sample(&Sample {
                 data: bytes::Bytes::from(annex_b),
