@@ -51,6 +51,11 @@ export class CouchlinkPlayer {
   private gotVideoTrack = false;
   private lastOfferEpoch = 0;
   private mediaHealthy = false;
+  /** Re-asserted each stats tick — Chrome grows the JB under jitter. */
+  private videoReceiver: (RTCRtpReceiver & {
+    jitterBufferTarget?: number | null;
+    playoutDelayHint?: number | null;
+  }) | null = null;
 
   constructor(private cb: PlayerCallbacks) {}
 
@@ -173,6 +178,8 @@ export class CouchlinkPlayer {
           // Delta over the window, not the session average.
           const bufferedMs =
             ((delay - prev.delay) / (count - prev.count)) * 1000;
+          // Chrome will grow the JB after packet jitter; pin it back every poll.
+          this.pinJitterBuffer();
           clog("video stats", {
             jitterBufferMs: Math.round(bufferedMs),
             decodeFps: Math.round((decoded - prev.decoded) / 2),
@@ -181,12 +188,24 @@ export class CouchlinkPlayer {
             pauseCount: r.pauseCount,
             freezeCount: r.freezeCount,
             totalFreezesDuration: r.totalFreezesDuration,
+            jbTarget: this.videoReceiver?.jitterBufferTarget ?? null,
           });
         });
       } catch (e) {
         cwarn("getStats failed", String(e));
       }
     }, 2000);
+  }
+
+  private pinJitterBuffer() {
+    const receiver = this.videoReceiver;
+    if (!receiver) return;
+    try {
+      if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
+      if ("playoutDelayHint" in receiver) receiver.playoutDelayHint = 0;
+    } catch {
+      /* older Chromium */
+    }
   }
 
   private cleanup() {
@@ -222,6 +241,7 @@ export class CouchlinkPlayer {
     this.pc?.close();
     this.padDc = null;
     this.pc = null;
+    this.videoReceiver = null;
     this.gotVideoTrack = false;
     this.mediaHealthy = false;
   }
@@ -366,20 +386,12 @@ export class CouchlinkPlayer {
         jitterBufferTarget?: number | null;
         playoutDelayHint?: number | null;
       };
-      if (receiver) {
-        try {
-          // Newer, standards-track name (Chrome 114+).
-          receiver.jitterBufferTarget = 0;
-          // Legacy name, still honoured by older Chromium.
-          receiver.playoutDelayHint = 0;
-          clog("requested minimum jitter buffer", {
-            jitterBufferTarget: receiver.jitterBufferTarget,
-            playoutDelayHint: receiver.playoutDelayHint,
-          });
-        } catch (e) {
-          cwarn("could not lower jitter buffer", String(e));
-        }
-      }
+      this.videoReceiver = receiver;
+      this.pinJitterBuffer();
+      clog("requested minimum jitter buffer", {
+        jitterBufferTarget: receiver.jitterBufferTarget,
+        playoutDelayHint: receiver.playoutDelayHint,
+      });
       clog("ontrack", {
         kind: track.kind,
         id: track.id,

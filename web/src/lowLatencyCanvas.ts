@@ -1,3 +1,10 @@
+//! Low-latency browser present path: MediaStreamTrack → VideoFrame → canvas.
+//!
+//! `<video srcObject=stream>` adds its own present queue on top of WebRTC's
+//! jitter buffer. Pulling frames with MediaStreamTrackProcessor (maxBufferSize
+//! 1) and drawing to a `desynchronized` canvas skips that queue and paints the
+//! newest frame as soon as it arrives.
+
 import { clog, cwarn } from "./log";
 
 export function canUseLowLatencyCanvas(): boolean {
@@ -18,7 +25,7 @@ export type PresentStats = {
 
 /**
  * Paints the newest decoded WebRTC frame to a canvas with minimal buffering.
- * Falls back is the caller's job when `canUseLowLatencyCanvas()` is false.
+ * Fallback to `<video>` is the caller's job when this returns false.
  */
 export class LowLatencyCanvasView {
   private abort: AbortController | null = null;
@@ -43,7 +50,6 @@ export class LowLatencyCanvasView {
     }
 
     try {
-      // motion = prefer latency over resolution when the browser has to choose.
       if ("contentHint" in track) {
         track.contentHint = "motion";
       }
@@ -51,7 +57,6 @@ export class LowLatencyCanvasView {
       const ctx = this.canvas.getContext("2d", {
         alpha: false,
         desynchronized: true,
-        // willReadFrequently omitted — we only write.
       } as CanvasRenderingContext2DSettings);
       if (!ctx) {
         cwarn("low-latency canvas: 2d context unavailable");
@@ -69,13 +74,12 @@ export class LowLatencyCanvasView {
         trackId: track.id,
       });
 
-      // Keep at most one undecoded/undrawn frame — older ones are latency we
-      // will never get back. Chromium honours maxBufferSize on the constructor.
       const processor = new MediaStreamTrackProcessor({
         track,
         maxBufferSize: 1,
       });
-      const reader = processor.readable.getReader();
+      const reader: ReadableStreamDefaultReader<VideoFrame> =
+        processor.readable.getReader();
       const abort = new AbortController();
       this.abort = abort;
       this.painted = 0;
@@ -83,27 +87,12 @@ export class LowLatencyCanvasView {
       this.windowStart = performance.now();
 
       const pump = async () => {
-        let pending: VideoFrame | null = null;
         try {
           while (!abort.signal.aborted) {
             const { value, done } = await reader.read();
-            if (done) break;
-            if (!value) continue;
-
-            // Always keep only the newest frame. If we somehow got ahead of
-            // ourselves (draw was slow), close the stale one without painting.
-            if (pending) {
-              pending.close();
-              this.dropped += 1;
-            }
-            pending = value;
-
-            // Drain any already-queued frames so we present "now", not "then".
-            // Controllers that support BYOB aren't required; try-read via
-            // unlocked streams isn't available on all readers — instead we
-            // paint immediately and rely on maxBufferSize: 1.
-            const frame = pending;
-            pending = null;
+            if (done || !value) break;
+            // Paint immediately — waiting for rAF would add up to one display frame.
+            const frame: VideoFrame = value;
             this.paint(frame);
             frame.close();
           }
@@ -112,7 +101,6 @@ export class LowLatencyCanvasView {
             cwarn("low-latency canvas read ended", String(e));
           }
         } finally {
-          pending?.close();
           try {
             reader.releaseLock();
           } catch {

@@ -56,6 +56,14 @@ impl WebRtcHost {
         let _ = as_bluetooth;
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
+        // Ask Chrome to keep playout delay at 0 when we stamp RTP packets (gaming).
+        m.register_header_extension(
+            webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability {
+                uri: "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay".into(),
+            },
+            webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video,
+            None,
+        )?;
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
         let mut setting_engine = SettingEngine::default();
@@ -221,7 +229,16 @@ impl WebRtcHost {
     }
 
     pub async fn push_h264(&self, annex_b: Vec<u8>, duration: Duration) -> Result<()> {
+        use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
+        use rtp::extension::HeaderExtension;
+
+        // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
+        // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
         self.video
+            .sample_writer()
+            .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
+                0, 0,
+            )))
             .write_sample(&Sample {
                 data: bytes::Bytes::from(annex_b),
                 duration,
