@@ -76,16 +76,19 @@ async fn main() -> Result<()> {
         args.bluetooth_pad,
     )?));
 
-    let mut signaling = signaling_client::SignalingClient::connect(&args.signaling).await?;
-    signaling
-        .register_host(
-            args.session_id.clone(),
-            args.pin.clone(),
-            args.device_name.clone(),
-            args.preset.clone(),
-            args.emulator.clone(),
-        )
-        .await?;
+    // The supervisor owns the socket and re-registers on every reconnect, so a
+    // transient signaling failure can no longer orphan the host from its session.
+    let mut signaling = signaling_client::SignalingClient::connect_and_register(
+        &args.signaling,
+        signaling_client::HostRegistration {
+            session_id: args.session_id.clone(),
+            pin: args.pin.clone(),
+            device_name: args.device_name.clone(),
+            preset: args.preset.clone(),
+            emulator: args.emulator.clone(),
+        },
+    )
+    .await?;
 
     let signal_out = signaling.outbound.clone();
     let offer_epoch = Arc::new(AtomicU64::new(0));
@@ -224,7 +227,23 @@ async fn main() -> Result<()> {
                         attached_player_epoch = epoch;
                         info!("player rejoined (epoch {epoch}) — rebuilding WebRTC peer + offer");
                         capturer.resync();
-                        let _ = host.pc.close().await;
+                        // Close the previous peer off the critical path.
+                        //
+                        // Awaiting close() here could hang indefinitely, and because
+                        // this is the same select! loop that relays video and services
+                        // signaling, a hang stopped *everything*: no offer for this
+                        // player, no frames, and no reaction to anyone joining later.
+                        // The first player never hit it (no peer to close yet), so it
+                        // looked like "only one player can ever connect".
+                        let old_pc = Arc::clone(&host.pc);
+                        tokio::spawn(async move {
+                            if tokio::time::timeout(Duration::from_secs(5), old_pc.close())
+                                .await
+                                .is_err()
+                            {
+                                warn!("previous peer connection did not close within 5s");
+                            }
+                        });
                         host = webrtc_peer::WebRtcHost::new(
                             signal_out.clone(),
                             Arc::clone(&pad),

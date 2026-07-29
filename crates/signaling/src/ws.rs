@@ -4,7 +4,7 @@ use couchlink_proto::{Role, SignalMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
     store.inc_conn();
@@ -82,7 +82,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                     .to_json()
                     .unwrap(),
                 );
-                debug!("host registered");
+                info!("host registered for session {}", session_id.as_deref().unwrap_or("?"));
             }
             SignalMessage::RegisterPlayer {
                 session_id: sid,
@@ -104,17 +104,35 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                         // Always notify the host: a reload leaves a stale player tx
                         // behind, and suppressing PeerJoined would strand the browser
                         // waiting for an offer that never comes.
-                        if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
-                            let _ = host_tx.send(
-                                SignalMessage::PeerJoined {
-                                    role: Role::Player,
-                                    epoch: player_epoch,
+                        match store.peer_tx(&sid, Role::Host) {
+                            Some(host_tx) => {
+                                let delivered = host_tx
+                                    .send(
+                                        SignalMessage::PeerJoined {
+                                            role: Role::Player,
+                                            epoch: player_epoch,
+                                        }
+                                        .to_json()
+                                        .unwrap(),
+                                    )
+                                    .is_ok();
+                                if delivered {
+                                    info!("player joined session {sid} (epoch {player_epoch})");
+                                } else {
+                                    // The slot holds a sender whose receiver is gone,
+                                    // so the host socket is already dead and nobody
+                                    // will ever answer this player.
+                                    warn!(
+                                        "player joined session {sid} but the host channel \
+                                         is closed — the host will not be told"
+                                    );
                                 }
-                                .to_json()
-                                .unwrap(),
-                            );
+                            }
+                            None => warn!(
+                                "player joined session {sid} with no host registered — \
+                                 it will wait for an offer that cannot come"
+                            ),
                         }
-                        debug!("player registered (epoch={player_epoch})");
                     }
                     Err(e) => {
                         let _ = tx.send(
