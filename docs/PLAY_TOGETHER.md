@@ -76,14 +76,16 @@ Pick **browser** (zero install) or **desktop player** (native app).
 3. Click **Join** (or it auto-joins if `auto=1`).
 4. Full-screen the video; play.
 
-### Option B — Desktop player (Windows / Linux / macOS)
+### Option B — Desktop player (Windows / Linux / macOS / WSL)
 
 1. Get the build from you (or build from repo — see [DESKTOP_CLIENT.md](DESKTOP_CLIENT.md)):
-   - **Windows:** unzip → run `install-client.ps1` → paste join URL when asked.
-   - **Linux:** run the **AppImage**; set `join_url=` in `~/.config/couchlink/config`.
-   - **macOS:** open **Couchlink Player.app**; same config path under `~/Library/Application Support/Couchlink/config`.
-2. Double-click **Couchlink Player** (or run the AppImage).
+   - **Windows:** unzip → run `install-client.ps1` → open **Couchlink Player** (prompts for join URL).
+   - **Linux / WSL:** AppImage, or `./scripts/run.sh client --online` (prompts in the terminal).
+   - **macOS:** open **Couchlink Player.app** (prompts for join URL on startup).
+2. Paste the **full** join URL when asked (desktop always prompts; terminal prompts if credentials are missing).
 3. Plug in **DualSense**, or use **keyboard** (WASD, arrows, Space/Shift/Ctrl/E, etc.).
+
+Clients expand TURN to UDP **and** TCP automatically — required for WSL nested NAT and many carrier networks. WSL clients also auto-advertise the Windows LAN IP as an ICE host candidate for same-LAN peers.
 
 No second VPN required if TURN + port forwarding (or UPnP) work.
 
@@ -106,6 +108,7 @@ No second VPN required if TURN + port forwarding (or UPnP) work.
 |---------|------------|
 | Friend connects but **no video** | Check host firewall; confirm host log shows “player joined” and stream started |
 | **Never connects** | Join URL must use **public** IP/hostname; verify **8443** and **3478** forwarded |
+| **WSL client never connects** | Use full join URL (`COUCHLINK_JOIN_URL` / `--join-url`) so TURN is present; client uses UDP+TCP TURN automatically |
 | **High latency** | Expected over internet; lower host preset in `.env` (`COUCHLINK_PRESET=720p60`) |
 | Native client **no window** | GPU/driver issue → falls back to headless; friend uses browser instead |
 | **Pad not in emulator** | RPCS3/PCSX2 Player 2 bound to virtual DualSense; friend must send input (pad or keyboard) |

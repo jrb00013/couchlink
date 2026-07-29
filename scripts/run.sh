@@ -4,9 +4,10 @@
 # (or just the client) as background child processes of this one script, and
 # tears them all down together on Ctrl-C. No separate terminals needed.
 #
-# Reachability (host only):
-#   --local   (default) same Wi‑Fi / LAN — join URL uses your LAN IP, no UPnP/TURN
-#   --online  internet  — public IP + TURN + UPnP so a friend can open the URL anywhere
+# Reachability:
+#   host  --local   (default) same Wi‑Fi / LAN — join URL uses LAN IP, no UPnP/TURN
+#   host  --online  internet — public IP + TURN + UPnP so a friend can open the URL anywhere
+#   client --online requires host TURN (join URL or COUCHLINK_TURN_*); WSL auto ICE IPs
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -20,8 +21,9 @@ usage: $0 [host|client] [--local|--online]
   host    start signaling + (optional TURN) + couchlink-host
   client  start couchlink-client (friend/player)
 
-  --local   LAN only (default for host). Join URL uses your LAN IP.
-  --online  Internet. Fetches public IP, starts TURN, opens ports via UPnP.
+  --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
+  --online  Internet. Host: public IP + TURN + UPnP. Client: prompts for the
+            host join URL if unset (TURN required for NAT/WSL).
 EOF
 }
 
@@ -95,6 +97,21 @@ if [[ "$ROLE" == "host" ]]; then
     export COUCHLINK_SIGNALING="ws://${PUBLIC_IP}:${PORT}/ws"
     export COUCHLINK_TURN_URL="turn:${PUBLIC_IP}:3478"
     echo "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP)"
+  fi
+elif [[ "$ROLE" == "client" ]]; then
+  # Client reachability: remote joins need the host's TURN (UDP+TCP expanded in-process).
+  # WSL auto-discovers the Windows LAN IP for ICE host candidates inside couchlink-client.
+  # If COUCHLINK_JOIN_URL is unset, couchlink-client prompts in the terminal (or a GUI dialog).
+  if [[ "$MODE" == "online" ]]; then
+    if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
+      echo "==> online client — join URL set (TURN from invite)"
+    elif [[ -n "${COUCHLINK_TURN_URL:-}" && -n "${COUCHLINK_TURN_USER:-}" && -n "${COUCHLINK_TURN_PASS:-}" ]]; then
+      echo "==> online client — TURN credentials from env"
+    else
+      echo "==> online client — will prompt for the host join URL (needed for TURN/NAT)"
+    fi
+  else
+    echo "==> local client — will prompt for join URL if credentials are missing"
   fi
 fi
 

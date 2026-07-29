@@ -46,9 +46,13 @@ port forward of **8443/tcp** + **3478/udp+tcp**) works. Press a button on their
 DualSense, then Join. Or, for a native client instead of the browser:
 
 ```bash
-./scripts/run.sh client        # Linux / WSL / macOS
-.\scripts\run.ps1 client       # native Windows (PowerShell)
+./scripts/run.sh client --online   # Linux / WSL / macOS (needs host join URL / TURN)
+./scripts/run.sh client            # same LAN
+.\scripts\run.ps1 client           # native Windows (PowerShell)
 ```
+
+For `--online` as a client, the app prompts for the host’s join URL if unset
+(or set `COUCHLINK_JOIN_URL` in `.env.couchlink`). WSL auto-handles ICE host IPs.
 
 The client opens a window showing the host's stream. Plug in a DualSense, or
 just use the keyboard (WASD + arrows + Space/Shift/Ctrl/E/Q/R/1/2/Enter/Tab —

@@ -3,14 +3,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
-: "${COUCHLINK_SESSION_ID:?set COUCHLINK_SESSION_ID}"
-: "${COUCHLINK_PIN:?set COUCHLINK_PIN}"
-ARGS=(
-  --signaling "${COUCHLINK_SIGNALING:-ws://127.0.0.1:8443/ws}"
-  --session-id "$COUCHLINK_SESSION_ID"
-  --pin "$COUCHLINK_PIN"
-)
+
+# Prefer a full invite link. Missing pieces → couchlink-client prompts interactively.
+ARGS=()
+if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
+  ARGS+=(--join-url "$COUCHLINK_JOIN_URL")
+fi
+if [[ -n "${COUCHLINK_SESSION_ID:-}" ]]; then
+  ARGS+=(--session-id "$COUCHLINK_SESSION_ID")
+fi
+if [[ -n "${COUCHLINK_PIN:-}" ]]; then
+  ARGS+=(--pin "$COUCHLINK_PIN")
+fi
+if [[ -n "${COUCHLINK_SIGNALING:-}" ]]; then
+  ARGS+=(--signaling "$COUCHLINK_SIGNALING")
+fi
 [[ -n "${COUCHLINK_TURN_URL:-}" ]] && ARGS+=(--turn-url "$COUCHLINK_TURN_URL")
 [[ -n "${COUCHLINK_TURN_USER:-}" ]] && ARGS+=(--turn-user "$COUCHLINK_TURN_USER")
 [[ -n "${COUCHLINK_TURN_PASS:-}" ]] && ARGS+=(--turn-pass "$COUCHLINK_TURN_PASS")
+[[ -n "${COUCHLINK_ICE_IPS:-}" ]] && ARGS+=(--ice-ips "$COUCHLINK_ICE_IPS")
 exec couchlink-client "${ARGS[@]}"

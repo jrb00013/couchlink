@@ -4,6 +4,8 @@ mod feedback_apply;
 mod keyboard_input;
 mod config_file;
 mod invite;
+mod prompt;
+mod reachability;
 mod signaling_client;
 mod view;
 mod webrtc_player;
@@ -39,20 +41,71 @@ struct Args {
     turn_user: Option<String>,
     #[arg(long, env = "COUCHLINK_TURN_PASS")]
     turn_pass: Option<String>,
+    /// Advertise these IPs as ICE host candidates (WSL: auto-detects Windows LAN IP).
+    #[arg(long, env = "COUCHLINK_ICE_IPS", value_delimiter = ',')]
+    ice_ips: Vec<String>,
     /// Skip the video window entirely — pad-only, for automation/testing, or
     /// the automatic fallback when window/GPU creation fails.
     #[arg(long, default_value_t = false)]
     headless: bool,
+    /// Do not prompt for a join URL (fail if credentials are missing).
+    #[arg(long, default_value_t = false)]
+    no_prompt: bool,
 }
 
 impl Args {
     fn resolve(self) -> Result<ResolvedArgs> {
         let mut args = self;
-        let join_raw = args
+        let config_url = config_file::read_join_url_from_config();
+        let cli_join = args
             .join_url
             .take()
             .or(args.positional_join.take())
-            .or_else(config_file::read_join_url_from_config);
+            .filter(|s| !s.trim().is_empty());
+        let mut join_raw = cli_join
+            .clone()
+            .or_else(|| std::env::var("COUCHLINK_JOIN_URL").ok().filter(|s| !s.trim().is_empty()))
+            .or_else(|| config_url.clone());
+
+        let needs_creds = args.session_id.is_none() || args.pin.is_none();
+        // Desktop (windowed): always ask on startup so friends paste a fresh host link
+        // (pre-filled from config/env), unless they already passed --join-url on argv.
+        // Terminal/headless: ask only when credentials are still missing.
+        let should_prompt = !args.no_prompt
+            && if args.headless {
+                needs_creds && join_raw.is_none()
+            } else {
+                cli_join.is_none()
+            };
+
+        if should_prompt {
+            let prefill = join_raw.as_deref().or(config_url.as_deref());
+            let prefer_gui = !args.headless;
+            let answered = prompt::prompt_join(prefill, prefer_gui)?;
+            if let Some(url) = answered.join_url {
+                let _ = config_file::write_join_url(&url);
+                join_raw = Some(url);
+            } else {
+                if let Some(s) = answered.session_id {
+                    args.session_id = Some(s);
+                }
+                if let Some(p) = answered.pin {
+                    args.pin = Some(p);
+                }
+                if let Some(sig) = answered.signaling {
+                    args.signaling = sig;
+                }
+                if args.turn_url.is_none() {
+                    args.turn_url = answered.turn_url;
+                }
+                if args.turn_user.is_none() {
+                    args.turn_user = answered.turn_user;
+                }
+                if args.turn_pass.is_none() {
+                    args.turn_pass = answered.turn_pass;
+                }
+            }
+        }
 
         if let Some(url) = join_raw {
             let parsed = invite::parse_join_url(&url)?;
@@ -74,18 +127,21 @@ impl Args {
             }
         }
 
+        let ice_ips = reachability::discover_ice_ips(args.ice_ips);
+
         Ok(ResolvedArgs {
             signaling: args.signaling,
-            session_id: args
-                .session_id
-                .context("session id required — use --join-url, set join_url= in config, or pass --session-id")?,
-            pin: args
-                .pin
-                .context("PIN required — use --join-url, set join_url= in config, or pass --pin")?,
+            session_id: args.session_id.context(
+                "session id required — paste the join URL when prompted, or pass --join-url / --session-id",
+            )?,
+            pin: args.pin.context(
+                "PIN required — paste the join URL when prompted, or pass --join-url / --pin",
+            )?,
             send_pad: args.send_pad,
             turn_url: args.turn_url,
             turn_user: args.turn_user,
             turn_pass: args.turn_pass,
+            ice_ips,
             headless: args.headless,
         })
     }
@@ -100,6 +156,7 @@ struct ResolvedArgs {
     turn_url: Option<String>,
     turn_user: Option<String>,
     turn_pass: Option<String>,
+    ice_ips: Vec<String>,
     headless: bool,
 }
 
@@ -188,6 +245,21 @@ async fn async_main(
 ) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let turn_ok = args.turn_url.is_some() && args.turn_user.is_some() && args.turn_pass.is_some();
+    if reachability::signaling_needs_turn(&args.signaling) && !turn_ok {
+        warn!(
+            "joining remote host without TURN — WSL/NAT clients often fail ICE. \
+             Use the full host join URL (includes turn= / turnu= / turnp=)."
+        );
+    }
+    if reachability::is_wsl() {
+        if args.ice_ips.is_empty() {
+            info!("WSL client: no Windows LAN IP for ICE host candidates — relying on STUN/TURN");
+        } else {
+            info!("WSL client: advertising Windows LAN IP(s) for ICE: {:?}", args.ice_ips);
+        }
+    }
+
     let mut signaling = signaling_client::SignalingClient::connect(&args.signaling).await?;
     signaling
         .register_player(args.session_id.clone(), args.pin.clone())
@@ -199,6 +271,7 @@ async fn async_main(
         args.turn_url.clone(),
         args.turn_user.clone(),
         args.turn_pass.clone(),
+        args.ice_ips.clone(),
     )
     .await?;
 

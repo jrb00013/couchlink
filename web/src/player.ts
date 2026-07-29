@@ -307,8 +307,17 @@ export class CouchlinkPlayer {
       { urls: "stun:stun1.l.google.com:19302" },
     ];
     if (this.turn) {
+      // UDP + TCP TURN — WSL / carrier NATs often need TCP when UDP fails.
+      const urls = [this.turn.url];
+      if (!/transport=tcp/i.test(this.turn.url)) {
+        urls.push(
+          this.turn.url.includes("?")
+            ? `${this.turn.url}&transport=tcp`
+            : `${this.turn.url}?transport=tcp`,
+        );
+      }
       iceServers.push({
-        urls: this.turn.url,
+        urls,
         username: this.turn.user,
         credential: this.turn.pass,
       });

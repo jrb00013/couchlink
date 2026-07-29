@@ -75,8 +75,15 @@ impl WebRtcHost {
             ..Default::default()
         }];
         if let (Some(url), Some(user), Some(pass)) = (turn_url, turn_user, turn_pass) {
+            // UDP + TCP: WSL / carrier NATs often need TCP TURN when UDP fails.
+            let mut urls = vec![url.clone()];
+            if !url.to_ascii_lowercase().contains("transport=tcp") {
+                let sep = if url.contains('?') { '&' } else { '?' };
+                urls.push(format!("{url}{sep}transport=tcp"));
+            }
+            info!("ICE TURN urls: {urls:?}");
             ice_servers.push(RTCIceServer {
-                urls: vec![url],
+                urls,
                 username: user,
                 credential: pass,
                 ..Default::default()

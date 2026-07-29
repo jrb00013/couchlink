@@ -6,10 +6,13 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::decode::{DecodedFrame, H264Decoder};
+use crate::reachability;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -27,17 +30,29 @@ impl WebRtcPlayer {
         turn_url: Option<String>,
         turn_user: Option<String>,
         turn_pass: Option<String>,
+        ice_ips: Vec<String>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DecodedFrame>)> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
+        let mut setting_engine = SettingEngine::default();
+        let nat_ips: Vec<String> = ice_ips
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !nat_ips.is_empty() {
+            info!("ICE NAT 1:1 IPs: {nat_ips:?}");
+            setting_engine.set_nat_1to1_ips(nat_ips, RTCIceCandidateType::Host);
+        }
         let api = APIBuilder::new()
+            .with_setting_engine(setting_engine)
             .with_media_engine(m)
             .with_interceptor_registry(registry)
             .build();
-        // Public STUN for NAT discovery, plus our own TURN relay (scripts/start-turn.sh)
-        // for symmetric-NAT/CGNAT peers STUN alone can't punch through.
+        // Public STUN for NAT discovery, plus the host's TURN relay (UDP + TCP)
+        // for symmetric-NAT / CGNAT / WSL nested-NAT peers STUN alone can't punch.
         let mut ice_servers = vec![RTCIceServer {
             urls: vec![
                 "stun:stun.l.google.com:19302".to_owned(),
@@ -46,12 +61,16 @@ impl WebRtcPlayer {
             ..Default::default()
         }];
         if let (Some(url), Some(user), Some(pass)) = (turn_url, turn_user, turn_pass) {
+            let urls = reachability::expand_turn_urls(&url);
+            info!("ICE TURN urls: {urls:?}");
             ice_servers.push(RTCIceServer {
-                urls: vec![url],
+                urls,
                 username: user,
                 credential: pass,
                 ..Default::default()
             });
+        } else {
+            warn!("no TURN configured — remote/WSL peers may fail ICE without the host join URL's turn= params");
         }
         let config = RTCConfiguration {
             ice_servers,

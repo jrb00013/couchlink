@@ -16,17 +16,19 @@ Build installers locally or publish via GitHub Actions (`release-player` workflo
 
 Legacy zip + `install-client.ps1` still works: `.\packaging\windows\build-release.ps1`.
 
-## Join config (no terminal)
+## Join config
 
-Save the host’s full join link (the same URL as the browser invite) in one line:
+On every desktop launch the player **asks for the host join link** (pre-filled from
+the last session). Terminal / `./scripts/run.sh client` prompts in the terminal when
+credentials are missing — paste the URL, or press Enter and type session/PIN/TURN.
+
+You can still pre-seed config (optional; still shown in the startup prompt):
 
 | OS | File |
 |----|------|
 | Windows | `%LOCALAPPDATA%\Couchlink\config` |
 | Linux | `~/.config/couchlink/config` |
 | macOS | `~/Library/Application Support/Couchlink/config` |
-
-Contents:
 
 ```ini
 join_url=http://YOUR_HOST:8443/?s=SESSION&p=PIN&auto=1&ws=ws://YOUR_HOST:8443/ws&turn=turn:YOUR_HOST:3478&turnu=...&turnp=...
@@ -36,6 +38,8 @@ Or run once from a terminal:
 
 ```bash
 couchlink-client --join-url 'PASTE_FULL_LINK_HERE'
+# automation / CI: skip the prompt
+couchlink-client --no-prompt --join-url '…'
 ```
 
 Template: [packaging/config.example](../packaging/config.example)

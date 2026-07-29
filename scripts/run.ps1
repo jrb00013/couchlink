@@ -31,8 +31,9 @@ Get-Content $EnvFile | ForEach-Object {
 }
 
 if (-not $env:COUCHLINK_SESSION_ID -or -not $env:COUCHLINK_PIN) {
-    Write-Error "Set COUCHLINK_SESSION_ID / COUCHLINK_PIN in .env.couchlink (get them from the host's join link/QR)."
-    exit 1
+    if (-not $env:COUCHLINK_JOIN_URL) {
+        Write-Host "No join URL in .env — Couchlink Player will prompt on startup."
+    }
 }
 
 $exe = Join-Path $Root "target\release\couchlink-client.exe"
@@ -41,13 +42,16 @@ if (-not (Test-Path $exe)) {
     exit 1
 }
 
-$argsList = @(
-    "--signaling", ($env:COUCHLINK_SIGNALING ?? "ws://127.0.0.1:8443/ws"),
-    "--session-id", $env:COUCHLINK_SESSION_ID,
-    "--pin", $env:COUCHLINK_PIN
-)
+$argsList = @()
+if ($env:COUCHLINK_JOIN_URL) {
+    $argsList += @("--join-url", $env:COUCHLINK_JOIN_URL)
+}
+if ($env:COUCHLINK_SESSION_ID) { $argsList += @("--session-id", $env:COUCHLINK_SESSION_ID) }
+if ($env:COUCHLINK_PIN) { $argsList += @("--pin", $env:COUCHLINK_PIN) }
+if ($env:COUCHLINK_SIGNALING) { $argsList += @("--signaling", $env:COUCHLINK_SIGNALING) }
 if ($env:COUCHLINK_TURN_URL) { $argsList += @("--turn-url", $env:COUCHLINK_TURN_URL) }
 if ($env:COUCHLINK_TURN_USER) { $argsList += @("--turn-user", $env:COUCHLINK_TURN_USER) }
 if ($env:COUCHLINK_TURN_PASS) { $argsList += @("--turn-pass", $env:COUCHLINK_TURN_PASS) }
+if ($env:COUCHLINK_ICE_IPS) { $argsList += @("--ice-ips", $env:COUCHLINK_ICE_IPS) }
 
 & $exe @argsList
