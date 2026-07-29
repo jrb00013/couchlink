@@ -222,3 +222,59 @@ pub fn texture_size(texture: &ID3D11Texture2D) -> (u32, u32, DXGI_FORMAT) {
 }
 
 use windows::core::Interface;
+
+/// A private NV12 texture the encoder thread owns outright, used to hold the last
+/// submitted frame so a static screen can keep the cadence going.
+///
+/// The converter's pool cannot be used for this: the capture thread rotates through
+/// it on every WGC frame regardless of what the encoder is doing, so a pooled
+/// texture held for replay gets recycled and overwritten mid-encode. Only a texture
+/// written by the same thread that submits it is safe to re-submit.
+pub struct ReplayTarget {
+    /// Two textures, alternating. A single one races itself: the copy that refreshes
+    /// it can land while the encoder is still reading the previous submission of the
+    /// same surface, which corrupts the frame in flight.
+    textures: [ID3D11Texture2D; 2],
+    current: usize,
+    context: ID3D11DeviceContext,
+    dims: (u32, u32),
+}
+
+// SAFETY: same multithreaded-device reasoning as GpuConverter; this is created and
+// used entirely on the encoder thread.
+unsafe impl Send for ReplayTarget {}
+
+impl ReplayTarget {
+    pub fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
+        unsafe {
+            let textures = [
+                create_nv12_target(device, width, height)?,
+                create_nv12_target(device, width, height)?,
+            ];
+            let context = device.GetImmediateContext().context("immediate context")?;
+            Ok(Self {
+                textures,
+                current: 0,
+                context,
+                dims: (width, height),
+            })
+        }
+    }
+
+    pub const fn dimensions(&self) -> (u32, u32) {
+        self.dims
+    }
+
+    /// Keep a copy of a frame that has just been submitted, into whichever buffer is
+    /// not the one most recently handed to the encoder.
+    pub fn store(&mut self, src: &ID3D11Texture2D) {
+        let next = 1 - self.current;
+        unsafe { self.context.CopyResource(&self.textures[next], src) };
+        self.current = next;
+    }
+
+    /// The most recently stored frame.
+    pub const fn texture(&self) -> &ID3D11Texture2D {
+        &self.textures[self.current]
+    }
+}

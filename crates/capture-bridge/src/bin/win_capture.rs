@@ -11,7 +11,7 @@ fn main() {
 mod run {
     use anyhow::{bail, Context as AnyhowContext, Result};
     use clap::{Parser, ValueEnum};
-    use couchlink_capture_bridge::gpu_convert::{self, GpuConverter};
+    use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
     use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
@@ -209,7 +209,7 @@ mod run {
                 // Only pixel frames can be re-encoded to fill a gap: a pooled texture
                 // is recycled by the capture thread and would be overwritten.
                 let mut previous: Option<(u32, u32, Vec<u8>, Instant)> = None;
-                let mut previous_texture: Option<(u32, u32, SendTexture, Instant)> = None;
+                let mut replay_target: Option<ReplayTarget> = None;
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
                 let mut encoded_window = Instant::now();
@@ -244,14 +244,25 @@ mod run {
                             // not latency anyone perceives — only frames that actually
                             // changed are timed, or the number would measure how idle
                             // the desktop is rather than how responsive we are.
-                            // Replay the frame we already hold when nothing new
-                            // arrived, so a static screen keeps the cadence hole-free.
-                            // Replaying a pooled texture is safe precisely because
-                            // "nothing new arrived" means the capture thread has not
-                            // recycled it.
-                            let replay = previous_texture
+                            // Replay from a texture this thread owns outright.
+                            //
+                            // The converter's pool cannot be replayed: the capture
+                            // thread rotates through it on every WGC frame regardless
+                            // of what the encoder is doing, so a pooled texture held
+                            // for replay gets recycled and overwritten mid-encode —
+                            // that encoded garbage, and cost 609 decode errors and
+                            // 4.9fps before it was caught.
+                            let replay = replay_target
                                 .as_ref()
-                                .map(|(w, h, t, at)| (*w, *h, Surface::Texture(SendTexture(t.0.clone())), *at))
+                                .map(|r: &ReplayTarget| {
+                                    let (w, h) = r.dimensions();
+                                    (
+                                        w,
+                                        h,
+                                        Surface::Texture(SendTexture(r.texture().clone())),
+                                        Instant::now(),
+                                    )
+                                })
                                 .or_else(|| {
                                     previous
                                         .clone()
@@ -281,9 +292,25 @@ mod run {
                                 // thread notice the flag rather than fail the encode.
                                 Surface::Texture(_) if !encoder.is_zero_copy() => Ok(()),
                                 Surface::Texture(t) => {
-                                    previous_texture =
-                                        Some((fw, fh, SendTexture(t.0.clone()), captured_at));
-                                    encoder.submit_texture(&t.0)
+                                    let submitted = encoder.submit_texture(&t.0);
+                                    // Only copy a frame that came from the capture
+                                    // thread. On a replay `t` IS the replay texture,
+                                    // and copying a resource onto itself is undefined —
+                                    // comparing Rust references does not catch that,
+                                    // since two clones of the same COM object live at
+                                    // different addresses.
+                                    if submitted.is_ok() && from_source {
+                                        if replay_target.as_ref().map(|r| r.dimensions())
+                                            != Some((fw, fh))
+                                        {
+                                            replay_target =
+                                                ReplayTarget::new(&device.0, fw, fh).ok();
+                                        }
+                                        if let Some(r) = &mut replay_target {
+                                            r.store(&t.0);
+                                        }
+                                    }
+                                    submitted
                                 }
                                 Surface::Pixels(px) => {
                                     previous = Some((fw, fh, px.clone(), captured_at));
@@ -631,7 +658,12 @@ mod run {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "couchlink_win_capture=info".into()),
+                    // The encoder lives in the library crate, so filtering on the
+                    // binary alone silently discards everything it reports —
+                    // including the warnings that explain a broken stream.
+                    .unwrap_or_else(|_| {
+                        "couchlink_win_capture=info,couchlink_capture_bridge=info".into()
+                    }),
             )
             .init();
 

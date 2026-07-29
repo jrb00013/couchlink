@@ -55,6 +55,8 @@ pub struct HardwareEncoder {
     provides_samples: bool,
     output_sample_size: u32,
     learned_parameter_sets: bool,
+    keyframe_request_broken: bool,
+    frames_logged: u32,
     /// Held for the lifetime of the transform when running zero-copy; dropping it
     /// would pull the device out from under the encoder.
     dxgi_manager: Option<IMFDXGIDeviceManager>,
@@ -241,6 +243,11 @@ impl HardwareEncoder {
             {
                 tracing::warn!("Main profile rejected — falling back to Baseline");
                 out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+            // Bound the GOP so a viewer that joins mid-stream, or loses sync, always
+            // has a decodable frame coming within a known time — even if forcing one
+            // on demand is unsupported. One second of keyframes costs little at these
+            // bitrates and removes an unbounded wait.
+            let _ = out.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps);
                 transform
                     .SetOutputType(0, &out, 0)
                     .context("SetOutputType(H264) — encoder rejected these parameters")?;
@@ -325,6 +332,8 @@ impl HardwareEncoder {
             provides_samples,
             output_sample_size,
             learned_parameter_sets: false,
+            keyframe_request_broken: false,
+            frames_logged: 0,
             dxgi_manager,
         })
     }
@@ -334,10 +343,29 @@ impl HardwareEncoder {
     }
 
     /// Ask for an IDR on the next frame. Used when a player joins mid-session.
-    pub fn request_keyframe(&self) {
-        let Some(api) = &self.codec_api else { return };
-        unsafe {
-            let _ = set_codec_u32(api, &CODECAPI_AVEncVideoForceKeyFrame, 1);
+    pub fn request_keyframe(&mut self) {
+        let Some(api) = &self.codec_api else {
+            if !self.keyframe_request_broken {
+                tracing::warn!(
+                    "encoder exposes no ICodecAPI — cannot force a keyframe, joiners \
+                     wait for the scheduled one"
+                );
+                self.keyframe_request_broken = true;
+            }
+            return;
+        };
+        // Silently discarding this is how a join ends up staring at undecodable
+        // video for seconds: if the transform refuses the request there is no other
+        // signal, and the viewer just waits out the GOP.
+        let result = unsafe { set_codec_u32(api, &CODECAPI_AVEncVideoForceKeyFrame, 1) };
+        if let Err(e) = result {
+            if !self.keyframe_request_broken {
+                tracing::warn!(
+                    "encoder rejected a forced keyframe ({e}) — relying on the \
+                     scheduled interval instead"
+                );
+                self.keyframe_request_broken = true;
+            }
         }
     }
 
@@ -523,6 +551,19 @@ impl HardwareEncoder {
             data = avcc_to_annex_b(&data)?;
         } else if !self.annex_b_confirmed {
             self.annex_b_confirmed = true;
+        }
+
+        // Every keyframe is worth a line: a joiner can only start on one, so if a
+        // join looks broken this says whether one was ever produced.
+        if keyframe || self.frames_logged < 2 {
+            let types: Vec<u8> = nal_types(&data).collect();
+            tracing::info!(
+                "output frame {}: keyframe={keyframe} {} bytes, NAL types {:?}",
+                self.frames_logged,
+                data.len(),
+                types
+            );
+            self.frames_logged = self.frames_logged.saturating_add(1);
         }
 
         // Prefer parameter sets observed in the stream over the media type's blob.

@@ -24,6 +24,7 @@ pub struct H264Decoder {
     decoder: Decoder,
     frame_count: u64,
     latencies_us: Vec<u64>,
+    decode_errors: u64,
 }
 
 const LATENCY_LOG_EVERY: usize = 120; // ~once every 2s at 60fps
@@ -36,6 +37,7 @@ impl H264Decoder {
             decoder,
             frame_count: 0,
             latencies_us: Vec::with_capacity(LATENCY_LOG_EVERY),
+            decode_errors: 0,
         })
     }
 
@@ -51,7 +53,20 @@ impl H264Decoder {
             Ok(Some(d)) => d,
             Ok(None) => return Ok(None),
             Err(e) => {
-                warn!("h264 decode error, dropping frame: {e}");
+                // One line per lost frame turns normal connection warm-up into what
+                // looks like a catastrophic failure: while ICE and DTLS settle, some
+                // packets are lost, the NALs built from them are incomplete, and the
+                // decoder rejects them until the next keyframe. Measured on a healthy
+                // link this is a few hundred frames over the first seconds and then
+                // nothing at all, so report it as a rate-limited summary.
+                self.decode_errors += 1;
+                if self.decode_errors == 1 || self.decode_errors % 250 == 0 {
+                    warn!(
+                        "h264 decode errors: {} so far (expected while the connection \
+                         settles; persistent counts mean real loss) — last: {e}",
+                        self.decode_errors
+                    );
+                }
                 return Ok(None);
             }
         };
