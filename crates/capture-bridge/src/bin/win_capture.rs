@@ -145,6 +145,7 @@ mod run {
                 // the same fix that took the raw path's buffer from 97ms to 6ms.
                 let tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
                 let mut next_submit = Instant::now();
+                let mut previous: Option<(u32, u32, Vec<u8>)> = None;
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
                 let mut encoded_window = Instant::now();
@@ -169,11 +170,19 @@ mod run {
                             while let Ok(newer) = raw_rx.try_recv() {
                                 latest = Some(newer);
                             }
-                            let Some((fw, fh, px)) =
-                                latest.take().or_else(|| raw_rx.recv().ok())
+                            // Nothing new this beat? Re-encode the frame we already
+                            // have. A static screen costs a few hundred bytes and
+                            // keeps the cadence hole-free, which is the entire point
+                            // of a metronome; blocking here would make the cadence
+                            // source-paced again.
+                            let Some((fw, fh, px)) = latest
+                                .take()
+                                .or_else(|| previous.clone())
+                                .or_else(|| raw_rx.recv().ok())
                             else {
                                 return;
                             };
+                            previous = Some((fw, fh, px.clone()));
                             if (fw, fh) != encoder.dimensions() {
                                 info!("capture resized to {fw}x{fh} — rebuilding the encoder");
                                 seed = Some((fw, fh, px));
@@ -190,13 +199,23 @@ mod run {
                             for f in frames {
                                 let bytes = f.data.len();
                                 let key = f.keyframe;
-                                // Socket writer behind? Skip rather than queue.
+                                // Dropping an H.264 frame breaks every frame after it
+                                // until the next keyframe, so a silent drop is not an
+                                // option — but blocking is worse: the host does not
+                                // read this socket until a player connects, so a
+                                // blocking send parks the encoder indefinitely.
+                                //
+                                // Resolve it by making the drop safe: shed the frame to
+                                // stay current, then immediately ask for an IDR so the
+                                // decoder resynchronises on the very next frame instead
+                                // of glitching until the next scheduled keyframe.
                                 let queued = out
                                     .try_send((w, h, f.data, FrameFormat::H264, key))
                                     .is_ok();
                                 encoded += 1;
                                 if !queued {
                                     stalled += 1;
+                                    encoder.request_keyframe();
                                 }
                                 if encoded_window.elapsed() >= Duration::from_secs(5) {
                                     info!(

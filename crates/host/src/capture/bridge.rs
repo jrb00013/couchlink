@@ -209,6 +209,25 @@ impl WindowsBridge {
         self.format
     }
 
+    /// Throw away everything already queued and resynchronise.
+    ///
+    /// The host does not read this socket until a player connects, so by then a
+    /// backlog of encoded frames is waiting. Relaying it in order is faithful and
+    /// permanently late; the viewer wants what is on screen *now*. Discarding the
+    /// backlog would normally corrupt the decoder, so it is paired with an IDR
+    /// request — the next frame is then decodable from scratch.
+    pub fn resync(&mut self) {
+        let mut shed = 0u32;
+        while matches!(self.read_frame(DRAIN_POLL), Ok(Some(_))) {
+            shed += 1;
+        }
+        if shed > 0 {
+            tracing::info!("dropped {shed} stale capture frame(s) and asked for a keyframe");
+        }
+        self.last = None;
+        self.request_idr();
+    }
+
     pub fn capture(&mut self) -> Result<Option<Captured>> {
         if let Some(p) = self.pending.take() {
             self.last = Some(p.clone());

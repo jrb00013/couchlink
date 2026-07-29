@@ -62,6 +62,13 @@ impl FrameCapture {
             c.request_idr();
         }
     }
+
+    /// Discard anything already buffered so the stream starts from *now*.
+    pub fn resync(&mut self) {
+        if let Self::Windows(c) = self {
+            c.resync();
+        }
+    }
 }
 
 fn info_log(msg: &str) {

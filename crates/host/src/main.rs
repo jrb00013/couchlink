@@ -135,6 +135,9 @@ async fn main() -> Result<()> {
             SignalMessage::PeerJoined { epoch, .. } => {
                 info!("player joined — sending offer (player epoch {epoch})");
                 attached_player_epoch = epoch;
+                // Frames have been piling up in the capture socket while nobody was
+                // watching. Start from what is on screen now, not from the backlog.
+                capturer.resync();
                 host.create_and_send_offer(&signal_out).await?;
                 break;
             }
@@ -192,6 +195,7 @@ async fn main() -> Result<()> {
                         }
                         attached_player_epoch = epoch;
                         info!("player rejoined (epoch {epoch}) — rebuilding WebRTC peer + offer");
+                        capturer.resync();
                         let _ = host.pc.close().await;
                         host = webrtc_peer::WebRtcHost::new(
                             signal_out.clone(),
