@@ -33,9 +33,15 @@ pub struct HardwareEncoder {
     events: Option<IMFMediaEventGenerator>,
     width: u32,
     height: u32,
-    /// SPS/PPS from the output media type. Some encoders only emit these out of
-    /// band, so they are prepended to every keyframe — a decoder joining mid-stream
-    /// cannot start without them.
+    /// SPS/PPS, prepended to every keyframe that lacks them.
+    ///
+    /// A decoder cannot start without parameter sets, and MF encoders typically emit
+    /// them only once at the start of the stream. Any viewer joining later then
+    /// receives a stream it can never decode (openh264 reports dsNoParamSets), which
+    /// is invisible to whoever was already connected.
+    ///
+    /// Read from MF_MT_MPEG_SEQUENCE_HEADER where available, and otherwise learned
+    /// from the encoder's own output — that attribute is not always present.
     sequence_header: Vec<u8>,
     frame_index: i64,
     frame_duration: i64,
@@ -46,6 +52,7 @@ pub struct HardwareEncoder {
     /// hand it a buffer of at least `output_sample_size` on every ProcessOutput.
     provides_samples: bool,
     output_sample_size: u32,
+    learned_parameter_sets: bool,
 }
 
 // SAFETY: COM is initialised as a multithreaded apartment (COINIT_MULTITHREADED),
@@ -191,6 +198,7 @@ impl HardwareEncoder {
             annex_b_confirmed: false,
             provides_samples,
             output_sample_size,
+            learned_parameter_sets: false,
         })
     }
 
@@ -393,6 +401,21 @@ impl HardwareEncoder {
             self.annex_b_confirmed = true;
         }
 
+        // Prefer parameter sets observed in the stream over the media type's blob.
+        // MF_MT_MPEG_SEQUENCE_HEADER is sometimes an AVCDecoderConfigurationRecord
+        // (AVCC, length-prefixed) rather than Annex-B; prepending that to a keyframe
+        // feeds the decoder garbage and it reports "no parameter sets" forever.
+        if !self.learned_parameter_sets {
+            if let Some(sets) = extract_parameter_sets(&data) {
+                tracing::info!(
+                    "cached {} bytes of SPS/PPS from the stream (was {} from the media type)",
+                    sets.len(),
+                    self.sequence_header.len()
+                );
+                self.sequence_header = sets;
+                self.learned_parameter_sets = true;
+            }
+        }
         if keyframe && !self.sequence_header.is_empty() && !contains_sps(&data) {
             let mut with_header = self.sequence_header.clone();
             with_header.extend_from_slice(&data);
@@ -515,12 +538,82 @@ unsafe fn read_sequence_header(transform: &IMFTransform) -> Vec<u8> {
         return Vec::new();
     }
     blob.truncate(written as usize);
+    // Only usable if it is already Annex-B. Anything else is a configuration record
+    // in disguise and must not be spliced into the byte stream.
+    if !blob.starts_with(&START_CODE) && !blob.starts_with(&START_CODE[1..]) {
+        tracing::warn!(
+            "sequence header is not Annex-B ({} bytes) — ignoring, will learn from the stream",
+            blob.len()
+        );
+        return Vec::new();
+    }
+    tracing::info!("sequence header: {} bytes of Annex-B SPS/PPS", blob.len());
     blob
 }
 
 /// Does this access unit already carry an SPS (NAL type 7)?
 fn contains_sps(data: &[u8]) -> bool {
     nal_types(data).any(|t| t == 7)
+}
+
+/// Pull the SPS (7) and PPS (8) NALs out of an access unit, start codes included,
+/// so they can be replayed ahead of a later keyframe for a viewer that joined after
+/// the encoder emitted them.
+fn extract_parameter_sets(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut have_sps = false;
+    let mut have_pps = false;
+    for (start, end) in nal_ranges(data) {
+        let nal_type = data[start] & 0x1F;
+        if nal_type != 7 && nal_type != 8 {
+            continue;
+        }
+        out.extend_from_slice(&START_CODE);
+        out.extend_from_slice(&data[start..end]);
+        have_sps |= nal_type == 7;
+        have_pps |= nal_type == 8;
+    }
+    (have_sps && have_pps).then_some(out)
+}
+
+/// Byte ranges of each NAL payload (after its start code).
+fn nal_ranges(data: &[u8]) -> Vec<(usize, usize)> {
+    let mut starts = Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            starts.push(i + 3);
+            i += 3;
+        } else if i + 4 <= data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
+            starts.push(i + 4);
+            i += 4;
+        } else {
+            i += 1;
+        }
+    }
+    let mut ranges = Vec::with_capacity(starts.len());
+    for (n, &start) in starts.iter().enumerate() {
+        // A NAL ends where the next one's start code begins.
+        let end = starts
+            .get(n + 1)
+            .map(|&next| {
+                let mut e = next.saturating_sub(3);
+                if e >= 1 && data.get(e - 1) == Some(&0) {
+                    e -= 1;
+                }
+                e
+            })
+            .unwrap_or(data.len());
+        if start < end {
+            ranges.push((start, end));
+        }
+    }
+    ranges
 }
 
 fn nal_types(data: &[u8]) -> impl Iterator<Item = u8> + '_ {
@@ -620,6 +713,26 @@ mod tests {
     fn malformed_avcc_is_an_error_not_a_panic() {
         let avcc = [0, 0, 0, 99, 0x65];
         assert!(avcc_to_annex_b(&avcc).is_err());
+    }
+
+    #[test]
+    fn parameter_sets_are_extracted_for_replay() {
+        // SPS (7), PPS (8), then an IDR (5).
+        let au = [
+            0, 0, 0, 1, 0x67, 0x42, 0xE0, //
+            0, 0, 0, 1, 0x68, 0xCE, //
+            0, 0, 0, 1, 0x65, 0xAA, 0xBB,
+        ];
+        let sets = extract_parameter_sets(&au).expect("sps+pps found");
+        assert!(contains_sps(&sets));
+        assert!(nal_types(&sets).any(|t| t == 8), "pps must be included");
+        assert!(!nal_types(&sets).any(|t| t == 5), "slice data must not be");
+    }
+
+    #[test]
+    fn parameter_sets_need_both_sps_and_pps() {
+        let sps_only = [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x65, 0xAA];
+        assert!(extract_parameter_sets(&sps_only).is_none());
     }
 
     #[test]

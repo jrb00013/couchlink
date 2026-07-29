@@ -127,10 +127,21 @@ async fn main() -> Result<()> {
     let mut last_idr = std::time::Instant::now();
     let mut capture_ok_announced: Option<bool> = None;
 
-    // Wait for the first player before offering WebRTC.
+    // Wait for the first player before offering WebRTC — but keep draining the
+    // capture socket while waiting. With nobody reading it, TCP fills, the Windows
+    // side sheds every frame it encodes, and (because a shed frame asks for a
+    // keyframe) the encoder degenerates into emitting nothing but IDRs.
     loop {
-        let Some(msg) = signaling.inbound.recv().await else {
-            return Ok(());
+        let msg = tokio::select! {
+            msg = signaling.inbound.recv() => match msg {
+                Some(m) => m,
+                None => return Ok(()),
+            },
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                // Discard: there is no one to show it to yet.
+                let _ = capturer.capture();
+                continue;
+            }
         };
         match msg {
             SignalMessage::PeerJoined { epoch, .. } => {
