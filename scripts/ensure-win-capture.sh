@@ -46,6 +46,11 @@ case "${COUCHLINK_PRESET:-720p30}" in
   1080p*) wire_w=1920; wire_h=1080 ;;
   *)      wire_w=1280; wire_h=720 ;;
 esac
+# Capture/encode cadence. Measured on an RTX 5080 at 720p: 60Hz gives
+# capture->encoded p50 11-13ms, 120Hz gives p50 8-9ms — the beat is half the
+# wait, so halving it halves that half. The cost is double the encode and
+# roughly double the bitrate's worth of frames, so it is opt-in.
+capture_fps="${COUCHLINK_CAPTURE_FPS:-60}"
 source_mode="${COUCHLINK_CAPTURE_SOURCE:-picker}"
 window_title="${COUCHLINK_CAPTURE_WINDOW:-}"
 if [[ -n "$window_title" ]]; then
@@ -68,7 +73,7 @@ style=Minimized
 echo "==> starting Windows capture (source=$source_mode → $connect)"
 # Build ArgumentList in PowerShell so quoting stays correct.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h')
+  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
 " >/dev/null
