@@ -1,6 +1,40 @@
 //! Read local DualSense via Linux hidraw — dualsensekit enumeration methodology
 //! without linking libudev/hidapi (works in constrained build environments).
+//!
+//! hidraw is Linux-only. On other platforms the reader compiles to a stub that
+//! reports no pad, so the viewer still builds and runs there with keyboard input;
+//! a Windows pad would come from XInput, which is a separate backend.
 
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
+#[cfg(not(target_os = "linux"))]
+mod stub {
+    use anyhow::{bail, Result};
+    use couchlink_proto::PadFrame;
+
+    pub struct DualSenseReader;
+
+    impl DualSenseReader {
+        pub fn open_first() -> Result<Self> {
+            bail!("DualSense over hidraw is Linux-only; use keyboard input on this platform")
+        }
+        pub fn read_frame(&mut self) -> Result<Option<PadFrame>> {
+            Ok(None)
+        }
+        pub fn set_rumble(&mut self, _large: u8, _small: u8) -> Result<()> {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub use stub::DualSenseReader;
+
+#[cfg(target_os = "linux")]
+pub use linux_impl::DualSenseReader;
+
+#[cfg(target_os = "linux")]
+mod linux_impl {
 use anyhow::{bail, Context, Result};
 use couchlink_pad::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
 use couchlink_pad::parse_input_report;
@@ -110,4 +144,5 @@ fn set_nonblocking(fd: i32) -> Result<()> {
     fcntl(fd, FcntlArg::F_SETFL(flags)).context("F_SETFL")?;
     let _ = Duration::from_millis(1);
     Ok(())
+}
 }

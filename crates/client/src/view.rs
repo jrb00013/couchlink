@@ -115,15 +115,23 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    let y = textureSample(t_frame, s_frame, in.uv).r;
-    let u = textureSample(t_u, s_frame, in.uv).r - 0.5;
-    let v = textureSample(t_v, s_frame, in.uv).r - 0.5;
+    // BT.601, studio swing. Both encoders in this project (the host's
+    // bgra_to_i420 and the Windows bgra_to_nv12) emit limited-range BT.601:
+    // luma spans 16..235 and chroma 16..240, not 0..255.
+    //
+    // Using the samples directly leaves black sitting at 16/255 = 0.063 instead
+    // of 0, which lifts every shadow and reads as a white haze over the picture.
+    // The coefficients also have to match the matrix the encoder used — these
+    // were BT.709 against BT.601 data, which skews hue on top of the wash.
+    let y = (textureSample(t_frame, s_frame, in.uv).r - 0.0627451) * 1.1643836;
+    let u = (textureSample(t_u, s_frame, in.uv).r - 0.5019608) * 1.1383929;
+    let v = (textureSample(t_v, s_frame, in.uv).r - 0.5019608) * 1.1383929;
     let rgb = vec3<f32>(
-        y + 1.5748 * v,
-        y - 0.1873 * u - 0.4681 * v,
-        y + 1.8556 * u
+        y + 1.402 * v,
+        y - 0.344136 * u - 0.714136 * v,
+        y + 1.772 * u
     );
-    return vec4<f32>(rgb, 1.0);
+    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#,
             )),

@@ -157,6 +157,16 @@ impl WebRtcPlayer {
             let pc_pli = Arc::clone(&pc_pli);
             Box::pin(async move {
                 info!("video track received: {}", track.codec().capability.mime_type);
+                // We joined mid-stream, so the next frames reference pictures we
+                // never saw and carry no parameter sets. Ask for a keyframe straight
+                // away instead of waiting for the sender's scheduled one — that wait
+                // is seconds of undecodable video at startup.
+                let _ = pc_pli
+                    .write_rtcp(&[Box::new(PictureLossIndication {
+                        sender_ssrc: 0,
+                        media_ssrc: track.ssrc(),
+                    })])
+                    .await;
                 let mut depacketizer = rtp::codecs::h264::H264Packet::default();
                 depacketizer.is_avc = false; // false => depacketize() emits Annex-B (start-code) NALs
                 let mut shedding = false;
