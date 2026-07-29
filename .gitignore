@@ -10,6 +10,8 @@ var/
 .DS_Store
 .idea/
 .vscode/
+.cursor/
+.claude/
 *.key
 *.pub
 python/.venv/
