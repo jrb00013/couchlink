@@ -152,7 +152,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
     }
 
     if let (Some(sid), Some(r)) = (session_id, role) {
-        store.unregister(&sid, r);
+        store.unregister(&sid, r, Some(&tx));
     }
     store.dec_conn();
     forward.abort();
