@@ -1,10 +1,12 @@
-//! WebRTC host peer — video track + `pad` DataChannel (Rohomieo offer flow).
+//! WebRTC host peer — video track + `pad` / `video` DataChannels (Rohomieo offer flow).
 
 use anyhow::{Context, Result};
-use bytes::BytesMut;
+use bytes::{BytesMut, Bytes};
 use couchlink_pad::{VirtualPad, VirtualPadConfig};
-use couchlink_proto::{PadFeedback, PadFrame, SignalMessage, PAD_CHANNEL};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use couchlink_proto::{
+    PadFeedback, PadFrame, SignalMessage, VideoAccessUnit, PAD_CHANNEL, VIDEO_CHANNEL,
+};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
@@ -31,6 +33,11 @@ use std::time::Duration;
 pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
     pub video: Arc<TrackLocalStaticSample>,
+    /// Unordered unreliable H.264 channel for browser WebCodecs (bypasses RTP JB).
+    video_dc: Arc<RTCDataChannel>,
+    video_seq: AtomicU32,
+    video_w: AtomicU32,
+    video_h: AtomicU32,
     pub pad_tx: mpsc::UnboundedSender<PadFrame>,
     offer_epoch: Arc<AtomicU64>,
     /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
@@ -76,6 +83,11 @@ impl WebRtcHost {
             info!("ICE NAT 1:1 IPs: {nat_ips:?}");
             setting_engine.set_nat_1to1_ips(nat_ips, RTCIceCandidateType::Host);
         }
+        // Offer a larger SCTP message size; we still fragment CLVD below the
+        // common 64 KiB negotiated floor so Chrome peers always work.
+        setting_engine.set_sctp_max_message_size_can_send(
+            webrtc::api::setting_engine::SctpMaxMessageSize::Bounded(256 * 1024),
+        );
         let api = APIBuilder::new()
             .with_setting_engine(setting_engine)
             .with_media_engine(m)
@@ -167,28 +179,54 @@ impl WebRtcHost {
             })
         }));
 
-        // Create pad data channel (host→negotiated with offer)
-        let dc = pc2
+        // Pad: unordered + no retransmit — gaming input must never HOL-block.
+        let pad_dc = pc2
             .create_data_channel(
                 PAD_CHANNEL,
                 Some(webrtc::data_channel::data_channel_init::RTCDataChannelInit {
-                    ordered: Some(true),
+                    ordered: Some(false),
+                    max_retransmits: Some(0),
                     ..Default::default()
                 }),
             )
             .await?;
-        setup_pad_channel(dc, pad_tx_dc, pad_device_dc).await;
+        setup_pad_channel(pad_dc, pad_tx_dc, pad_device_dc).await;
+
+        // Video: same reliability profile. Browser WebCodecs consumes this and
+        // skips Chrome's media jitter buffer (~7ms floor on the RTP path).
+        let video_dc = pc2
+            .create_data_channel(
+                VIDEO_CHANNEL,
+                Some(webrtc::data_channel::data_channel_init::RTCDataChannelInit {
+                    ordered: Some(false),
+                    max_retransmits: Some(0),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        let kf_dc = Arc::clone(&keyframe_wanted);
+        setup_video_channel(Arc::clone(&video_dc), kf_dc).await;
 
         Ok((
             Self {
                 pc,
                 video,
+                video_dc,
+                video_seq: AtomicU32::new(0),
+                video_w: AtomicU32::new(0),
+                video_h: AtomicU32::new(0),
                 pad_tx,
                 offer_epoch,
                 keyframe_wanted,
             },
             pad_rx,
         ))
+    }
+
+    /// Dimensions stamped into CLVD headers (from stream preset / capture).
+    pub fn set_video_size(&self, width: u32, height: u32) {
+        self.video_w.store(width, Ordering::Relaxed);
+        self.video_h.store(height, Ordering::Relaxed);
     }
 
     pub async fn create_and_send_offer(
@@ -228,9 +266,37 @@ impl WebRtcHost {
         Ok(())
     }
 
-    pub async fn push_h264(&self, annex_b: Vec<u8>, duration: Duration) -> Result<()> {
+    pub async fn push_h264(
+        &self,
+        annex_b: Vec<u8>,
+        duration: Duration,
+        keyframe: bool,
+    ) -> Result<()> {
         use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
         use rtp::extension::HeaderExtension;
+
+        // DataChannel path first — browser WebCodecs paints without waiting on RTP JB.
+        // Native clients ignore this channel and keep using the media track below.
+        if self.video_dc.ready_state()
+            == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+        {
+            let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
+            let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
+            let h = self.video_h.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
+            let au = VideoAccessUnit {
+                seq,
+                width: w,
+                height: h,
+                keyframe,
+                annex_b: annex_b.clone(),
+            };
+            for frag in au.encode_fragments() {
+                if let Err(e) = self.video_dc.send(&Bytes::from(frag)).await {
+                    warn!("video datachannel send: {e}");
+                    break;
+                }
+            }
+        }
 
         // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
         // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
@@ -241,13 +307,28 @@ impl WebRtcHost {
                 min_delay, max_delay,
             )))
             .write_sample(&Sample {
-                data: bytes::Bytes::from(annex_b),
+                data: Bytes::from(annex_b),
                 duration,
                 ..Default::default()
             })
             .await?;
         Ok(())
     }
+}
+
+async fn setup_video_channel(dc: Arc<RTCDataChannel>, keyframe_wanted: Arc<AtomicBool>) {
+    dc.on_open(Box::new(move || {
+        info!("video datachannel open (CLVD → browser WebCodecs)");
+        Box::pin(async {})
+    }));
+    dc.on_message(Box::new(move |msg: DataChannelMessage| {
+        let keyframe_wanted = Arc::clone(&keyframe_wanted);
+        Box::pin(async move {
+            // Any inbound message = viewer lost sync / decoder reset.
+            let _ = msg;
+            keyframe_wanted.store(true, Ordering::Relaxed);
+        })
+    }));
 }
 
 async fn setup_pad_channel(

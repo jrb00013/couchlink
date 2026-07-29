@@ -467,16 +467,50 @@ struct App {
     keyboard_pad: Arc<Mutex<KeyboardPad>>,
     shutdown_tx: std::sync::mpsc::Sender<()>,
     init_error: Option<anyhow::Error>,
+    present_us: Vec<u64>,
+    frames_late: u64,
+    present_window: std::time::Instant,
 }
 
 impl App {
     /// Drains the decode channel and uploads only the newest frame (drops stale ones).
     fn ingest_latest_frame(&mut self) -> bool {
         let mut latest = None;
+        let mut skipped = 0u32;
         while let Ok(frame) = self.frame_rx.try_recv() {
+            if latest.is_some() {
+                skipped += 1;
+            }
             latest = Some(frame);
         }
         if let (Some(renderer), Some(frame)) = (&mut self.renderer, latest) {
+            // How long a decoded frame sat before reaching the GPU. This is the
+            // window the event loop controls, and it was unbounded before the loop
+            // stopped sleeping on OS events.
+            self.present_us.push(frame.decoded_at.elapsed().as_micros() as u64);
+            self.frames_late += skipped as u64;
+            if self.present_window.elapsed() >= std::time::Duration::from_secs(5) {
+                self.present_us.sort_unstable();
+                let pct = |q: usize| {
+                    self.present_us
+                        .get((self.present_us.len() * q / 100).min(self.present_us.len().saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(0) as f64
+                        / 1000.0
+                };
+                let fps = self.present_us.len() as f64
+                    / self.present_window.elapsed().as_secs_f64();
+                tracing::info!(
+                    "presented {:.1} fps | decoded->onscreen p50={:.2}ms p99={:.2}ms | {} frames superseded",
+                    fps,
+                    pct(50),
+                    pct(99),
+                    self.frames_late
+                );
+                self.present_us.clear();
+                self.frames_late = 0;
+                self.present_window = std::time::Instant::now();
+            }
             renderer.upload_frame(&frame);
             true
         } else {
@@ -607,6 +641,9 @@ pub fn run(
         keyboard_pad,
         shutdown_tx,
         init_error: None,
+        present_us: Vec::with_capacity(512),
+        frames_late: 0,
+        present_window: std::time::Instant::now(),
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.init_error {

@@ -1,7 +1,15 @@
 import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
+import {
+  ClvdAssembler,
+  decodeClvdFragment,
+  PLI_BYTES,
+  VIDEO_CHANNEL,
+  type VideoAccessUnit,
+} from "./clvd";
 import { clog, cerror, cwarn } from "./log";
 import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
+import { canUseWebCodecs } from "./webCodecsCanvas";
 
 export type ConnectionState =
   | "disconnected"
@@ -12,9 +20,15 @@ export type ConnectionState =
   | "connected"
   | "error";
 
+export type PresentPath = "webcodecs" | "rtp";
+
 export interface PlayerCallbacks {
   onState: (s: ConnectionState, detail?: string) => void;
   onVideo: (stream: MediaStream) => void;
+  /** Annex-B access units from the unordered `video` DataChannel. */
+  onVideoAccessUnit?: (au: VideoAccessUnit) => void;
+  /** Fired when the preferred present path is known. */
+  onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: (info: {
     width: number;
     height: number;
@@ -30,10 +44,19 @@ const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
 const MEDIA_RECOVER_DELAY_MS = 5000;
 
+function preferLegacyRtp(): boolean {
+  if (typeof location === "undefined") return false;
+  return new URLSearchParams(location.search).get("legacyVideo") === "1";
+}
+
 export class CouchlinkPlayer {
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
   private padDc: RTCDataChannel | null = null;
+  private videoDc: RTCDataChannel | null = null;
+  /** True when CLVD + WebCodecs is the active present path (skip RTP attach). */
+  private webcodecsPath = false;
+  private clvdAsm = new ClvdAssembler();
   private heartbeatTimer: number | null = null;
   private statsTimer: number | null = null;
   private lastStats: { delay: number; count: number; decoded: number } | null =
@@ -68,6 +91,7 @@ export class CouchlinkPlayer {
     clog("connect()", { signalingUrl, sessionId, pinLen: pin.length });
     this.lastOfferEpoch = 0;
     this.mediaHealthy = false;
+    this.webcodecsPath = false;
     this.cleanup();
     this.sessionRetries = 0;
     const url = signalingUrl.trim();
@@ -252,8 +276,11 @@ export class CouchlinkPlayer {
     if (this.padTimer) cancelAnimationFrame(this.padTimer);
     this.padTimer = null;
     this.padDc?.close();
+    this.videoDc?.close();
     this.pc?.close();
     this.padDc = null;
+    this.videoDc = null;
+    this.webcodecsPath = false;
     this.pc = null;
     this.videoReceiver = null;
     this.gotVideoTrack = false;
@@ -430,6 +457,11 @@ export class CouchlinkPlayer {
       this.gotVideoTrack = true;
       this.startStatsPolling();
       this.cb.onState("connected", "video track");
+      if (this.webcodecsPath) {
+        clog("RTP track received — ignored for present (WebCodecs/CLVD active)");
+        return;
+      }
+      this.cb.onPresentPath?.("rtp");
       this.cb.onVideo(stream);
     };
 
@@ -457,17 +489,80 @@ export class CouchlinkPlayer {
         ch.binaryType = "arraybuffer";
         ch.onopen = () => {
           clog("pad datachannel open");
-          if (!this.gotVideoTrack) {
+          if (!this.gotVideoTrack && !this.webcodecsPath) {
             this.cb.onState("connected", "pad open (no video track yet)");
           }
           this.startPadLoop();
         };
         ch.onclose = () => clog("pad datachannel closed");
         ch.onerror = (e) => cerror("pad datachannel error", e);
+      } else if (ch.label === VIDEO_CHANNEL) {
+        this.bindVideoChannel(ch);
       }
     };
 
     return pc;
+  }
+
+  private bindVideoChannel(ch: RTCDataChannel) {
+    this.videoDc = ch;
+    ch.binaryType = "arraybuffer";
+    const useWc = canUseWebCodecs() && !preferLegacyRtp();
+    ch.onopen = () => {
+      clog("video datachannel open", {
+        secureContext: window.isSecureContext,
+        webcodecs: useWc,
+      });
+      if (useWc) {
+        this.webcodecsPath = true;
+        this.cb.onPresentPath?.(
+          "webcodecs",
+          "CLVD DataChannel + WebCodecs (no RTP jitter buffer)"
+        );
+        this.cb.onState("connected", "webcodecs video");
+        this.gotVideoTrack = true;
+        this.mediaHealthy = true;
+        // Ask for IDR immediately — we may have joined mid-GOP.
+        this.requestVideoKeyframe();
+      } else {
+        cwarn(
+          "video DataChannel open but WebCodecs unavailable — using RTP path",
+          {
+            secureContext: window.isSecureContext,
+            hasDecoder: typeof VideoDecoder === "function",
+          }
+        );
+        this.cb.onPresentPath?.(
+          "rtp",
+          window.isSecureContext
+            ? "WebCodecs missing"
+            : "insecure context (use http://127.0.0.1 or https)"
+        );
+      }
+    };
+    ch.onmessage = (ev) => {
+      if (!this.webcodecsPath) return;
+      const data = ev.data;
+      if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) return;
+      const frag = decodeClvdFragment(data as ArrayBuffer);
+      if (!frag) return;
+      const au = this.clvdAsm.push(frag);
+      if (!au) return;
+      this.cb.onVideoAccessUnit?.(au);
+    };
+    ch.onclose = () => clog("video datachannel closed");
+    ch.onerror = (e) => cerror("video datachannel error", e);
+  }
+
+  /** Tell the host we need an IDR (any message on the video DC). */
+  requestVideoKeyframe() {
+    const dc = this.videoDc;
+    if (!dc || dc.readyState !== "open") return;
+    try {
+      dc.send(PLI_BYTES);
+    } catch (e) {
+      cwarn("pli send failed", String(e));
+    }
   }
 
   private startPadLoop() {

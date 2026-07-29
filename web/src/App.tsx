@@ -4,6 +4,10 @@ import {
   canUseLowLatencyCanvas,
   LowLatencyCanvasView,
 } from "./lowLatencyCanvas";
+import {
+  canUseWebCodecs,
+  WebCodecsCanvasView,
+} from "./webCodecsCanvas";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import "./App.css";
@@ -16,6 +20,12 @@ const DEFAULT_WS =
 function preferLegacyVideo(): boolean {
   if (typeof location === "undefined") return false;
   return new URLSearchParams(location.search).get("legacyVideo") === "1";
+}
+
+function secureContextHint(): string | null {
+  if (typeof window === "undefined") return null;
+  if (window.isSecureContext) return null;
+  return "Open via http://127.0.0.1 (or https) for WebCodecs near-zero latency — LAN http falls back to RTP (~7ms JB).";
 }
 
 type ConnectedPad = {
@@ -68,18 +78,54 @@ export default function App() {
   const [padMeta, setPadMeta] = useState("press a button on your DualSense / pad");
   const [pads, setPads] = useState<ConnectedPad[]>([]);
   const [fullscreen, setFullscreen] = useState(false);
-  const [presentMode, setPresentMode] = useState<"canvas" | "video" | "—">("—");
+  const [presentMode, setPresentMode] = useState<"webcodecs" | "canvas" | "video" | "—">("—");
+  const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<CouchlinkPlayer | null>(null);
   const viewRef = useRef<LowLatencyCanvasView | null>(null);
+  const wcRef = useRef<WebCodecsCanvasView | null>(null);
+  const webcodecsActiveRef = useRef(false);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
   const [videoDiag, setVideoDiag] = useState("video: —");
 
+  function ensureWebCodecs(): boolean {
+    if (preferLegacyVideo() || !canUseWebCodecs() || !canvasRef.current) return false;
+    if (!wcRef.current) {
+      wcRef.current = new WebCodecsCanvasView(canvasRef.current);
+      wcRef.current.setStatsHandler((s) => {
+        setVideoDiag(
+          `webcodecs: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped} dec=${s.decodeMs.toFixed(1)}ms`
+        );
+        setPresentMode("webcodecs");
+      });
+      wcRef.current.setKeyframeHandler(() => {
+        playerRef.current?.requestVideoKeyframe();
+      });
+    }
+    if (!wcRef.current.start()) return false;
+    webcodecsActiveRef.current = true;
+    viewRef.current?.stop();
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+      videoRef.current.classList.add("is-hidden");
+    }
+    canvasRef.current.classList.remove("is-hidden");
+    setPresentMode("webcodecs");
+    clog("present mode: WebCodecs + CLVD");
+    return true;
+  }
+
   function attachStream(stream: MediaStream) {
+    // WebCodecs path owns the canvas — don't steal it for RTP.
+    if (webcodecsActiveRef.current) {
+      clog("RTP stream ignored — WebCodecs present active");
+      return;
+    }
+    wcRef.current?.stop();
     const track = stream.getVideoTracks()[0];
     const wantCanvas =
       !preferLegacyVideo() && !!track && canUseLowLatencyCanvas() && !!canvasRef.current;
@@ -201,9 +247,27 @@ export default function App() {
       if (d) setDetail(d);
       if (s === "disconnected" || s === "error" || s === "waiting_host") {
         viewRef.current?.stop();
+        wcRef.current?.stop();
+        webcodecsActiveRef.current = false;
       }
     },
     onVideo: (stream) => attachStream(stream),
+    onPresentPath: (path, detail) => {
+      clog("present path", path, detail ?? "");
+      if (path === "webcodecs") {
+        if (!ensureWebCodecs()) {
+          cwarn("WebCodecs present failed to start — waiting for RTP fallback");
+          webcodecsActiveRef.current = false;
+        }
+      }
+      setCtxHint(secureContextHint());
+    },
+    onVideoAccessUnit: (au) => {
+      if (!webcodecsActiveRef.current) {
+        if (!ensureWebCodecs()) return;
+      }
+      wcRef.current?.push(au);
+    },
     onStreamInfo: (info) => {
       setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
       if (info.capture_ok === false && info.capture_hint) {
@@ -223,12 +287,16 @@ export default function App() {
     const onPageHide = () => {
       clog("page hide → disconnect");
       viewRef.current?.stop();
+      wcRef.current?.stop();
+      webcodecsActiveRef.current = false;
       player.disconnect();
     };
     window.addEventListener("pagehide", onPageHide);
     return () => {
       window.removeEventListener("pagehide", onPageHide);
       viewRef.current?.stop();
+      wcRef.current?.stop();
+      webcodecsActiveRef.current = false;
     };
     // playerCallbacks identity is stable for the lifetime of the tab
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional singleton player
@@ -324,10 +392,13 @@ export default function App() {
             </button>
           </div>
           {detail && <p className="detail">{detail}</p>}
+          {ctxHint && <p className="detail">{ctxHint}</p>}
           <p className="hint">
             Plug in / pair your DualSense, then press any button so the browser
-            unlocks Gamepad API. Chrome uses a low-latency canvas present path;
-            add <code>?legacyVideo=1</code> to force the old video element.
+            unlocks Gamepad API. Prefer <code>http://127.0.0.1</code> / HTTPS for
+            WebCodecs (DataChannel path, no jitter buffer). LAN <code>http://</code>{" "}
+            falls back to RTP canvas. Add <code>?legacyVideo=1</code> to force the
+            old video element.
           </p>
         </section>
       )}

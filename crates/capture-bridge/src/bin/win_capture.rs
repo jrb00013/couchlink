@@ -97,7 +97,7 @@ mod run {
         max_h: u32,
         /// Raw frames handed to the encoder thread. Depth 1: a newer frame replacing
         /// an unconsumed one is exactly what a live stream wants.
-        raw_tx: Option<mpsc::SyncSender<(u32, u32, Vec<u8>)>>,
+        raw_tx: Option<mpsc::SyncSender<(u32, u32, Vec<u8>, Instant)>>,
         arrived: u32,
         sent: u32,
         dropped: u32,
@@ -118,13 +118,17 @@ mod run {
         fps: u32,
         bitrate_bps: u32,
         out: mpsc::SyncSender<FrameMsg>,
-    ) -> mpsc::SyncSender<(u32, u32, Vec<u8>)> {
-        let (raw_tx, raw_rx) = mpsc::sync_channel::<(u32, u32, Vec<u8>)>(1);
+    ) -> mpsc::SyncSender<(u32, u32, Vec<u8>, Instant)> {
+        let (raw_tx, raw_rx) = mpsc::sync_channel::<(u32, u32, Vec<u8>, Instant)>(1);
 
         std::thread::spawn(move || {
-            let mut seed: Option<(u32, u32, Vec<u8>)> = None;
+            let mut seed: Option<(u32, u32, Vec<u8>, Instant)> = None;
+            // Round-trip through the encoder for the frame currently being encoded,
+            // so the reported latency is capture-to-encoded, not just encode time.
+            let mut submitted_at: Option<Instant> = None;
+            let mut enc_us: Vec<u64> = Vec::with_capacity(512);
             'build: loop {
-                let Some((w, h, pixels)) = seed.take().or_else(|| raw_rx.recv().ok()) else {
+                let Some((w, h, pixels, _t)) = seed.take().or_else(|| raw_rx.recv().ok()) else {
                     return;
                 };
                 let mut encoder = match HardwareEncoder::new(w, h, fps, bitrate_bps) {
@@ -138,14 +142,15 @@ mod run {
                         return;
                     }
                 };
-                let mut latest = Some((w, h, pixels));
+                let mut latest: Option<(u32, u32, Vec<u8>, Instant)> =
+                    Some((w, h, pixels, Instant::now()));
                 // Feed the encoder on a fixed beat rather than whenever WGC happens
                 // to deliver. Output cadence follows input cadence, and a receiver
                 // sizes its jitter buffer from irregularity, not from rate — this is
                 // the same fix that took the raw path's buffer from 97ms to 6ms.
                 let tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
                 let mut next_submit = Instant::now();
-                let mut previous: Option<(u32, u32, Vec<u8>)> = None;
+                let mut previous: Option<(u32, u32, Vec<u8>, Instant)> = None;
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
                 let mut encoded_window = Instant::now();
@@ -175,17 +180,24 @@ mod run {
                             // keeps the cadence hole-free, which is the entire point
                             // of a metronome; blocking here would make the cadence
                             // source-paced again.
-                            let Some((fw, fh, px)) = latest
+                            // A re-encode of the frame we already have carries no new
+                            // content, so its age is not latency anyone can perceive.
+                            // Only time frames that actually changed, or the number
+                            // measures how idle the desktop is rather than how
+                            // responsive the pipeline is.
+                            let fresh = latest.is_some();
+                            let Some((fw, fh, px, captured_at)) = latest
                                 .take()
                                 .or_else(|| previous.clone())
                                 .or_else(|| raw_rx.recv().ok())
                             else {
                                 return;
                             };
-                            previous = Some((fw, fh, px.clone()));
+                            previous = Some((fw, fh, px.clone(), captured_at));
+                            submitted_at = fresh.then_some(captured_at);
                             if (fw, fh) != encoder.dimensions() {
                                 info!("capture resized to {fw}x{fh} — rebuilding the encoder");
-                                seed = Some((fw, fh, px));
+                                seed = Some((fw, fh, px, captured_at));
                                 continue 'build;
                             }
                             if let Err(e) = encoder.submit(&px) {
@@ -195,6 +207,9 @@ mod run {
                             }
                         }
                         Ok(EncoderRequest::HaveOutput(frames)) => {
+                            if let Some(t) = submitted_at.take() {
+                                enc_us.push(t.elapsed().as_micros() as u64);
+                            }
                             let (w, h) = encoder.dimensions();
                             for f in frames {
                                 let bytes = f.data.len();
@@ -218,10 +233,22 @@ mod run {
                                     encoder.request_keyframe();
                                 }
                                 if encoded_window.elapsed() >= Duration::from_secs(5) {
+                                    enc_us.sort_unstable();
+                                    let p = |q: usize| {
+                                        enc_us
+                                            .get((enc_us.len() * q / 100).min(enc_us.len().saturating_sub(1)))
+                                            .copied()
+                                            .unwrap_or(0) as f64
+                                            / 1000.0
+                                    };
                                     info!(
-                                        "encoded {:.1} fps ({bytes} bytes/frame, {stalled} not queued)",
-                                        encoded as f64 / encoded_window.elapsed().as_secs_f64()
+                                        "encoded {:.1} fps ({bytes} bytes/frame, {stalled} not queued) \
+                                         | capture->encoded p50={:.1}ms p99={:.1}ms",
+                                        encoded as f64 / encoded_window.elapsed().as_secs_f64(),
+                                        p(50),
+                                        p(99)
                                     );
+                                    enc_us.clear();
                                     encoded = 0;
                                     stalled = 0;
                                     encoded_window = Instant::now();
@@ -282,7 +309,7 @@ mod run {
             Duration,
             u32,
             u32,
-            Option<mpsc::SyncSender<(u32, u32, Vec<u8>)>>,
+            Option<mpsc::SyncSender<(u32, u32, Vec<u8>, Instant)>>,
         );
         type Error = CaptureError;
 
@@ -345,7 +372,7 @@ mod run {
                 Some(raw) if !GPU_FALLBACK.load(Ordering::Relaxed) => {
                     // A full queue means the GPU is still busy with the previous
                     // frame; dropping this one keeps latency flat.
-                    match raw.try_send((w, h, pixels)) {
+                    match raw.try_send((w, h, pixels, Instant::now())) {
                         Ok(()) => self.sent += 1,
                         Err(_) => self.dropped += 1,
                     }

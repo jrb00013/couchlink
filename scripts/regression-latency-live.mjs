@@ -86,7 +86,7 @@ await page.addInitScript(() => {
 const consoleLines = [];
 page.on("console", (msg) => {
   const t = msg.text();
-  if (/couchlink|present|canvas|video stats/i.test(t)) consoleLines.push(t);
+  if (/couchlink|present|canvas|webcodecs|video stats|CLVD/i.test(t)) consoleLines.push(t);
 });
 
 console.log("opening", joinUrl);
@@ -129,17 +129,18 @@ async function readInbound() {
 
 const samples = [];
 let prev = await readInbound();
+// WebCodecs path may never emit inbound-rtp decode counters — that's OK.
 if (!prev) {
-  console.error("FAIL: no inbound-rtp stats — host may not be streaming video");
-  console.error("console:\n", consoleLines.slice(-30).join("\n"));
-  await browser.close();
-  process.exit(1);
+  console.warn("no inbound-rtp yet — may be WebCodecs-only present; continuing…");
 }
 
 for (let i = 0; i < 4; i++) {
   await page.waitForTimeout(2000);
   const next = await readInbound();
-  if (!next) continue;
+  if (!next || !prev) {
+    prev = next;
+    continue;
+  }
   const countDelta = next.jitterBufferEmittedCount - prev.jitterBufferEmittedCount;
   if (countDelta > 0) {
     const delayDelta = next.jitterBufferDelay - prev.jitterBufferDelay;
@@ -157,14 +158,48 @@ for (let i = 0; i < 4; i++) {
 const present = await page.evaluate(() => {
   const spans = Array.from(document.querySelectorAll("footer.meta span"));
   const text = spans.map((s) => s.textContent || "").join(" ");
+  if (/present:\s*webcodecs/i.test(text) || /webcodecs:/i.test(text)) return "webcodecs";
   if (/present:\s*canvas/i.test(text) || /canvas:/i.test(text)) return "canvas";
   if (/present:\s*video/i.test(text) || /video:/i.test(text)) return "video";
   return "unknown";
 });
 
+const wcDiag = await page.evaluate(() => {
+  const spans = Array.from(document.querySelectorAll("footer.meta span"));
+  const line = spans.map((s) => s.textContent || "").find((t) => /webcodecs:/i.test(t));
+  if (!line) return null;
+  const fps = /@\s*(\d+)fps/i.exec(line);
+  const drop = /drop=(\d+)/i.exec(line);
+  return {
+    presentFps: fps ? Number(fps[1]) : 0,
+    dropped: drop ? Number(drop[1]) : -1,
+    raw: line,
+  };
+});
+
 await browser.close();
 
 console.log("present path:", present);
+if (present === "webcodecs") {
+  console.log("webcodecs diag:", wcDiag);
+  // WebCodecs bypasses inbound-rtp JB — gate on present FPS from the UI diag.
+  if (!wcDiag || wcDiag.presentFps < 50) {
+    console.error(
+      "FAIL: WebCodecs present fps too low",
+      wcDiag ?? "(no diag)"
+    );
+    process.exit(1);
+  }
+  if (wcDiag.dropped > 30) {
+    console.error("FAIL: WebCodecs drop count high", wcDiag);
+    process.exit(1);
+  }
+  console.log(
+    `LIVE latency regression PASS (WebCodecs path — JB bypassed, present≈${wcDiag.presentFps}fps)`
+  );
+  process.exit(0);
+}
+
 console.log("samples:");
 for (const s of samples) {
   console.log(
@@ -174,6 +209,7 @@ for (const s of samples) {
 
 if (samples.length === 0) {
   console.error("FAIL: no usable getStats windows");
+  console.error("console:\n", consoleLines.slice(-30).join("\n"));
   process.exit(1);
 }
 
@@ -189,7 +225,7 @@ console.log(
 
 const gate = evaluate(avg);
 if (present !== "canvas") {
-  console.warn("WARN: expected present: canvas on Chromium");
+  console.warn("WARN: expected present: canvas or webcodecs on Chromium");
 }
 if (!gate.ok) {
   console.error("FAIL latency gates:", gate.failures.join("; "));

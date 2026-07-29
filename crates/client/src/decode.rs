@@ -10,6 +10,9 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 pub struct DecodedFrame {
+    /// When decode finished, so the viewer can report how long a finished frame
+    /// waited before it was actually on screen.
+    pub decoded_at: Instant,
     pub y_plane: Vec<u8>,
     pub u_plane: Vec<u8>,
     pub v_plane: Vec<u8>,
@@ -67,6 +70,7 @@ impl H264Decoder {
         }
 
         Ok(Some(DecodedFrame {
+            decoded_at: Instant::now(),
             y_plane,
             u_plane,
             v_plane,

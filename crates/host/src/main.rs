@@ -59,6 +59,14 @@ async fn main() -> Result<()> {
         turn,
     );
     info!("friend join URL: {join}");
+    if join.contains("://127.") || join.contains("://localhost") {
+        info!("join URL is loopback — browser WebCodecs (lowest latency) is available");
+    } else if join.starts_with("http://") {
+        info!(
+            "LAN http join — WebCodecs needs a secure context; prefer http://127.0.0.1:8443/?… \
+             (SSH tunnel / same machine) or https for near-zero latency; RTP fallback still works"
+        );
+    }
     if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
         let ste = qr.render::<char>().quiet_zone(false).module_dimensions(2, 1).build();
         eprintln!("\nScan / open join link:\n{ste}\n{join}\n");
@@ -93,6 +101,7 @@ async fn main() -> Result<()> {
     )
     .await?
     .0;
+    host.set_video_size(preset.width, preset.height);
     let mut attached_player_epoch: u64 = 0;
 
     // Open capture before the first player so Windows win-capture can connect immediately.
@@ -265,6 +274,10 @@ async fn main() -> Result<()> {
                 // encode. Everything below this block exists only for raw pixels.
                 let bgra = match frame {
                     capture::Captured::H264 { nal, keyframe } => {
+                        host.set_video_size(
+                            capturer.width() as u32,
+                            capturer.height() as u32,
+                        );
                         // Relay every encoded frame that has arrived, not one per
                         // tick. The encoder's cadence is set on the Windows side; a
                         // backlog here would be shown late, and H.264 frames cannot
@@ -292,7 +305,7 @@ async fn main() -> Result<()> {
                         if keyframe {
                             last_idr = std::time::Instant::now();
                         }
-                        if let Err(e) = host.push_h264(nal, per_frame).await {
+                        if let Err(e) = host.push_h264(nal, per_frame, keyframe).await {
                             warn!("push h264: {e}");
                         } else {
                             frames_out += 1;
@@ -427,7 +440,12 @@ async fn main() -> Result<()> {
                         .elapsed()
                         .clamp(Duration::from_millis(1), Duration::from_millis(500));
                     last_push = std::time::Instant::now();
-                    if let Err(e) = host.push_h264(nal, real_gap).await {
+                    if let Err(e) = host.push_h264(
+                        nal.clone(),
+                        real_gap,
+                        couchlink_proto::annex_b_is_keyframe(&nal),
+                    )
+                    .await {
                         warn!("push h264: {e}");
                     } else {
                         frames_out += 1;

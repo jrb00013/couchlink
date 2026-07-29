@@ -5,10 +5,14 @@
 //! binary frame (`CLPD`) on the WebRTC DataChannel named `pad`.
 
 pub mod pad_frame;
+pub mod video_frame;
 pub mod host_events;
 pub mod signal;
 
 pub use pad_frame::{PadFeedback, PadFrame, PAD_CHANNEL, PAD_MAGIC};
+pub use video_frame::{
+    annex_b_is_keyframe, VideoAccessUnit, VideoFragment, VIDEO_CHANNEL, VIDEO_MAGIC,
+};
 pub use signal::{Role, SignalMessage, StreamPreset};
 
 #[cfg(test)]
