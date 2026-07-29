@@ -201,10 +201,15 @@ async fn main() -> Result<()> {
             }
             msg = signaling.inbound.recv() => {
                 match msg {
-                    Some(SignalMessage::Answer { sdp }) => {
-                        host.handle_answer(sdp).await?;
-                        info!("remote answer set — forcing IDR for browser decoder");
-                        force_idr = true;
+                    Some(SignalMessage::Answer { sdp, epoch }) => {
+                        match host.handle_answer(sdp, epoch).await {
+                            Ok(true) => {
+                                info!("remote answer set — forcing IDR for browser decoder");
+                                force_idr = true;
+                            }
+                            Ok(false) => {}
+                            Err(e) => warn!("answer failed (continuing): {e:#}"),
+                        }
                     }
                     Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
                         let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
@@ -223,6 +228,22 @@ async fn main() -> Result<()> {
                         if epoch < attached_player_epoch {
                             warn!("ignoring stale PeerJoined epoch={epoch} (attached={attached_player_epoch})");
                             continue;
+                        }
+                        // Coalesce a rejoin burst (double-tab / rapid reload): only
+                        // rebuild once for the newest epoch already queued.
+                        let mut epoch = epoch;
+                        let mut deferred: Vec<SignalMessage> = Vec::new();
+                        while let Ok(extra) = signaling.inbound.try_recv() {
+                            match extra {
+                                SignalMessage::PeerJoined { epoch: e, .. } => {
+                                    if e >= epoch {
+                                        epoch = e;
+                                    } else {
+                                        warn!("dropping older PeerJoined epoch={e} during coalesce");
+                                    }
+                                }
+                                other => deferred.push(other),
+                            }
                         }
                         attached_player_epoch = epoch;
                         info!("player rejoined (epoch {epoch}) — rebuilding WebRTC peer + offer");
@@ -265,6 +286,38 @@ async fn main() -> Result<()> {
                             capture_ok_announced,
                             None,
                         ));
+                        // Re-handle non-join messages that arrived during coalesce
+                        // (answers for the *old* peer are dropped by epoch/state checks).
+                        for msg in deferred {
+                            match msg {
+                                SignalMessage::Answer { sdp, epoch } => {
+                                    match host.handle_answer(sdp, epoch).await {
+                                        Ok(true) => {
+                                            info!("remote answer set — forcing IDR for browser decoder");
+                                            force_idr = true;
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => warn!("answer failed (continuing): {e:#}"),
+                                    }
+                                }
+                                SignalMessage::IceCandidate {
+                                    candidate,
+                                    sdp_mid,
+                                    sdp_mline_index,
+                                } => {
+                                    let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
+                                }
+                                SignalMessage::RequestOffer => {
+                                    force_idr = true;
+                                    if let Err(e) = host.create_and_send_offer(&signal_out).await {
+                                        warn!("request_offer failed: {e}");
+                                    }
+                                }
+                                other => {
+                                    warn!("deferred signal ignored after rejoin coalesce: {other:?}");
+                                }
+                            }
+                        }
                     }
                     Some(SignalMessage::Heartbeat) => {
                         let _ = signal_out.send(SignalMessage::Pong);

@@ -269,13 +269,21 @@ impl WebRtcPlayer {
         Ok((Self { pc, pad_dc }, frame_rx))
     }
 
-    pub async fn handle_offer(&self, sdp: String, signal_out: &mpsc::UnboundedSender<SignalMessage>) -> Result<()> {
+    pub async fn handle_offer(
+        &self,
+        sdp: String,
+        offer_epoch: u64,
+        signal_out: &mpsc::UnboundedSender<SignalMessage>,
+    ) -> Result<()> {
         let offer = RTCSessionDescription::offer(sdp)?;
         self.pc.set_remote_description(offer).await?;
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
         let local = self.pc.local_description().await.context("local desc")?;
-        signal_out.send(SignalMessage::Answer { sdp: local.sdp })?;
+        signal_out.send(SignalMessage::Answer {
+            sdp: local.sdp,
+            epoch: offer_epoch,
+        })?;
         Ok(())
     }
 

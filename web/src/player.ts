@@ -344,8 +344,8 @@ export class CouchlinkPlayer {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     clog("setLocalDescription(answer) ok", pc.signalingState);
-    if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp! });
-    clog("signal → answer", `(sdp ${answer.sdp?.length ?? 0} chars)`);
+    if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp!, epoch });
+    clog("signal → answer", `(sdp ${answer.sdp?.length ?? 0} chars, epoch ${epoch})`);
     if (epoch > 0) {
       this.lastOfferEpoch = epoch;
     } else {

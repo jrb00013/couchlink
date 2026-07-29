@@ -308,9 +308,9 @@ async fn async_main(
         tokio::select! {
             msg = signaling.inbound.recv() => {
                 match msg {
-                    Some(SignalMessage::Offer { sdp, epoch: _ }) => {
+                    Some(SignalMessage::Offer { sdp, epoch }) => {
                         info!("got offer");
-                        player.handle_offer(sdp, &signal_out).await?;
+                        player.handle_offer(sdp, epoch, &signal_out).await?;
                     }
                     Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
                         let _ = player.add_ice(candidate, sdp_mid, sdp_mline_index).await;
