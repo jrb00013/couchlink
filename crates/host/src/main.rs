@@ -239,6 +239,11 @@ async fn main() -> Result<()> {
             // wobble, and measured buffer grew to ~100ms during motion. Encoding on a
             // metronome makes delivery uniform, which is what lets the buffer stay small.
             _ = cadence.tick() => {
+                // A viewer that lost sync asks for a keyframe over RTCP. Answering
+                // immediately turns a multi-second glitch into a single frame.
+                if host.take_keyframe_request() {
+                    force_idr = true;
+                }
                 let t_capture = std::time::Instant::now();
                 let Some(frame) = capturer.capture()? else { continue };
                 let ms_capture = t_capture.elapsed();

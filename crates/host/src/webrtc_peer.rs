@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bytes::BytesMut;
 use couchlink_pad::{VirtualPad, VirtualPadConfig};
 use couchlink_proto::{PadFeedback, PadFrame, SignalMessage, PAD_CHANNEL};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
@@ -22,6 +22,8 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::media::Sample;
 use std::time::Duration;
@@ -31,9 +33,16 @@ pub struct WebRtcHost {
     pub video: Arc<TrackLocalStaticSample>,
     pub pad_tx: mpsc::UnboundedSender<PadFrame>,
     offer_epoch: Arc<AtomicU64>,
+    /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
+    keyframe_wanted: Arc<AtomicBool>,
 }
 
 impl WebRtcHost {
+    /// True once since the last check: a viewer asked for a keyframe via RTCP.
+    pub fn take_keyframe_request(&self) -> bool {
+        self.keyframe_wanted.swap(false, Ordering::Relaxed)
+    }
+
     pub async fn new(
         signal_out: mpsc::UnboundedSender<SignalMessage>,
         pad_device: Arc<Mutex<VirtualPad>>,
@@ -106,8 +115,28 @@ impl WebRtcHost {
             "video".to_owned(),
             "couchlink".to_owned(),
         ));
-        pc.add_track(Arc::clone(&video) as Arc<dyn TrackLocal + Send + Sync>)
+        let rtp_sender = pc
+            .add_track(Arc::clone(&video) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
+
+        // Nobody was reading RTCP, so every PLI a viewer sent was discarded and a
+        // client that lost sync sat on a broken picture until the next scheduled
+        // keyframe — up to IDR_INTERVAL of garbage. Watch for the standard
+        // "send me a keyframe" feedback and answer it.
+        let keyframe_wanted = Arc::new(AtomicBool::new(false));
+        let kf = Arc::clone(&keyframe_wanted);
+        tokio::spawn(async move {
+            while let Ok((packets, _)) = rtp_sender.read_rtcp().await {
+                for p in packets {
+                    let any = p.as_any();
+                    if any.downcast_ref::<PictureLossIndication>().is_some()
+                        || any.downcast_ref::<FullIntraRequest>().is_some()
+                    {
+                        kf.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
 
         let (pad_tx, pad_rx) = mpsc::unbounded_channel::<PadFrame>();
         let pad_tx_dc = pad_tx.clone();
@@ -148,6 +177,7 @@ impl WebRtcHost {
                 video,
                 pad_tx,
                 offer_epoch,
+                keyframe_wanted,
             },
             pad_rx,
         ))

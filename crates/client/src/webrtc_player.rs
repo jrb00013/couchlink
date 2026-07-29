@@ -1,11 +1,17 @@
 use anyhow::{Context, Result};
 use bytes::BytesMut;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use couchlink_proto::{PadFrame, SignalMessage, PAD_CHANNEL};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::decode::{DecodedFrame, H264Decoder};
+
+/// How many undecoded NALs may queue before the client gives up on catching up and
+/// asks for a keyframe instead. A couple of frames absorbs normal jitter; more than
+/// that is latency the viewer would never get back.
+const MAX_NAL_BACKLOG: usize = 4;
 use crate::reachability;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -18,6 +24,7 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
 pub struct WebRtcPlayer {
     pub pc: Arc<RTCPeerConnection>,
@@ -109,6 +116,14 @@ impl WebRtcPlayer {
         let (nal_tx, nal_rx) = mpsc::unbounded_channel::<bytes::Bytes>();
         let (frame_tx, frame_rx) = mpsc::unbounded_channel::<DecodedFrame>();
 
+        // openh264 decodes in software, so it can fall behind a 60fps stream. This
+        // channel is unbounded, and NALs cannot be dropped freely — a discarded
+        // P-frame corrupts everything after it — so a backlog here becomes permanent
+        // delay rather than a brief stutter. Track the depth so the reader can shed
+        // safely (see below).
+        let backlog = Arc::new(AtomicUsize::new(0));
+
+        let backlog_dec = Arc::clone(&backlog);
         std::thread::Builder::new()
             .name("couchlink-decode".into())
             .spawn(move || {
@@ -121,6 +136,7 @@ impl WebRtcPlayer {
                 };
                 let mut nal_rx = nal_rx;
                 while let Some(nal) = nal_rx.blocking_recv() {
+                    backlog_dec.fetch_sub(1, Ordering::Relaxed);
                     match decoder.decode(&nal) {
                         Ok(Some(frame)) => {
                             if frame_tx.send(frame).is_err() {
@@ -134,18 +150,48 @@ impl WebRtcPlayer {
             })
             .expect("spawn decode thread");
 
+        let pc_pli = Arc::clone(&pc);
         pc.on_track(Box::new(move |track, _, _| {
             let nal_tx = nal_tx.clone();
+            let backlog = Arc::clone(&backlog);
+            let pc_pli = Arc::clone(&pc_pli);
             Box::pin(async move {
                 info!("video track received: {}", track.codec().capability.mime_type);
                 let mut depacketizer = rtp::codecs::h264::H264Packet::default();
                 depacketizer.is_avc = false; // false => depacketize() emits Annex-B (start-code) NALs
+                let mut shedding = false;
                 loop {
                     match track.read_rtp().await {
                         Ok((packet, _attrs)) => {
                             use rtp::packetizer::Depacketizer;
                             match depacketizer.depacketize(&packet.payload) {
                                 Ok(nal) if !nal.is_empty() => {
+                                    // Too far behind to catch up by decoding: shed
+                                    // everything and ask the sender for a fresh
+                                    // keyframe. Dropping alone would corrupt the
+                                    // picture; dropping plus a PLI resynchronises on
+                                    // the next frame. This is what the standard
+                                    // feedback mechanism is for.
+                                    if backlog.load(Ordering::Relaxed) > MAX_NAL_BACKLOG {
+                                        if !shedding {
+                                            warn!(
+                                                "decoder {} frames behind — resyncing",
+                                                MAX_NAL_BACKLOG
+                                            );
+                                            let _ = pc_pli
+                                                .write_rtcp(&[Box::new(
+                                                    PictureLossIndication {
+                                                        sender_ssrc: 0,
+                                                        media_ssrc: track.ssrc(),
+                                                    },
+                                                )])
+                                                .await;
+                                            shedding = true;
+                                        }
+                                        continue;
+                                    }
+                                    shedding = false;
+                                    backlog.fetch_add(1, Ordering::Relaxed);
                                     if nal_tx.send(nal).is_err() {
                                         break; // decode thread gone, stop reading
                                     }

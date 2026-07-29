@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { CouchlinkPlayer, type ConnectionState } from "./player";
+import {
+  canUseLowLatencyCanvas,
+  LowLatencyCanvasView,
+} from "./lowLatencyCanvas";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import "./App.css";
@@ -8,6 +12,11 @@ const DEFAULT_WS =
   typeof location !== "undefined" && location.port === "5174"
     ? `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:8443/ws`
     : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+
+function preferLegacyVideo(): boolean {
+  if (typeof location === "undefined") return false;
+  return new URLSearchParams(location.search).get("legacyVideo") === "1";
+}
 
 type ConnectedPad = {
   index: number;
@@ -59,15 +68,61 @@ export default function App() {
   const [padMeta, setPadMeta] = useState("press a button on your DualSense / pad");
   const [pads, setPads] = useState<ConnectedPad[]>([]);
   const [fullscreen, setFullscreen] = useState(false);
+  const [presentMode, setPresentMode] = useState<"canvas" | "video" | "—">("—");
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<CouchlinkPlayer | null>(null);
+  const viewRef = useRef<LowLatencyCanvasView | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
   const [videoDiag, setVideoDiag] = useState("video: —");
 
   function attachStream(stream: MediaStream) {
+    const track = stream.getVideoTracks()[0];
+    const wantCanvas =
+      !preferLegacyVideo() && !!track && canUseLowLatencyCanvas() && !!canvasRef.current;
+
+    if (wantCanvas && track && canvasRef.current) {
+      if (!viewRef.current) {
+        viewRef.current = new LowLatencyCanvasView(canvasRef.current);
+        viewRef.current.setStatsHandler((s) => {
+          setVideoDiag(
+            `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped}`
+          );
+          setPresentMode("canvas");
+        });
+      }
+      void viewRef.current.start(track).then((ok) => {
+        if (ok) {
+          clog("present mode: low-latency canvas");
+          setPresentMode("canvas");
+          if (videoRef.current) {
+            videoRef.current.srcObject = null;
+            videoRef.current.classList.add("is-hidden");
+          }
+          canvasRef.current?.classList.remove("is-hidden");
+          setVideoDiag(
+            `canvas: ${track.getSettings().width ?? "?"}×${track.getSettings().height ?? "?"} starting`
+          );
+          return;
+        }
+        cwarn("canvas present failed — falling back to <video>");
+        attachVideoFallback(stream);
+      });
+      return;
+    }
+
+    attachVideoFallback(stream);
+  }
+
+  function attachVideoFallback(stream: MediaStream) {
+    viewRef.current?.stop();
+    canvasRef.current?.classList.add("is-hidden");
+    videoRef.current?.classList.remove("is-hidden");
+    setPresentMode("video");
+
     const bind = (v: HTMLVideoElement) => {
       const logVideo = (tag: string) => {
         clog(tag, {
@@ -86,13 +141,19 @@ export default function App() {
           .play()
           .then(() => logVideo(`video.play ok (${why})`))
           .catch((e: unknown) => {
-            const name = e && typeof e === "object" && "name" in e ? String((e as { name: string }).name) : "";
+            const name =
+              e && typeof e === "object" && "name" in e
+                ? String((e as { name: string }).name)
+                : "";
             if (name === "AbortError") {
               clog("play aborted (reattach)", why);
               window.setTimeout(() => {
-                void v.play().then(() => logVideo("video.play ok (retry)")).catch((e2) => {
-                  cerror("video.play failed", e2);
-                });
+                void v
+                  .play()
+                  .then(() => logVideo("video.play ok (retry)"))
+                  .catch((e2) => {
+                    cerror("video.play failed", e2);
+                  });
               }, 50);
               return;
             }
@@ -138,6 +199,9 @@ export default function App() {
       clog("ui state", s, d ?? "");
       setState(s);
       if (d) setDetail(d);
+      if (s === "disconnected" || s === "error" || s === "waiting_host") {
+        viewRef.current?.stop();
+      }
     },
     onVideo: (stream) => attachStream(stream),
     onStreamInfo: (info) => {
@@ -158,11 +222,13 @@ export default function App() {
     playerRef.current = player;
     const onPageHide = () => {
       clog("page hide → disconnect");
+      viewRef.current?.stop();
       player.disconnect();
     };
     window.addEventListener("pagehide", onPageHide);
     return () => {
       window.removeEventListener("pagehide", onPageHide);
+      viewRef.current?.stop();
     };
     // playerCallbacks identity is stable for the lifetime of the tab
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional singleton player
@@ -187,7 +253,6 @@ export default function App() {
     refresh();
     window.addEventListener("gamepadconnected", refresh);
     window.addEventListener("gamepaddisconnected", refresh);
-    // Browsers often only expose pads after a button press; poll lightly.
     const timer = window.setInterval(refresh, 1000);
     return () => {
       window.removeEventListener("gamepadconnected", refresh);
@@ -250,7 +315,10 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => playerRef.current?.disconnect()}
+              onClick={() => {
+                viewRef.current?.stop();
+                playerRef.current?.disconnect();
+              }}
             >
               Disconnect
             </button>
@@ -258,15 +326,15 @@ export default function App() {
           {detail && <p className="detail">{detail}</p>}
           <p className="hint">
             Plug in / pair your DualSense, then press any button so the browser
-            unlocks Gamepad API. Open DevTools → Console and filter{" "}
-            <code>couchlink</code> for connection logs (<code>?debug=0</code>{" "}
-            to silence).
+            unlocks Gamepad API. Chrome uses a low-latency canvas present path;
+            add <code>?legacyVideo=1</code> to force the old video element.
           </p>
         </section>
       )}
 
       <div className="broadcast">
         <div className="stage-wrap" ref={stageRef}>
+          <canvas ref={canvasRef} className="stage is-hidden" aria-label="Game stream" />
           <video ref={videoRef} className="stage" playsInline muted autoPlay />
           {state !== "connected" && (
             <div className="overlay">
@@ -323,6 +391,7 @@ export default function App() {
       <footer className="meta">
         <span>{streamMeta}</span>
         <span>{videoDiag}</span>
+        <span>present: {presentMode}</span>
         <span>{padMeta}</span>
         <button
           type="button"

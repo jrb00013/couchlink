@@ -13,7 +13,7 @@ use std::sync::{mpsc::Receiver, Arc, Mutex};
 use tracing::{info, warn};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -566,10 +566,21 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.ingest_latest_frame() {
             self.request_redraw();
         }
+        // winit defaults to ControlFlow::Wait, which sleeps until an OS event. A
+        // decoded frame arriving on a channel is not an OS event, so frames sat
+        // undisplayed until something unrelated — a mouse move, a resize — happened
+        // to wake the loop. Display latency was bounded by user input activity
+        // rather than by the pipeline.
+        //
+        // WaitUntil rather than Poll: a short deadline bounds the wake-up at ~1ms
+        // without spinning a core on a machine that is also running the game.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(1),
+        ));
     }
 }
 
