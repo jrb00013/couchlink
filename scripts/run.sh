@@ -95,9 +95,12 @@ if [[ "$ROLE" == "host" ]]; then
       exit 1
     fi
     export COUCHLINK_PUBLIC_IP="$PUBLIC_IP"
-    export COUCHLINK_SIGNALING="ws://${PUBLIC_IP}:${PORT}/ws"
+    # Host must dial signaling on loopback/LAN — WSL/NAT often cannot hairpin
+    # back to the public IP. Friends still get the public invite URL below.
+    export COUCHLINK_SIGNALING="ws://127.0.0.1:${PORT}/ws"
+    export COUCHLINK_INVITE_SIGNALING="ws://${PUBLIC_IP}:${PORT}/ws"
     export COUCHLINK_TURN_URL="turn:${PUBLIC_IP}:3478"
-    echo "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP)"
+    echo "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP; host dials 127.0.0.1)"
   fi
 elif [[ "$ROLE" == "client" ]]; then
   # Client reachability: remote joins need the host's TURN (UDP+TCP expanded in-process).

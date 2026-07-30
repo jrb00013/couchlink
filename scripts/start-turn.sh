@@ -51,6 +51,15 @@ if ! command -v turnserver >/dev/null; then
   fi
 fi
 
+# Package install may enable a system coturn on :3478 — stop it so our
+# session-scoped config (external-ip + generated creds) can bind the port.
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl is-active --quiet coturn 2>/dev/null; then
+    echo "==> stopping system coturn service (using session config instead)"
+    sudo systemctl stop coturn || true
+  fi
+fi
+
 if [[ -z "${COUCHLINK_TURN_USER:-}" || -z "${COUCHLINK_TURN_PASS:-}" ]]; then
   COUCHLINK_TURN_USER="cl$(head -c 4 /dev/urandom | xxd -p)"
   COUCHLINK_TURN_PASS="$(head -c 16 /dev/urandom | xxd -p)"
@@ -80,4 +89,6 @@ upnp_open 3478 udp "turn"
 upnp_open 3478 tcp "turn"
 
 echo "==> starting local TURN relay on :3478 (user=$COUCHLINK_TURN_USER external-ip=$PUBLIC_IP)"
-turnserver -c "$RUNTIME_CONF" --no-daemon
+# coturn 4.6+ runs in the foreground by default; `--no-daemon` was removed
+# (daemonize with `-o` / `--daemon` only when you explicitly want that).
+turnserver -c "$RUNTIME_CONF"

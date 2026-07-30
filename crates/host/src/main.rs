@@ -41,8 +41,13 @@ async fn main() -> Result<()> {
     );
 
     // Friend opens this in a browser (same host as signaling static files).
-    let public_http = args
-        .signaling
+    // Prefer invite_signaling when set so the host can dial 127.0.0.1 while the
+    // printed URL still points at the public/WAN address (WSL/NAT hairpin).
+    let invite_ws = args
+        .invite_signaling
+        .as_deref()
+        .unwrap_or(args.signaling.as_str());
+    let public_http = invite_ws
         .replacen("ws://", "http://", 1)
         .replacen("wss://", "https://", 1)
         .trim_end_matches("/ws")
@@ -55,7 +60,7 @@ async fn main() -> Result<()> {
         &public_http,
         &args.session_id,
         &args.pin,
-        &args.signaling,
+        invite_ws,
         turn,
     );
     info!("friend join URL: {join}");
