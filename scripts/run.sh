@@ -24,8 +24,9 @@ usage: $0 [host|client] [--local|--online]
   client  start couchlink-client (friend/player)
 
   --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
-  --online  Internet. Host: public IP + TURN + UPnP. Client: prompts for the
-            host join URL if unset (TURN required for NAT/WSL).
+  --online  Internet. Host: public IP + TURN + UPnP (Windows UPnP prep
+            auto-runs on WSL). Client: prompts for the host join URL if unset
+            (TURN required for NAT/WSL).
 
 Platform is auto-detected (linux / wsl / macos).
 EOF
@@ -76,6 +77,35 @@ export COUCHLINK_MODE="$MODE"
 PORT="${COUCHLINK_BIND##*:}"
 PORT="${PORT:-8443}"
 
+# On --online (WSL/Windows): Private profile + discovery + NATUPnP maps.
+# Uses saved task CouchlinkElevatedUpnp after the first UAC approve.
+couchlink_try_upnp_online() {
+  [[ "${COUCHLINK_SKIP_UPNP_PREP:-}" == "1" ]] && return 0
+  local ok=0
+  if [[ "$PLATFORM" == "wsl" || "$PLATFORM" == "windows" ]] && command -v powershell.exe >/dev/null 2>&1; then
+    echo "==> --online: Windows UPnP prep (Private + discovery + maps)"
+    set +e
+    bash "$ROOT/scripts/enable-upnp.sh"
+    local ec=$?
+    set -e
+    [[ "$ec" -eq 0 ]] && ok=1
+    # Retry map-only COM helper if prep left IGD visible but map exit was 2.
+    if [[ "$ok" != "1" ]]; then
+      local bridge_w
+      bridge_w="$(wslpath -w "$ROOT/scripts/windows/open-ports-upnp.ps1" 2>/dev/null || true)"
+      if [[ -n "${bridge_w:-}" ]]; then
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" && ok=1 || true
+      fi
+    fi
+  fi
+  if upnp_open "$PORT" tcp "signaling"; then
+    ok=1
+  fi
+  upnp_open 3478 udp "turn" || true
+  upnp_open 3478 tcp "turn" || true
+  return $((1 - ok))
+}
+
 if [[ "$ROLE" == "host" ]]; then
   if [[ "$MODE" == "local" ]]; then
     LAN_IP="$(upnp_local_ip)"
@@ -101,6 +131,14 @@ if [[ "$ROLE" == "host" ]]; then
     export COUCHLINK_INVITE_SIGNALING="ws://${PUBLIC_IP}:${PORT}/ws"
     export COUCHLINK_TURN_URL="turn:${PUBLIC_IP}:3478"
     echo "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP; host dials 127.0.0.1)"
+    if couchlink_try_upnp_online; then
+      echo "==> UPnP OK — ports should be reachable at ${PUBLIC_IP}"
+      export COUCHLINK_SKIP_UPNP=1
+    else
+      echo "==> UPnP incomplete — if friends can't join, forward TCP ${PORT} + UDP/TCP 3478"
+      echo "    or enable UPnP/IGD on the gateway (http://192.168.1.1)"
+      echo "    re-run Windows prep alone: ./scripts/enable-upnp.sh"
+    fi
   fi
 elif [[ "$ROLE" == "client" ]]; then
   # Client reachability: remote joins need the host's TURN (UDP+TCP expanded in-process).

@@ -13,11 +13,17 @@ source "$ROOT/scripts/lib-upnp.sh"
 _KEEP_MODE="${COUCHLINK_MODE:-}"
 _KEEP_PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
 _KEEP_TURN_URL="${COUCHLINK_TURN_URL:-}"
+_KEEP_TURN_USER="${COUCHLINK_TURN_USER:-}"
+_KEEP_TURN_PASS="${COUCHLINK_TURN_PASS:-}"
+_KEEP_SKIP_UPNP="${COUCHLINK_SKIP_UPNP:-}"
 # shellcheck disable=SC1090
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 [[ -n "$_KEEP_MODE" ]] && COUCHLINK_MODE="$_KEEP_MODE"
 [[ -n "$_KEEP_PUBLIC_IP" ]] && COUCHLINK_PUBLIC_IP="$_KEEP_PUBLIC_IP"
 [[ -n "$_KEEP_TURN_URL" ]] && COUCHLINK_TURN_URL="$_KEEP_TURN_URL"
+[[ -n "$_KEEP_TURN_USER" ]] && COUCHLINK_TURN_USER="$_KEEP_TURN_USER"
+[[ -n "$_KEEP_TURN_PASS" ]] && COUCHLINK_TURN_PASS="$_KEEP_TURN_PASS"
+[[ -n "$_KEEP_SKIP_UPNP" ]] && COUCHLINK_SKIP_UPNP="$_KEEP_SKIP_UPNP"
 
 MODE="${COUCHLINK_MODE:-online}"
 if [[ "$MODE" != "online" ]]; then
@@ -85,10 +91,12 @@ sed \
   "$ROOT/infra/turn/turnserver.conf.example" > "$RUNTIME_CONF"
 echo "external-ip=$PUBLIC_IP" >> "$RUNTIME_CONF"
 
-upnp_open 3478 udp "turn"
-upnp_open 3478 tcp "turn"
+# Best-effort only — Windows prep / manual forward if the router blocks UPnP.
+if [[ "${COUCHLINK_SKIP_UPNP:-}" != "1" ]]; then
+  upnp_open 3478 udp "turn" || true
+  upnp_open 3478 tcp "turn" || true
+fi
 
 echo "==> starting local TURN relay on :3478 (user=$COUCHLINK_TURN_USER external-ip=$PUBLIC_IP)"
-# coturn 4.6+ runs in the foreground by default; `--no-daemon` was removed
-# (daemonize with `-o` / `--daemon` only when you explicitly want that).
-turnserver -c "$RUNTIME_CONF"
+# -n keeps coturn in the foreground so run.sh can track the PID.
+exec turnserver -n -c "$RUNTIME_CONF"

@@ -16,7 +16,8 @@ PORT="${BIND##*:}"
 
 if [[ "$MODE" == "online" ]]; then
   trap 'upnp_close "$PORT" tcp' EXIT
-  upnp_open "$PORT" tcp "signaling"
+  # Best-effort — run.sh already ran Windows UPnP prep for --online.
+  upnp_open "$PORT" tcp "signaling" || true
 else
   echo "==> local mode — signaling on $BIND (no UPnP)"
 fi

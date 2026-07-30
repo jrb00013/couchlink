@@ -15,7 +15,8 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Session / PIN / ICE | Rohomieo-style WebSocket signaling |
 | Video | WebRTC + OpenH264, presets up to **1080p60**, scaled capture |
 | Congestion / idle | WebRTC GCC + tile motion detector |
-| Path | **Automatic** — public STUN + local TURN relay (`scripts/start-turn.sh`), router ports opened via UPnP automatically; no VPN or manual router config; WireGuard optional for private LAN-style posture |
+| Path | **Automatic** — public STUN + local TURN relay (`scripts/start-turn.sh`); on WSL/--online, Windows UPnP prep (Private profile + NATUPnP) runs automatically; WireGuard optional for private LAN-style posture |
+
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
 | Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |
 | Host injection | Linux `uinput` DualSense identity, bus = Bluetooth |
@@ -39,6 +40,7 @@ and tears everything down together on Ctrl-C. Detects Linux / WSL / macOS.
 ```bash
 ./scripts/run.sh host --local    # same Wi‑Fi (default) — LAN join URL, no UPnP/TURN
 ./scripts/run.sh host --online   # internet — public IP + TURN + UPnP
+# On WSL: --online auto-runs Windows UPnP prep (one UAC, then no prompt)
 # prints the friend's join URL + QR (session, PIN, and TURN creds baked in when online)
 ```
 
