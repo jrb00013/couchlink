@@ -31,7 +31,7 @@ source .env.couchlink
 ```
 
 `--local` (default) prints a LAN join URL and skips UPnP/TURN.  
-`--online` fetches your public IP, starts TURN, and opens ports via UPnP.
+`--online` fetches your public IP, starts TURN, and opens ports via UPnP (on WSL/Windows it auto-runs `./scripts/enable-upnp.sh` — Private network + discovery + NATUPnP; one UAC, then Task Scheduler with no prompt).
 
 This starts, in one terminal:
 
@@ -51,7 +51,8 @@ Copy that **entire URL** (or QR) and send it to your friend (Discord, Signal, et
 
 The join URL must use addresses your friend can reach—not `127.0.0.1`.
 
-1. **Router:** Ensure **TCP 8443** (signaling/web) and **UDP+TCP 3478** (TURN) reach your PC. `run.sh host --online` tries **UPnP** automatically; if it fails, forward those ports manually to your gaming machine’s LAN IP.
+`./scripts/run.sh host --online` prepares Windows for UPnP automatically on WSL (Private network profile + Network Discovery + NATUPnP maps; one UAC the first time, then a saved elevated task). Ensure **TCP 8443** (signaling/web) and **UDP+TCP 3478** (TURN) reach your PC. If the ISP gateway still has UPnP/IGD off, forward those ports manually to your gaming machine’s LAN IP.
+
 2. **Public IP:** Detected via `ifconfig.me`. If that fails or you’re on CGNAT, set in `.env.couchlink` before starting:
    - `COUCHLINK_PUBLIC_IP=your.public.ip`
 3. **Firewall on the host OS:** Allow inbound **8443/tcp** and **3478/udp+tcp**.

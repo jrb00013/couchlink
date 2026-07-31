@@ -1,5 +1,6 @@
 # couchlink
-<img width="386" height="452" alt="image" src="https://github.com/user-attachments/assets/07689c09-fd65-4ef7-ae10-8b21f5a8cd5b" />
+<img width="1918" height="898" alt="image" src="https://github.com/user-attachments/assets/5f855a69-77e1-4d20-8bf6-b5a90e00fcae" />
+
 
 **Full co-play device for emulator nights.** You run PCSX2 or RPCS3. Your friend opens a
 browser (or native client), gets an **HD low-latency** stream of your game, and plays with
@@ -14,7 +15,8 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Session / PIN / ICE | Rohomieo-style WebSocket signaling |
 | Video | WebRTC + OpenH264, presets up to **1080p60**, scaled capture |
 | Congestion / idle | WebRTC GCC + tile motion detector |
-| Path | **Automatic** — public STUN + local TURN relay (`scripts/start-turn.sh`), router ports opened via UPnP automatically; no VPN or manual router config; WireGuard optional for private LAN-style posture |
+| Path | **Automatic** — public STUN + local TURN relay (`scripts/start-turn.sh`); on WSL/--online, Windows UPnP prep (Private profile + NATUPnP) runs automatically; WireGuard optional for private LAN-style posture |
+
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
 | Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |
 | Host injection | Linux `uinput` DualSense identity, bus = Bluetooth |
@@ -38,6 +40,7 @@ and tears everything down together on Ctrl-C. Detects Linux / WSL / macOS.
 ```bash
 ./scripts/run.sh host --local    # same Wi‑Fi (default) — LAN join URL, no UPnP/TURN
 ./scripts/run.sh host --online   # internet — public IP + TURN + UPnP
+# On WSL: --online auto-runs Windows UPnP prep (one UAC, then no prompt)
 # prints the friend's join URL + QR (session, PIN, and TURN creds baked in when online)
 ```
 
@@ -60,8 +63,9 @@ see `crates/client/src/keyboard_input.rs` for the full mapping).
 
 **Desktop installers:** [FRIEND_INSTALL.md](docs/FRIEND_INSTALL.md) · [NO_COMPUTER_UX.md](docs/NO_COMPUTER_UX.md) · [DESKTOP_CLIENT.md](docs/DESKTOP_CLIENT.md) · [PLAY_TOGETHER.md](docs/PLAY_TOGETHER.md)
 
-Host role needs Linux `uinput` for the virtual DualSense — run it from Linux
-or WSL; macOS/native Windows can only run the friend/client role.
+Host role needs Linux `uinput` for the virtual DualSense — run full co-play
+from Linux or WSL. macOS auto-detects and can run **client**, signaling, and a
+**video-only host** (no pad injection).
 
 <details>
 <summary>Individual scripts (if you want separate terminals/logs)</summary>

@@ -9,6 +9,8 @@
 #[cfg(windows)]
 pub mod keep_rendering;
 #[cfg(windows)]
+pub mod gpu_convert;
+#[cfg(windows)]
 pub mod mf_encoder;
 
 use anyhow::{bail, Context, Result};

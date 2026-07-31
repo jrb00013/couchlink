@@ -35,6 +35,31 @@ mod tests {
     }
 
     #[test]
+    fn answer_without_epoch_deserializes_as_zero() {
+        let back = SignalMessage::from_json(r#"{"type":"answer","sdp":"v=0"}"#).unwrap();
+        match back {
+            SignalMessage::Answer { sdp, epoch } => {
+                assert_eq!(sdp, "v=0");
+                assert_eq!(epoch, 0);
+            }
+            other => panic!("expected Answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn answer_with_epoch_roundtrips() {
+        let msg = SignalMessage::Answer {
+            sdp: "v=0".into(),
+            epoch: 7,
+        };
+        let back = SignalMessage::from_json(&msg.to_json().unwrap()).unwrap();
+        match back {
+            SignalMessage::Answer { epoch: 7, .. } => {}
+            other => panic!("expected Answer epoch 7, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn pad_frame_roundtrip() {
         let mut f = PadFrame::neutral();
         f.seq = 42;

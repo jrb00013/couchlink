@@ -9,8 +9,9 @@ realm=couchlink
 user=COUCHLINK_TURN_USER:COUCHLINK_TURN_PASS
 
 # Only relay UDP/TCP media, no verbose logging of pad/video contents.
+# coturn 4.6+ (Ubuntu 24.04): loopback peers are denied by default — there is
+# no `no-loopback-peers` knob (that option was removed / never existed here).
 no-tlsv1
 no-tlsv1_1
 no-cli
-no-loopback-peers
 no-multicast-peers

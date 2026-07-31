@@ -41,8 +41,13 @@ async fn main() -> Result<()> {
     );
 
     // Friend opens this in a browser (same host as signaling static files).
-    let public_http = args
-        .signaling
+    // Prefer invite_signaling when set so the host can dial 127.0.0.1 while the
+    // printed URL still points at the public/WAN address (WSL/NAT hairpin).
+    let invite_ws = args
+        .invite_signaling
+        .as_deref()
+        .unwrap_or(args.signaling.as_str());
+    let public_http = invite_ws
         .replacen("ws://", "http://", 1)
         .replacen("wss://", "https://", 1)
         .trim_end_matches("/ws")
@@ -55,7 +60,7 @@ async fn main() -> Result<()> {
         &public_http,
         &args.session_id,
         &args.pin,
-        &args.signaling,
+        invite_ws,
         turn,
     );
     info!("friend join URL: {join}");
@@ -76,16 +81,19 @@ async fn main() -> Result<()> {
         args.bluetooth_pad,
     )?));
 
-    let mut signaling = signaling_client::SignalingClient::connect(&args.signaling).await?;
-    signaling
-        .register_host(
-            args.session_id.clone(),
-            args.pin.clone(),
-            args.device_name.clone(),
-            args.preset.clone(),
-            args.emulator.clone(),
-        )
-        .await?;
+    // The supervisor owns the socket and re-registers on every reconnect, so a
+    // transient signaling failure can no longer orphan the host from its session.
+    let mut signaling = signaling_client::SignalingClient::connect_and_register(
+        &args.signaling,
+        signaling_client::HostRegistration {
+            session_id: args.session_id.clone(),
+            pin: args.pin.clone(),
+            device_name: args.device_name.clone(),
+            preset: args.preset.clone(),
+            emulator: args.emulator.clone(),
+        },
+    )
+    .await?;
 
     let signal_out = signaling.outbound.clone();
     let offer_epoch = Arc::new(AtomicU64::new(0));
@@ -198,10 +206,15 @@ async fn main() -> Result<()> {
             }
             msg = signaling.inbound.recv() => {
                 match msg {
-                    Some(SignalMessage::Answer { sdp }) => {
-                        host.handle_answer(sdp).await?;
-                        info!("remote answer set — forcing IDR for browser decoder");
-                        force_idr = true;
+                    Some(SignalMessage::Answer { sdp, epoch }) => {
+                        match host.handle_answer(sdp, epoch).await {
+                            Ok(true) => {
+                                info!("remote answer set — forcing IDR for browser decoder");
+                                force_idr = true;
+                            }
+                            Ok(false) => {}
+                            Err(e) => warn!("answer failed (continuing): {e:#}"),
+                        }
                     }
                     Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
                         let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
@@ -221,10 +234,42 @@ async fn main() -> Result<()> {
                             warn!("ignoring stale PeerJoined epoch={epoch} (attached={attached_player_epoch})");
                             continue;
                         }
+                        // Coalesce a rejoin burst (double-tab / rapid reload): only
+                        // rebuild once for the newest epoch already queued.
+                        let mut epoch = epoch;
+                        let mut deferred: Vec<SignalMessage> = Vec::new();
+                        while let Ok(extra) = signaling.inbound.try_recv() {
+                            match extra {
+                                SignalMessage::PeerJoined { epoch: e, .. } => {
+                                    if e >= epoch {
+                                        epoch = e;
+                                    } else {
+                                        warn!("dropping older PeerJoined epoch={e} during coalesce");
+                                    }
+                                }
+                                other => deferred.push(other),
+                            }
+                        }
                         attached_player_epoch = epoch;
                         info!("player rejoined (epoch {epoch}) — rebuilding WebRTC peer + offer");
                         capturer.resync();
-                        let _ = host.pc.close().await;
+                        // Close the previous peer off the critical path.
+                        //
+                        // Awaiting close() here could hang indefinitely, and because
+                        // this is the same select! loop that relays video and services
+                        // signaling, a hang stopped *everything*: no offer for this
+                        // player, no frames, and no reaction to anyone joining later.
+                        // The first player never hit it (no peer to close yet), so it
+                        // looked like "only one player can ever connect".
+                        let old_pc = Arc::clone(&host.pc);
+                        tokio::spawn(async move {
+                            if tokio::time::timeout(Duration::from_secs(5), old_pc.close())
+                                .await
+                                .is_err()
+                            {
+                                warn!("previous peer connection did not close within 5s");
+                            }
+                        });
                         host = webrtc_peer::WebRtcHost::new(
                             signal_out.clone(),
                             Arc::clone(&pad),
@@ -246,6 +291,38 @@ async fn main() -> Result<()> {
                             capture_ok_announced,
                             None,
                         ));
+                        // Re-handle non-join messages that arrived during coalesce
+                        // (answers for the *old* peer are dropped by epoch/state checks).
+                        for msg in deferred {
+                            match msg {
+                                SignalMessage::Answer { sdp, epoch } => {
+                                    match host.handle_answer(sdp, epoch).await {
+                                        Ok(true) => {
+                                            info!("remote answer set — forcing IDR for browser decoder");
+                                            force_idr = true;
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => warn!("answer failed (continuing): {e:#}"),
+                                    }
+                                }
+                                SignalMessage::IceCandidate {
+                                    candidate,
+                                    sdp_mid,
+                                    sdp_mline_index,
+                                } => {
+                                    let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
+                                }
+                                SignalMessage::RequestOffer => {
+                                    force_idr = true;
+                                    if let Err(e) = host.create_and_send_offer(&signal_out).await {
+                                        warn!("request_offer failed: {e}");
+                                    }
+                                }
+                                other => {
+                                    warn!("deferred signal ignored after rejoin coalesce: {other:?}");
+                                }
+                            }
+                        }
                     }
                     Some(SignalMessage::Heartbeat) => {
                         let _ = signal_out.send(SignalMessage::Pong);

@@ -1,4 +1,5 @@
 /target/
+.local-libs/
 **/node_modules/
 infra/certs/*.pem
 infra/wireguard/keys/
@@ -9,6 +10,8 @@ var/
 .DS_Store
 .idea/
 .vscode/
+.cursor/
+.claude/
 *.key
 *.pub
 python/.venv/

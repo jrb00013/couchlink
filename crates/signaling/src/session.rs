@@ -193,15 +193,38 @@ impl SessionStore {
         }
     }
 
-    pub fn unregister(&self, session_id: &str, role: Role) {
+    /// Release a peer slot when its socket closes.
+    ///
+    /// `tx` identifies the closing connection. A reconnecting peer races itself here:
+    /// the old socket's close can be processed *after* the replacement has already
+    /// registered, and clearing the slot unconditionally then wipes the live
+    /// connection. The session is left with no host, every later PeerJoined is
+    /// dropped on the floor, and joining players wait forever for an offer that
+    /// nobody is listening to ask for.
+    pub fn unregister(&self, session_id: &str, role: Role, tx: Option<&WsSender>) {
         let notify = {
             let Some(mut entry) = self.sessions.get_mut(session_id) else {
                 return;
             };
-            match role {
-                Role::Host => entry.host.tx = None,
-                Role::Player => entry.player.tx = None,
+            let slot = match role {
+                Role::Host => &mut entry.host,
+                Role::Player => &mut entry.player,
+            };
+            // Only the connection that currently owns the slot may vacate it.
+            let is_current = match (&slot.tx, tx) {
+                (Some(current), Some(closing)) => current.same_channel(closing),
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if !is_current {
+                self.audit.record(
+                    session_id,
+                    AuditEventKind::PeerLeft,
+                    Some(format!("stale {role:?} socket closed after reconnect")),
+                );
+                return;
             }
+            slot.tx = None;
             entry.last_activity = Utc::now();
             match role {
                 Role::Host => entry.player.tx.clone(),
@@ -280,6 +303,61 @@ mod tests {
             second > first,
             "reload must bump the epoch (got {first} then {second})"
         );
+    }
+
+    /// Regression: a reconnecting host races itself. The old socket's close can be
+    /// processed after the replacement has registered, and clearing the slot
+    /// unconditionally wipes the live connection — leaving a session with no host,
+    /// so every later PeerJoined is dropped and joining players wait forever.
+    #[test]
+    fn a_stale_host_socket_closing_does_not_evict_its_replacement() {
+        let s = store();
+        let first = chan();
+        s.register_host("sid".into(), "pin".into(), None, None, None, first.clone())
+            .expect("first host");
+
+        // The host reconnects before the old socket's close is processed.
+        let second = chan();
+        s.register_host("sid".into(), "pin".into(), None, None, None, second.clone())
+            .expect("host reconnects");
+
+        // Now the stale socket finally closes.
+        s.unregister("sid", Role::Host, Some(&first));
+
+        let live = s.peer_tx("sid", Role::Host).expect("host slot must still be held");
+        assert!(
+            live.same_channel(&second),
+            "the reconnected host must still own the slot"
+        );
+    }
+
+    /// The same race on the player side, which is what a browser reload looks like.
+    #[test]
+    fn a_stale_player_socket_closing_does_not_evict_its_replacement() {
+        let s = store();
+        s.register_host("sid".into(), "pin".into(), None, None, None, chan())
+            .expect("host");
+        let first = chan();
+        s.register_player("sid".into(), "pin".into(), first.clone())
+            .expect("first player");
+        let second = chan();
+        s.register_player("sid".into(), "pin".into(), second.clone())
+            .expect("player reconnects");
+
+        s.unregister("sid", Role::Player, Some(&first));
+
+        let live = s.peer_tx("sid", Role::Player).expect("player slot still held");
+        assert!(live.same_channel(&second));
+    }
+
+    #[test]
+    fn the_owning_socket_can_still_vacate_its_slot() {
+        let s = store();
+        let host = chan();
+        s.register_host("sid".into(), "pin".into(), None, None, None, host.clone())
+            .expect("host");
+        s.unregister("sid", Role::Host, Some(&host));
+        assert!(s.peer_tx("sid", Role::Host).is_none());
     }
 
     #[test]

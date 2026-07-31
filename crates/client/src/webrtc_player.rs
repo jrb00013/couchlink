@@ -12,6 +12,36 @@ use crate::decode::{DecodedFrame, H264Decoder};
 /// asks for a keyframe instead. A couple of frames absorbs normal jitter; more than
 /// that is latency the viewer would never get back.
 const MAX_NAL_BACKLOG: usize = 4;
+
+/// Does this Annex-B buffer carry an SPS (7)?
+///
+/// Specifically SPS, not merely an IDR slice: an IDR without parameter sets is still
+/// undecodable, so starting on one produces exactly the errors this gate exists to
+/// avoid. The encoder emits SPS/PPS ahead of every IDR, so waiting for the SPS means
+/// waiting for a complete, self-contained access unit.
+fn starts_a_stream(nal: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 3 < nal.len() {
+        let (start, len) = if nal[i] == 0 && nal[i + 1] == 0 && nal[i + 2] == 1 {
+            (i + 3, 3)
+        } else if i + 4 < nal.len()
+            && nal[i] == 0
+            && nal[i + 1] == 0
+            && nal[i + 2] == 0
+            && nal[i + 3] == 1
+        {
+            (i + 4, 4)
+        } else {
+            i += 1;
+            continue;
+        };
+        if nal[start] & 0x1F == 7 {
+            return true;
+        }
+        i += len;
+    }
+    false
+}
 use crate::reachability;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -170,12 +200,24 @@ impl WebRtcPlayer {
                 let mut depacketizer = rtp::codecs::h264::H264Packet::default();
                 depacketizer.is_avc = false; // false => depacketize() emits Annex-B (start-code) NALs
                 let mut shedding = false;
+                // Joining mid-stream means the frames arriving now reference pictures
+                // we never saw. Feeding them to the decoder cannot produce a picture —
+                // it only produces one error per frame until a keyframe lands. Wait
+                // for something decodable instead.
+                let mut have_keyframe = false;
                 loop {
                     match track.read_rtp().await {
                         Ok((packet, _attrs)) => {
                             use rtp::packetizer::Depacketizer;
                             match depacketizer.depacketize(&packet.payload) {
                                 Ok(nal) if !nal.is_empty() => {
+                                    if !have_keyframe {
+                                        if !starts_a_stream(&nal) {
+                                            continue;
+                                        }
+                                        info!("keyframe received — starting decode");
+                                        have_keyframe = true;
+                                    }
                                     // Too far behind to catch up by decoding: shed
                                     // everything and ask the sender for a fresh
                                     // keyframe. Dropping alone would corrupt the
@@ -183,6 +225,11 @@ impl WebRtcPlayer {
                                     // the next frame. This is what the standard
                                     // feedback mechanism is for.
                                     if backlog.load(Ordering::Relaxed) > MAX_NAL_BACKLOG {
+                                        // Shedding breaks the reference chain, so the
+                                        // decoder cannot use anything until the next
+                                        // keyframe. Re-arm the gate rather than feeding
+                                        // it frames that can only fail.
+                                        have_keyframe = false;
                                         if !shedding {
                                             warn!(
                                                 "decoder {} frames behind — resyncing",
@@ -222,13 +269,21 @@ impl WebRtcPlayer {
         Ok((Self { pc, pad_dc }, frame_rx))
     }
 
-    pub async fn handle_offer(&self, sdp: String, signal_out: &mpsc::UnboundedSender<SignalMessage>) -> Result<()> {
+    pub async fn handle_offer(
+        &self,
+        sdp: String,
+        offer_epoch: u64,
+        signal_out: &mpsc::UnboundedSender<SignalMessage>,
+    ) -> Result<()> {
         let offer = RTCSessionDescription::offer(sdp)?;
         self.pc.set_remote_description(offer).await?;
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
         let local = self.pc.local_description().await.context("local desc")?;
-        signal_out.send(SignalMessage::Answer { sdp: local.sdp })?;
+        signal_out.send(SignalMessage::Answer {
+            sdp: local.sdp,
+            epoch: offer_epoch,
+        })?;
         Ok(())
     }
 

@@ -20,7 +20,7 @@ export type SignalMessage =
   | { type: "registered"; role: Role; session_id: string }
   | { type: "error"; message: string }
   | { type: "offer"; sdp: string; epoch?: number }
-  | { type: "answer"; sdp: string }
+  | { type: "answer"; sdp: string; epoch?: number }
   | {
       type: "ice_candidate";
       candidate: string;

@@ -903,6 +903,7 @@ dependencies = [
  "url",
  "uuid",
  "webrtc",
+ "x11rb",
 ]
 
 [[package]]

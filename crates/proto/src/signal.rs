@@ -35,6 +35,10 @@ pub enum SignalMessage {
     },
     Answer {
         sdp: String,
+        /// Echo of the offer epoch so the host can drop answers for superseded offers
+        /// (rapid rejoin / double-tab races). Older clients omit this (treated as 0).
+        #[serde(default)]
+        epoch: u64,
     },
     IceCandidate {
         candidate: String,

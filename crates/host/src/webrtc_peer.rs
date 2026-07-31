@@ -251,10 +251,33 @@ impl WebRtcHost {
         Ok(())
     }
 
-    pub async fn handle_answer(&self, sdp: String) -> Result<()> {
+    /// Apply a remote answer. Returns `Ok(true)` when it was applied, `Ok(false)`
+    /// when ignored as stale / wrong signaling state (never fatal).
+    pub async fn handle_answer(&self, sdp: String, answer_epoch: u64) -> Result<bool> {
+        use webrtc::peer_connection::signaling_state::RTCSignalingState;
+
+        let current_offer = self.offer_epoch.load(Ordering::SeqCst);
+        // epoch 0 = legacy client that does not echo the offer epoch; still apply
+        // if we are waiting for an answer, otherwise drop.
+        if answer_epoch != 0 && answer_epoch != current_offer {
+            warn!(
+                "ignoring stale answer epoch={answer_epoch} (current offer epoch={current_offer})"
+            );
+            return Ok(false);
+        }
+
+        let state = self.pc.signaling_state();
+        if state != RTCSignalingState::HaveLocalOffer {
+            // Classic double-join race: first answer moved us to Stable, second
+            // answer (or an answer for a rebuilt peer that already renegotiated)
+            // must not tear down the host with a webrtc-rs state error.
+            warn!("ignoring answer in signaling state {state} (want have-local-offer)");
+            return Ok(false);
+        }
+
         let answer = RTCSessionDescription::answer(sdp)?;
         self.pc.set_remote_description(answer).await?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn add_ice(&self, candidate: String, mid: Option<String>, mline: Option<u16>) -> Result<()> {
@@ -374,7 +397,18 @@ async fn setup_pad_channel(
 pub fn create_virtual_pad(as_bluetooth: bool) -> Result<VirtualPad> {
     let mut cfg = VirtualPadConfig::default();
     cfg.as_bluetooth = as_bluetooth;
-    VirtualPad::create(cfg)
+    #[cfg(target_os = "linux")]
+    {
+        VirtualPad::create(cfg)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Video-only host: stream + WebRTC work; pad injection needs Linux uinput / ViGEm.
+        tracing::warn!(
+            "virtual DualSense injection is Linux-only on this build — running video-only host"
+        );
+        Ok(VirtualPad::create_noop(cfg))
+    }
 }
 
 /// Helper kept for tests / demos without WebRTC.

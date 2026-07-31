@@ -68,12 +68,12 @@ impl Renderer {
         ))?;
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        // Video YUV→RGB is already display-referred (studio-swing BT.601). An
+        // *sRGB* swapchain would apply the sRGB OETF again on store, which lifts
+        // midtones and washes chroma — reads as a grayscale / wrong-WB tint.
+        // The browser canvas path does not do that; match it with a linear Unorm.
+        let format = prefer_video_surface_format(&caps.formats);
+        tracing::info!("swapchain format {format:?} (srgb={})", format.is_srgb());
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -626,6 +626,23 @@ impl ApplicationHandler for App {
     }
 }
 
+/// Prefer a non-sRGB Unorm swapchain so video RGB is not gamma-encoded twice.
+pub(crate) fn prefer_video_surface_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    formats
+        .iter()
+        .copied()
+        .find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Bgra8Unorm
+                    | wgpu::TextureFormat::Rgba8Unorm
+                    | wgpu::TextureFormat::Rgba16Float
+            )
+        })
+        .or_else(|| formats.iter().copied().find(|f| !f.is_srgb()))
+        .unwrap_or(formats[0])
+}
+
 /// Blocks the calling thread (must be the process main thread) running the
 /// window until closed, Esc pressed, or window/GPU init fails.
 pub fn run(
@@ -650,4 +667,30 @@ pub fn run(
         return Err(e);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefer_video_surface_format;
+    use wgpu::TextureFormat;
+
+    #[test]
+    fn prefers_linear_bgra_over_srgb() {
+        let formats = [
+            TextureFormat::Bgra8UnormSrgb,
+            TextureFormat::Bgra8Unorm,
+            TextureFormat::Rgba8UnormSrgb,
+        ];
+        let chosen = prefer_video_surface_format(&formats);
+        assert_eq!(chosen, TextureFormat::Bgra8Unorm);
+        assert!(!chosen.is_srgb());
+    }
+
+    #[test]
+    fn falls_back_to_any_non_srgb() {
+        let formats = [TextureFormat::Bgra8UnormSrgb, TextureFormat::Rgba16Float];
+        let chosen = prefer_video_surface_format(&formats);
+        assert_eq!(chosen, TextureFormat::Rgba16Float);
+        assert!(!chosen.is_srgb());
+    }
 }
