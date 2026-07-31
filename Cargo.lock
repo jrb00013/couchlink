@@ -891,6 +891,7 @@ dependencies = [
  "openh264",
  "qrcode",
  "rand 0.8.7",
+ "rtp",
  "rustls",
  "scrap",
  "serde",
@@ -902,6 +903,7 @@ dependencies = [
  "url",
  "uuid",
  "webrtc",
+ "x11rb",
 ]
 
 [[package]]

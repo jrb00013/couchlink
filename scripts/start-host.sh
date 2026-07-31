@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-platform.sh"
+export PATH="$(couchlink_tool_path "${HOME:-}")${PATH:+:$PATH}"
 # Preserve reachability overrides exported by run.sh (--local / --online).
 _KEEP_MODE="${COUCHLINK_MODE:-}"
 _KEEP_SIGNALING="${COUCHLINK_SIGNALING:-}"
+_KEEP_INVITE_SIGNALING="${COUCHLINK_INVITE_SIGNALING:-}"
 _KEEP_PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
 _KEEP_TURN_URL="${COUCHLINK_TURN_URL:-}"
 # shellcheck disable=SC1091
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
 [[ -n "$_KEEP_MODE" ]] && COUCHLINK_MODE="$_KEEP_MODE"
 [[ -n "$_KEEP_SIGNALING" ]] && COUCHLINK_SIGNALING="$_KEEP_SIGNALING"
+[[ -n "$_KEEP_INVITE_SIGNALING" ]] && COUCHLINK_INVITE_SIGNALING="$_KEEP_INVITE_SIGNALING"
 [[ -n "$_KEEP_PUBLIC_IP" ]] && COUCHLINK_PUBLIC_IP="$_KEEP_PUBLIC_IP"
 # Empty TURN URL in local mode is intentional — restore even when blanked via unset.
 if [[ "$_KEEP_MODE" == "local" ]]; then
   unset COUCHLINK_TURN_URL || true
+  unset COUCHLINK_INVITE_SIGNALING || true
 elif [[ -n "$_KEEP_TURN_URL" ]]; then
   COUCHLINK_TURN_URL="$_KEEP_TURN_URL"
 fi
@@ -28,6 +34,8 @@ fi
 BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/release/couchlink-host}"
 if [[ ! -x "$BIN" ]]; then
   echo "==> building couchlink-host (release)"
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/ensure-linux-link-libs.sh"
   cargo build --release -p couchlink-host
 fi
 ARGS=(
@@ -36,6 +44,7 @@ ARGS=(
   --pin "$COUCHLINK_PIN"
   --preset "${COUCHLINK_PRESET:-1080p60}"
 )
+[[ -n "${COUCHLINK_INVITE_SIGNALING:-}" ]] && ARGS+=(--invite-signaling "$COUCHLINK_INVITE_SIGNALING")
 [[ -n "${COUCHLINK_TURN_URL:-}" ]] && ARGS+=(--turn-url "$COUCHLINK_TURN_URL")
 [[ -n "${COUCHLINK_TURN_USER:-}" ]] && ARGS+=(--turn-user "$COUCHLINK_TURN_USER")
 [[ -n "${COUCHLINK_TURN_PASS:-}" ]] && ARGS+=(--turn-pass "$COUCHLINK_TURN_PASS")

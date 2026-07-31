@@ -1,6 +1,15 @@
 import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
+import {
+  ClvdAssembler,
+  decodeClvdFragment,
+  PLI_BYTES,
+  VIDEO_CHANNEL,
+  type VideoAccessUnit,
+} from "./clvd";
 import { clog, cerror, cwarn } from "./log";
+import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
+import { canUseWebCodecs } from "./webCodecsCanvas";
 
 export type ConnectionState =
   | "disconnected"
@@ -11,9 +20,15 @@ export type ConnectionState =
   | "connected"
   | "error";
 
+export type PresentPath = "webcodecs" | "rtp";
+
 export interface PlayerCallbacks {
   onState: (s: ConnectionState, detail?: string) => void;
   onVideo: (stream: MediaStream) => void;
+  /** Annex-B access units from the unordered `video` DataChannel. */
+  onVideoAccessUnit?: (au: VideoAccessUnit) => void;
+  /** Fired when the preferred present path is known. */
+  onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: (info: {
     width: number;
     height: number;
@@ -29,10 +44,19 @@ const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
 const MEDIA_RECOVER_DELAY_MS = 5000;
 
+function preferLegacyRtp(): boolean {
+  if (typeof location === "undefined") return false;
+  return new URLSearchParams(location.search).get("legacyVideo") === "1";
+}
+
 export class CouchlinkPlayer {
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
   private padDc: RTCDataChannel | null = null;
+  private videoDc: RTCDataChannel | null = null;
+  /** True when CLVD + WebCodecs is the active present path (skip RTP attach). */
+  private webcodecsPath = false;
+  private clvdAsm = new ClvdAssembler();
   private heartbeatTimer: number | null = null;
   private statsTimer: number | null = null;
   private lastStats: { delay: number; count: number; decoded: number } | null =
@@ -51,6 +75,11 @@ export class CouchlinkPlayer {
   private gotVideoTrack = false;
   private lastOfferEpoch = 0;
   private mediaHealthy = false;
+  /** Re-asserted each stats tick — Chrome grows the JB under jitter. */
+  private videoReceiver: (RTCRtpReceiver & {
+    jitterBufferTarget?: number | null;
+    playoutDelayHint?: number | null;
+  }) | null = null;
 
   constructor(private cb: PlayerCallbacks) {}
 
@@ -62,6 +91,7 @@ export class CouchlinkPlayer {
     clog("connect()", { signalingUrl, sessionId, pinLen: pin.length });
     this.lastOfferEpoch = 0;
     this.mediaHealthy = false;
+    this.webcodecsPath = false;
     this.cleanup();
     this.sessionRetries = 0;
     const url = signalingUrl.trim();
@@ -170,23 +200,50 @@ export class CouchlinkPlayer {
           const prev = this.lastStats;
           this.lastStats = { delay, count, decoded };
           if (!prev || count === prev.count) return;
-          // Delta over the window, not the session average.
-          const bufferedMs =
-            ((delay - prev.delay) / (count - prev.count)) * 1000;
+          const window = jitterWindow(
+            {
+              jitterBufferDelay: prev.delay,
+              jitterBufferEmittedCount: prev.count,
+              framesDecoded: prev.decoded,
+              framesDropped: 0,
+            },
+            {
+              jitterBufferDelay: delay,
+              jitterBufferEmittedCount: count,
+              framesDecoded: decoded,
+              framesDropped: r.framesDropped ?? 0,
+            },
+            2
+          );
+          if (!window) return;
+          // Chrome will grow the JB after packet jitter; pin it back every poll.
+          this.pinJitterBuffer();
           clog("video stats", {
-            jitterBufferMs: Math.round(bufferedMs),
-            decodeFps: Math.round((decoded - prev.decoded) / 2),
-            framesDropped: r.framesDropped ?? 0,
+            jitterBufferMs: Math.round(window.jitterBufferMs),
+            decodeFps: Math.round(window.decodeFps),
+            framesDropped: window.framesDropped,
             frameHeight: r.frameHeight,
             pauseCount: r.pauseCount,
             freezeCount: r.freezeCount,
             totalFreezesDuration: r.totalFreezesDuration,
+            jbTarget: this.videoReceiver?.jitterBufferTarget ?? null,
           });
         });
       } catch (e) {
         cwarn("getStats failed", String(e));
       }
     }, 2000);
+  }
+
+  private pinJitterBuffer() {
+    const receiver = this.videoReceiver;
+    if (!receiver) return;
+    try {
+      if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
+      if ("playoutDelayHint" in receiver) receiver.playoutDelayHint = 0;
+    } catch {
+      /* older Chromium */
+    }
   }
 
   private cleanup() {
@@ -219,9 +276,13 @@ export class CouchlinkPlayer {
     if (this.padTimer) cancelAnimationFrame(this.padTimer);
     this.padTimer = null;
     this.padDc?.close();
+    this.videoDc?.close();
     this.pc?.close();
     this.padDc = null;
+    this.videoDc = null;
+    this.webcodecsPath = false;
     this.pc = null;
+    this.videoReceiver = null;
     this.gotVideoTrack = false;
     this.mediaHealthy = false;
   }
@@ -283,8 +344,8 @@ export class CouchlinkPlayer {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     clog("setLocalDescription(answer) ok", pc.signalingState);
-    if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp! });
-    clog("signal → answer", `(sdp ${answer.sdp?.length ?? 0} chars)`);
+    if (this.ws) send(this.ws, { type: "answer", sdp: answer.sdp!, epoch });
+    clog("signal → answer", `(sdp ${answer.sdp?.length ?? 0} chars, epoch ${epoch})`);
     if (epoch > 0) {
       this.lastOfferEpoch = epoch;
     } else {
@@ -366,20 +427,12 @@ export class CouchlinkPlayer {
         jitterBufferTarget?: number | null;
         playoutDelayHint?: number | null;
       };
-      if (receiver) {
-        try {
-          // Newer, standards-track name (Chrome 114+).
-          receiver.jitterBufferTarget = 0;
-          // Legacy name, still honoured by older Chromium.
-          receiver.playoutDelayHint = 0;
-          clog("requested minimum jitter buffer", {
-            jitterBufferTarget: receiver.jitterBufferTarget,
-            playoutDelayHint: receiver.playoutDelayHint,
-          });
-        } catch (e) {
-          cwarn("could not lower jitter buffer", String(e));
-        }
-      }
+      this.videoReceiver = receiver;
+      this.pinJitterBuffer();
+      clog("requested minimum jitter buffer", {
+        jitterBufferTarget: receiver.jitterBufferTarget,
+        playoutDelayHint: receiver.playoutDelayHint,
+      });
       clog("ontrack", {
         kind: track.kind,
         id: track.id,
@@ -392,6 +445,9 @@ export class CouchlinkPlayer {
         clog("track unmuted", track.kind, track.id);
       };
       track.onended = () => clog("track ended", track.kind, track.id);
+      if (track.kind === "video" && "contentHint" in track) {
+        track.contentHint = "detail";
+      }
       const stream =
         ev.streams[0] ?? new MediaStream(ev.track ? [ev.track] : []);
       clog("attaching MediaStream", {
@@ -401,6 +457,13 @@ export class CouchlinkPlayer {
       this.gotVideoTrack = true;
       this.startStatsPolling();
       this.cb.onState("connected", "video track");
+      // Always deliver the stream so the UI can fall back if WebCodecs never paints.
+      if (this.webcodecsPath) {
+        clog("RTP track received — held for fallback (WebCodecs/CLVD preferred)");
+        this.cb.onVideo(stream);
+        return;
+      }
+      this.cb.onPresentPath?.("rtp");
       this.cb.onVideo(stream);
     };
 
@@ -428,17 +491,86 @@ export class CouchlinkPlayer {
         ch.binaryType = "arraybuffer";
         ch.onopen = () => {
           clog("pad datachannel open");
-          if (!this.gotVideoTrack) {
+          if (!this.gotVideoTrack && !this.webcodecsPath) {
             this.cb.onState("connected", "pad open (no video track yet)");
           }
           this.startPadLoop();
         };
         ch.onclose = () => clog("pad datachannel closed");
         ch.onerror = (e) => cerror("pad datachannel error", e);
+      } else if (ch.label === VIDEO_CHANNEL) {
+        this.bindVideoChannel(ch);
       }
     };
 
     return pc;
+  }
+
+  private bindVideoChannel(ch: RTCDataChannel) {
+    this.videoDc = ch;
+    ch.binaryType = "arraybuffer";
+    const useWc = canUseWebCodecs() && !preferLegacyRtp();
+    ch.onopen = () => {
+      clog("video datachannel open", {
+        secureContext: window.isSecureContext,
+        webcodecs: useWc,
+      });
+      if (useWc) {
+        this.webcodecsPath = true;
+        this.cb.onPresentPath?.(
+          "webcodecs",
+          "CLVD DataChannel + WebCodecs (no RTP jitter buffer)"
+        );
+        this.cb.onState("connected", "webcodecs video");
+        this.gotVideoTrack = true;
+        this.mediaHealthy = true;
+        // Ask for IDR immediately — we may have joined mid-GOP.
+        this.requestVideoKeyframe();
+      } else {
+        cwarn(
+          "video DataChannel open but WebCodecs unavailable — using RTP path",
+          {
+            secureContext: window.isSecureContext,
+            hasDecoder: typeof VideoDecoder === "function",
+          }
+        );
+        this.cb.onPresentPath?.(
+          "rtp",
+          window.isSecureContext
+            ? "WebCodecs missing"
+            : "insecure context (use http://127.0.0.1 or https)"
+        );
+      }
+    };
+    ch.onmessage = (ev) => {
+      if (!this.webcodecsPath) return;
+      const data = ev.data;
+      if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) return;
+      const frag = decodeClvdFragment(data as ArrayBuffer);
+      if (!frag) return;
+      const au = this.clvdAsm.push(frag);
+      if (!au) return;
+      this.cb.onVideoAccessUnit?.(au);
+    };
+    ch.onclose = () => clog("video datachannel closed");
+    ch.onerror = (e) => cerror("video datachannel error", e);
+  }
+
+  /** Tell the host we need an IDR (any message on the video DC). */
+  requestVideoKeyframe() {
+    const dc = this.videoDc;
+    if (!dc || dc.readyState !== "open") return;
+    try {
+      dc.send(PLI_BYTES);
+    } catch (e) {
+      cwarn("pli send failed", String(e));
+    }
+  }
+
+  /** Stop preferring CLVD/WebCodecs — UI is switching to the RTP present path. */
+  preferRtpPresent() {
+    this.webcodecsPath = false;
+    this.cb.onPresentPath?.("rtp", "WebCodecs fallback");
   }
 
   private startPadLoop() {

@@ -13,7 +13,7 @@ use std::sync::{mpsc::Receiver, Arc, Mutex};
 use tracing::{info, warn};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -68,12 +68,12 @@ impl Renderer {
         ))?;
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        // Video YUV→RGB is already display-referred (studio-swing BT.601). An
+        // *sRGB* swapchain would apply the sRGB OETF again on store, which lifts
+        // midtones and washes chroma — reads as a grayscale / wrong-WB tint.
+        // The browser canvas path does not do that; match it with a linear Unorm.
+        let format = prefer_video_surface_format(&caps.formats);
+        tracing::info!("swapchain format {format:?} (srgb={})", format.is_srgb());
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -115,15 +115,23 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    let y = textureSample(t_frame, s_frame, in.uv).r;
-    let u = textureSample(t_u, s_frame, in.uv).r - 0.5;
-    let v = textureSample(t_v, s_frame, in.uv).r - 0.5;
+    // BT.601, studio swing. Both encoders in this project (the host's
+    // bgra_to_i420 and the Windows bgra_to_nv12) emit limited-range BT.601:
+    // luma spans 16..235 and chroma 16..240, not 0..255.
+    //
+    // Using the samples directly leaves black sitting at 16/255 = 0.063 instead
+    // of 0, which lifts every shadow and reads as a white haze over the picture.
+    // The coefficients also have to match the matrix the encoder used — these
+    // were BT.709 against BT.601 data, which skews hue on top of the wash.
+    let y = (textureSample(t_frame, s_frame, in.uv).r - 0.0627451) * 1.1643836;
+    let u = (textureSample(t_u, s_frame, in.uv).r - 0.5019608) * 1.1383929;
+    let v = (textureSample(t_v, s_frame, in.uv).r - 0.5019608) * 1.1383929;
     let rgb = vec3<f32>(
-        y + 1.5748 * v,
-        y - 0.1873 * u - 0.4681 * v,
-        y + 1.8556 * u
+        y + 1.402 * v,
+        y - 0.344136 * u - 0.714136 * v,
+        y + 1.772 * u
     );
-    return vec4<f32>(rgb, 1.0);
+    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#,
             )),
@@ -459,16 +467,50 @@ struct App {
     keyboard_pad: Arc<Mutex<KeyboardPad>>,
     shutdown_tx: std::sync::mpsc::Sender<()>,
     init_error: Option<anyhow::Error>,
+    present_us: Vec<u64>,
+    frames_late: u64,
+    present_window: std::time::Instant,
 }
 
 impl App {
     /// Drains the decode channel and uploads only the newest frame (drops stale ones).
     fn ingest_latest_frame(&mut self) -> bool {
         let mut latest = None;
+        let mut skipped = 0u32;
         while let Ok(frame) = self.frame_rx.try_recv() {
+            if latest.is_some() {
+                skipped += 1;
+            }
             latest = Some(frame);
         }
         if let (Some(renderer), Some(frame)) = (&mut self.renderer, latest) {
+            // How long a decoded frame sat before reaching the GPU. This is the
+            // window the event loop controls, and it was unbounded before the loop
+            // stopped sleeping on OS events.
+            self.present_us.push(frame.decoded_at.elapsed().as_micros() as u64);
+            self.frames_late += skipped as u64;
+            if self.present_window.elapsed() >= std::time::Duration::from_secs(5) {
+                self.present_us.sort_unstable();
+                let pct = |q: usize| {
+                    self.present_us
+                        .get((self.present_us.len() * q / 100).min(self.present_us.len().saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(0) as f64
+                        / 1000.0
+                };
+                let fps = self.present_us.len() as f64
+                    / self.present_window.elapsed().as_secs_f64();
+                tracing::info!(
+                    "presented {:.1} fps | decoded->onscreen p50={:.2}ms p99={:.2}ms | {} frames superseded",
+                    fps,
+                    pct(50),
+                    pct(99),
+                    self.frames_late
+                );
+                self.present_us.clear();
+                self.frames_late = 0;
+                self.present_window = std::time::Instant::now();
+            }
             renderer.upload_frame(&frame);
             true
         } else {
@@ -566,11 +608,39 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.ingest_latest_frame() {
             self.request_redraw();
         }
+        // winit defaults to ControlFlow::Wait, which sleeps until an OS event. A
+        // decoded frame arriving on a channel is not an OS event, so frames sat
+        // undisplayed until something unrelated — a mouse move, a resize — happened
+        // to wake the loop. Display latency was bounded by user input activity
+        // rather than by the pipeline.
+        //
+        // WaitUntil rather than Poll: a short deadline bounds the wake-up at ~1ms
+        // without spinning a core on a machine that is also running the game.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(1),
+        ));
     }
+}
+
+/// Prefer a non-sRGB Unorm swapchain so video RGB is not gamma-encoded twice.
+pub(crate) fn prefer_video_surface_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    formats
+        .iter()
+        .copied()
+        .find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Bgra8Unorm
+                    | wgpu::TextureFormat::Rgba8Unorm
+                    | wgpu::TextureFormat::Rgba16Float
+            )
+        })
+        .or_else(|| formats.iter().copied().find(|f| !f.is_srgb()))
+        .unwrap_or(formats[0])
 }
 
 /// Blocks the calling thread (must be the process main thread) running the
@@ -588,10 +658,39 @@ pub fn run(
         keyboard_pad,
         shutdown_tx,
         init_error: None,
+        present_us: Vec::with_capacity(512),
+        frames_late: 0,
+        present_window: std::time::Instant::now(),
     };
     event_loop.run_app(&mut app)?;
     if let Some(e) = app.init_error {
         return Err(e);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefer_video_surface_format;
+    use wgpu::TextureFormat;
+
+    #[test]
+    fn prefers_linear_bgra_over_srgb() {
+        let formats = [
+            TextureFormat::Bgra8UnormSrgb,
+            TextureFormat::Bgra8Unorm,
+            TextureFormat::Rgba8UnormSrgb,
+        ];
+        let chosen = prefer_video_surface_format(&formats);
+        assert_eq!(chosen, TextureFormat::Bgra8Unorm);
+        assert!(!chosen.is_srgb());
+    }
+
+    #[test]
+    fn falls_back_to_any_non_srgb() {
+        let formats = [TextureFormat::Bgra8UnormSrgb, TextureFormat::Rgba16Float];
+        let chosen = prefer_video_surface_format(&formats);
+        assert_eq!(chosen, TextureFormat::Rgba16Float);
+        assert!(!chosen.is_srgb());
+    }
 }

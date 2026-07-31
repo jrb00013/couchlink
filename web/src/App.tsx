@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { CouchlinkPlayer, type ConnectionState } from "./player";
+import {
+  canUseLowLatencyCanvas,
+  LowLatencyCanvasView,
+} from "./lowLatencyCanvas";
+import {
+  canUseWebCodecs,
+  WebCodecsCanvasView,
+} from "./webCodecsCanvas";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import "./App.css";
@@ -8,6 +16,17 @@ const DEFAULT_WS =
   typeof location !== "undefined" && location.port === "5174"
     ? `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:8443/ws`
     : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+
+function preferLegacyVideo(): boolean {
+  if (typeof location === "undefined") return false;
+  return new URLSearchParams(location.search).get("legacyVideo") === "1";
+}
+
+function secureContextHint(): string | null {
+  if (typeof window === "undefined") return null;
+  if (window.isSecureContext) return null;
+  return "Open via http://127.0.0.1 (or https) for WebCodecs near-zero latency — LAN http falls back to RTP (~7ms JB).";
+}
 
 type ConnectedPad = {
   index: number;
@@ -59,15 +78,127 @@ export default function App() {
   const [padMeta, setPadMeta] = useState("press a button on your DualSense / pad");
   const [pads, setPads] = useState<ConnectedPad[]>([]);
   const [fullscreen, setFullscreen] = useState(false);
+  const [presentMode, setPresentMode] = useState<"webcodecs" | "canvas" | "video" | "—">("—");
+  const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<CouchlinkPlayer | null>(null);
+  const viewRef = useRef<LowLatencyCanvasView | null>(null);
+  const wcRef = useRef<WebCodecsCanvasView | null>(null);
+  const webcodecsActiveRef = useRef(false);
+  const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
   const [videoDiag, setVideoDiag] = useState("video: —");
 
+  function clearRtpFallbackTimer() {
+    if (rtpFallbackTimer.current) {
+      clearTimeout(rtpFallbackTimer.current);
+      rtpFallbackTimer.current = null;
+    }
+  }
+
+  /** If WebCodecs never paints, fall back to the RTP media track. */
+  function armWebCodecsFallback() {
+    clearRtpFallbackTimer();
+    rtpFallbackTimer.current = window.setTimeout(() => {
+      rtpFallbackTimer.current = null;
+      if (!webcodecsActiveRef.current) return;
+      if (wcRef.current?.hasPainted()) return;
+      const stream = pendingStreamRef.current;
+      cwarn("WebCodecs produced no frames — falling back to RTP canvas");
+      webcodecsActiveRef.current = false;
+      playerRef.current?.preferRtpPresent();
+      wcRef.current?.stop();
+      setVideoDiag("webcodecs: no frames — RTP fallback");
+      if (stream) attachStream(stream);
+    }, 2500);
+  }
+
+  function ensureWebCodecs(): boolean {
+    if (preferLegacyVideo() || !canUseWebCodecs() || !canvasRef.current) return false;
+    if (!wcRef.current) {
+      wcRef.current = new WebCodecsCanvasView(canvasRef.current);
+      wcRef.current.setStatsHandler((s) => {
+        clearRtpFallbackTimer();
+        setVideoDiag(
+          `webcodecs: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped} dec=${s.decodeMs.toFixed(1)}ms`
+        );
+        setPresentMode("webcodecs");
+      });
+      wcRef.current.setKeyframeHandler(() => {
+        playerRef.current?.requestVideoKeyframe();
+      });
+    }
+    // Don't tear down a live decoder on every callback.
+    if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
+    webcodecsActiveRef.current = true;
+    viewRef.current?.stop();
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+      videoRef.current.classList.add("is-hidden");
+    }
+    canvasRef.current.classList.remove("is-hidden");
+    setPresentMode("webcodecs");
+    clog("present mode: WebCodecs + CLVD");
+    armWebCodecsFallback();
+    return true;
+  }
+
   function attachStream(stream: MediaStream) {
+    pendingStreamRef.current = stream;
+    // WebCodecs path owns the canvas — keep the RTP stream for fallback only.
+    if (webcodecsActiveRef.current) {
+      clog("RTP stream held for fallback — WebCodecs present active");
+      return;
+    }
+    clearRtpFallbackTimer();
+    wcRef.current?.stop();
+    const track = stream.getVideoTracks()[0];
+    const wantCanvas =
+      !preferLegacyVideo() && !!track && canUseLowLatencyCanvas() && !!canvasRef.current;
+
+    if (wantCanvas && track && canvasRef.current) {
+      if (!viewRef.current) {
+        viewRef.current = new LowLatencyCanvasView(canvasRef.current);
+        viewRef.current.setStatsHandler((s) => {
+          setVideoDiag(
+            `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped}`
+          );
+          setPresentMode("canvas");
+        });
+      }
+      void viewRef.current.start(track).then((ok) => {
+        if (ok) {
+          clog("present mode: low-latency canvas");
+          setPresentMode("canvas");
+          if (videoRef.current) {
+            videoRef.current.srcObject = null;
+            videoRef.current.classList.add("is-hidden");
+          }
+          canvasRef.current?.classList.remove("is-hidden");
+          setVideoDiag(
+            `canvas: ${track.getSettings().width ?? "?"}×${track.getSettings().height ?? "?"} starting`
+          );
+          return;
+        }
+        cwarn("canvas present failed — falling back to <video>");
+        attachVideoFallback(stream);
+      });
+      return;
+    }
+
+    attachVideoFallback(stream);
+  }
+
+  function attachVideoFallback(stream: MediaStream) {
+    viewRef.current?.stop();
+    canvasRef.current?.classList.add("is-hidden");
+    videoRef.current?.classList.remove("is-hidden");
+    setPresentMode("video");
+
     const bind = (v: HTMLVideoElement) => {
       const logVideo = (tag: string) => {
         clog(tag, {
@@ -86,13 +217,19 @@ export default function App() {
           .play()
           .then(() => logVideo(`video.play ok (${why})`))
           .catch((e: unknown) => {
-            const name = e && typeof e === "object" && "name" in e ? String((e as { name: string }).name) : "";
+            const name =
+              e && typeof e === "object" && "name" in e
+                ? String((e as { name: string }).name)
+                : "";
             if (name === "AbortError") {
               clog("play aborted (reattach)", why);
               window.setTimeout(() => {
-                void v.play().then(() => logVideo("video.play ok (retry)")).catch((e2) => {
-                  cerror("video.play failed", e2);
-                });
+                void v
+                  .play()
+                  .then(() => logVideo("video.play ok (retry)"))
+                  .catch((e2) => {
+                    cerror("video.play failed", e2);
+                  });
               }, 50);
               return;
             }
@@ -138,8 +275,32 @@ export default function App() {
       clog("ui state", s, d ?? "");
       setState(s);
       if (d) setDetail(d);
+      if (s === "disconnected" || s === "error" || s === "waiting_host") {
+        clearRtpFallbackTimer();
+        viewRef.current?.stop();
+        wcRef.current?.stop();
+        webcodecsActiveRef.current = false;
+      }
     },
     onVideo: (stream) => attachStream(stream),
+    onPresentPath: (path, detail) => {
+      clog("present path", path, detail ?? "");
+      if (path === "webcodecs") {
+        if (!ensureWebCodecs()) {
+          cwarn("WebCodecs present failed to start — waiting for RTP fallback");
+          webcodecsActiveRef.current = false;
+          const stream = pendingStreamRef.current;
+          if (stream) attachStream(stream);
+        }
+      }
+      setCtxHint(secureContextHint());
+    },
+    onVideoAccessUnit: (au) => {
+      if (!webcodecsActiveRef.current) {
+        if (!ensureWebCodecs()) return;
+      }
+      wcRef.current?.push(au);
+    },
     onStreamInfo: (info) => {
       setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
       if (info.capture_ok === false && info.capture_hint) {
@@ -158,11 +319,19 @@ export default function App() {
     playerRef.current = player;
     const onPageHide = () => {
       clog("page hide → disconnect");
+      clearRtpFallbackTimer();
+      viewRef.current?.stop();
+      wcRef.current?.stop();
+      webcodecsActiveRef.current = false;
       player.disconnect();
     };
     window.addEventListener("pagehide", onPageHide);
     return () => {
       window.removeEventListener("pagehide", onPageHide);
+      clearRtpFallbackTimer();
+      viewRef.current?.stop();
+      wcRef.current?.stop();
+      webcodecsActiveRef.current = false;
     };
     // playerCallbacks identity is stable for the lifetime of the tab
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional singleton player
@@ -187,7 +356,6 @@ export default function App() {
     refresh();
     window.addEventListener("gamepadconnected", refresh);
     window.addEventListener("gamepaddisconnected", refresh);
-    // Browsers often only expose pads after a button press; poll lightly.
     const timer = window.setInterval(refresh, 1000);
     return () => {
       window.removeEventListener("gamepadconnected", refresh);
@@ -250,23 +418,29 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => playerRef.current?.disconnect()}
+              onClick={() => {
+                viewRef.current?.stop();
+                playerRef.current?.disconnect();
+              }}
             >
               Disconnect
             </button>
           </div>
           {detail && <p className="detail">{detail}</p>}
+          {ctxHint && <p className="detail">{ctxHint}</p>}
           <p className="hint">
             Plug in / pair your DualSense, then press any button so the browser
-            unlocks Gamepad API. Open DevTools → Console and filter{" "}
-            <code>couchlink</code> for connection logs (<code>?debug=0</code>{" "}
-            to silence).
+            unlocks Gamepad API. Prefer <code>http://127.0.0.1</code> / HTTPS for
+            WebCodecs (DataChannel path, no jitter buffer). LAN <code>http://</code>{" "}
+            falls back to RTP canvas. Add <code>?legacyVideo=1</code> to force the
+            old video element.
           </p>
         </section>
       )}
 
       <div className="broadcast">
         <div className="stage-wrap" ref={stageRef}>
+          <canvas ref={canvasRef} className="stage is-hidden" aria-label="Game stream" />
           <video ref={videoRef} className="stage" playsInline muted autoPlay />
           {state !== "connected" && (
             <div className="overlay">
@@ -323,6 +497,7 @@ export default function App() {
       <footer className="meta">
         <span>{streamMeta}</span>
         <span>{videoDiag}</span>
+        <span>present: {presentMode}</span>
         <span>{padMeta}</span>
         <button
           type="button"

@@ -6,6 +6,12 @@ use couchlink_proto::StreamPreset;
 pub struct HostArgs {
     #[arg(long, env = "COUCHLINK_SIGNALING", default_value = "ws://127.0.0.1:8443/ws")]
     pub signaling: String,
+    /// WebSocket URL embedded in the friend join link (defaults to `--signaling`).
+    ///
+    /// Use this when the host must dial a local signaling address (no NAT hairpin)
+    /// but friends need the public/WAN URL in the invite.
+    #[arg(long, env = "COUCHLINK_INVITE_SIGNALING")]
+    pub invite_signaling: Option<String>,
     #[arg(long, env = "COUCHLINK_SESSION_ID")]
     pub session_id: String,
     #[arg(long, env = "COUCHLINK_PIN")]

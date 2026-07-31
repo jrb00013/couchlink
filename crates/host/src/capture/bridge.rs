@@ -166,12 +166,21 @@ impl WindowsBridge {
         Ok(Some(info))
     }
 
-    /// Read the newest available frame, discarding any backlog. The socket buffers
-    /// whole frames when the encoder falls behind; consuming them in order would add
-    /// permanent, ever-growing latency, so only the most recent one is kept.
+    /// Read the next frame.
+    ///
+    /// For raw pixels, skip to the newest one: the socket buffers whole frames when
+    /// the encoder falls behind and consuming them in order would add permanent,
+    /// growing latency.
+    ///
+    /// For H.264 every frame must be delivered in order. P-frames reference the
+    /// frames before them, so discarding one corrupts the decoder until the next
+    /// keyframe — up to IDR_INTERVAL of stutter for a few bytes saved.
     fn latest_frame(&mut self) -> Result<bool> {
         if self.read_frame(IDLE_POLL)?.is_none() {
             return Ok(false);
+        }
+        if self.format == FrameFormat::H264 {
+            return Ok(true);
         }
         let mut dropped = 0u32;
         while self.read_frame(DRAIN_POLL)?.is_some() {
@@ -198,6 +207,25 @@ impl WindowsBridge {
 
     pub fn format(&self) -> FrameFormat {
         self.format
+    }
+
+    /// Throw away everything already queued and resynchronise.
+    ///
+    /// The host does not read this socket until a player connects, so by then a
+    /// backlog of encoded frames is waiting. Relaying it in order is faithful and
+    /// permanently late; the viewer wants what is on screen *now*. Discarding the
+    /// backlog would normally corrupt the decoder, so it is paired with an IDR
+    /// request — the next frame is then decodable from scratch.
+    pub fn resync(&mut self) {
+        let mut shed = 0u32;
+        while matches!(self.read_frame(DRAIN_POLL), Ok(Some(_))) {
+            shed += 1;
+        }
+        if shed > 0 {
+            tracing::info!("dropped {shed} stale capture frame(s) and asked for a keyframe");
+        }
+        self.last = None;
+        self.request_idr();
     }
 
     pub fn capture(&mut self) -> Result<Option<Captured>> {

@@ -2,6 +2,7 @@ mod capture;
 mod config;
 mod encode;
 mod invite;
+mod latency;
 mod motion;
 mod scale;
 mod signaling_client;
@@ -40,8 +41,13 @@ async fn main() -> Result<()> {
     );
 
     // Friend opens this in a browser (same host as signaling static files).
-    let public_http = args
-        .signaling
+    // Prefer invite_signaling when set so the host can dial 127.0.0.1 while the
+    // printed URL still points at the public/WAN address (WSL/NAT hairpin).
+    let invite_ws = args
+        .invite_signaling
+        .as_deref()
+        .unwrap_or(args.signaling.as_str());
+    let public_http = invite_ws
         .replacen("ws://", "http://", 1)
         .replacen("wss://", "https://", 1)
         .trim_end_matches("/ws")
@@ -54,10 +60,18 @@ async fn main() -> Result<()> {
         &public_http,
         &args.session_id,
         &args.pin,
-        &args.signaling,
+        invite_ws,
         turn,
     );
     info!("friend join URL: {join}");
+    if join.contains("://127.") || join.contains("://localhost") {
+        info!("join URL is loopback — browser WebCodecs (lowest latency) is available");
+    } else if join.starts_with("http://") {
+        info!(
+            "LAN http join — WebCodecs needs a secure context; prefer http://127.0.0.1:8443/?… \
+             (SSH tunnel / same machine) or https for near-zero latency; RTP fallback still works"
+        );
+    }
     if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
         let ste = qr.render::<char>().quiet_zone(false).module_dimensions(2, 1).build();
         eprintln!("\nScan / open join link:\n{ste}\n{join}\n");
@@ -67,16 +81,19 @@ async fn main() -> Result<()> {
         args.bluetooth_pad,
     )?));
 
-    let mut signaling = signaling_client::SignalingClient::connect(&args.signaling).await?;
-    signaling
-        .register_host(
-            args.session_id.clone(),
-            args.pin.clone(),
-            args.device_name.clone(),
-            args.preset.clone(),
-            args.emulator.clone(),
-        )
-        .await?;
+    // The supervisor owns the socket and re-registers on every reconnect, so a
+    // transient signaling failure can no longer orphan the host from its session.
+    let mut signaling = signaling_client::SignalingClient::connect_and_register(
+        &args.signaling,
+        signaling_client::HostRegistration {
+            session_id: args.session_id.clone(),
+            pin: args.pin.clone(),
+            device_name: args.device_name.clone(),
+            preset: args.preset.clone(),
+            emulator: args.emulator.clone(),
+        },
+    )
+    .await?;
 
     let signal_out = signaling.outbound.clone();
     let offer_epoch = Arc::new(AtomicU64::new(0));
@@ -92,6 +109,7 @@ async fn main() -> Result<()> {
     )
     .await?
     .0;
+    host.set_video_size(preset.width, preset.height);
     let mut attached_player_epoch: u64 = 0;
 
     // Open capture before the first player so Windows win-capture can connect immediately.
@@ -126,15 +144,29 @@ async fn main() -> Result<()> {
     let mut last_idr = std::time::Instant::now();
     let mut capture_ok_announced: Option<bool> = None;
 
-    // Wait for the first player before offering WebRTC.
+    // Wait for the first player before offering WebRTC — but keep draining the
+    // capture socket while waiting. With nobody reading it, TCP fills, the Windows
+    // side sheds every frame it encodes, and (because a shed frame asks for a
+    // keyframe) the encoder degenerates into emitting nothing but IDRs.
     loop {
-        let Some(msg) = signaling.inbound.recv().await else {
-            return Ok(());
+        let msg = tokio::select! {
+            msg = signaling.inbound.recv() => match msg {
+                Some(m) => m,
+                None => return Ok(()),
+            },
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                // Discard: there is no one to show it to yet.
+                let _ = capturer.capture();
+                continue;
+            }
         };
         match msg {
             SignalMessage::PeerJoined { epoch, .. } => {
                 info!("player joined — sending offer (player epoch {epoch})");
                 attached_player_epoch = epoch;
+                // Frames have been piling up in the capture socket while nobody was
+                // watching. Start from what is on screen now, not from the backlog.
+                capturer.resync();
                 host.create_and_send_offer(&signal_out).await?;
                 break;
             }
@@ -149,9 +181,16 @@ async fn main() -> Result<()> {
     // The metronome the video is sent on. Delay (not Burst) on a missed tick so a slow
     // frame never causes a catch-up flurry — a burst is exactly the jitter we are
     // trying to remove.
-    let mut cadence = tokio::time::interval(Duration::from_millis(
-        1000 / preset.fps.max(1) as u64,
-    ));
+    // When frames arrive pre-encoded, the Windows side owns the cadence and this
+    // loop is only a relay — so poll fast and forward immediately. Holding an
+    // already-encoded frame for the rest of a 16ms beat is pure added latency.
+    // On the raw path this interval *is* the metronome and must stay at frame time.
+    let tick = if capturer.is_preencoded() {
+        Duration::from_millis(2)
+    } else {
+        Duration::from_millis(1000 / preset.fps.max(1) as u64)
+    };
+    let mut cadence = tokio::time::interval(tick);
     cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let _ = signal_out.send(stream_info_message(
@@ -167,10 +206,15 @@ async fn main() -> Result<()> {
             }
             msg = signaling.inbound.recv() => {
                 match msg {
-                    Some(SignalMessage::Answer { sdp }) => {
-                        host.handle_answer(sdp).await?;
-                        info!("remote answer set — forcing IDR for browser decoder");
-                        force_idr = true;
+                    Some(SignalMessage::Answer { sdp, epoch }) => {
+                        match host.handle_answer(sdp, epoch).await {
+                            Ok(true) => {
+                                info!("remote answer set — forcing IDR for browser decoder");
+                                force_idr = true;
+                            }
+                            Ok(false) => {}
+                            Err(e) => warn!("answer failed (continuing): {e:#}"),
+                        }
                     }
                     Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
                         let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
@@ -190,9 +234,42 @@ async fn main() -> Result<()> {
                             warn!("ignoring stale PeerJoined epoch={epoch} (attached={attached_player_epoch})");
                             continue;
                         }
+                        // Coalesce a rejoin burst (double-tab / rapid reload): only
+                        // rebuild once for the newest epoch already queued.
+                        let mut epoch = epoch;
+                        let mut deferred: Vec<SignalMessage> = Vec::new();
+                        while let Ok(extra) = signaling.inbound.try_recv() {
+                            match extra {
+                                SignalMessage::PeerJoined { epoch: e, .. } => {
+                                    if e >= epoch {
+                                        epoch = e;
+                                    } else {
+                                        warn!("dropping older PeerJoined epoch={e} during coalesce");
+                                    }
+                                }
+                                other => deferred.push(other),
+                            }
+                        }
                         attached_player_epoch = epoch;
                         info!("player rejoined (epoch {epoch}) — rebuilding WebRTC peer + offer");
-                        let _ = host.pc.close().await;
+                        capturer.resync();
+                        // Close the previous peer off the critical path.
+                        //
+                        // Awaiting close() here could hang indefinitely, and because
+                        // this is the same select! loop that relays video and services
+                        // signaling, a hang stopped *everything*: no offer for this
+                        // player, no frames, and no reaction to anyone joining later.
+                        // The first player never hit it (no peer to close yet), so it
+                        // looked like "only one player can ever connect".
+                        let old_pc = Arc::clone(&host.pc);
+                        tokio::spawn(async move {
+                            if tokio::time::timeout(Duration::from_secs(5), old_pc.close())
+                                .await
+                                .is_err()
+                            {
+                                warn!("previous peer connection did not close within 5s");
+                            }
+                        });
                         host = webrtc_peer::WebRtcHost::new(
                             signal_out.clone(),
                             Arc::clone(&pad),
@@ -214,6 +291,38 @@ async fn main() -> Result<()> {
                             capture_ok_announced,
                             None,
                         ));
+                        // Re-handle non-join messages that arrived during coalesce
+                        // (answers for the *old* peer are dropped by epoch/state checks).
+                        for msg in deferred {
+                            match msg {
+                                SignalMessage::Answer { sdp, epoch } => {
+                                    match host.handle_answer(sdp, epoch).await {
+                                        Ok(true) => {
+                                            info!("remote answer set — forcing IDR for browser decoder");
+                                            force_idr = true;
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => warn!("answer failed (continuing): {e:#}"),
+                                    }
+                                }
+                                SignalMessage::IceCandidate {
+                                    candidate,
+                                    sdp_mid,
+                                    sdp_mline_index,
+                                } => {
+                                    let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
+                                }
+                                SignalMessage::RequestOffer => {
+                                    force_idr = true;
+                                    if let Err(e) = host.create_and_send_offer(&signal_out).await {
+                                        warn!("request_offer failed: {e}");
+                                    }
+                                }
+                                other => {
+                                    warn!("deferred signal ignored after rejoin coalesce: {other:?}");
+                                }
+                            }
+                        }
                     }
                     Some(SignalMessage::Heartbeat) => {
                         let _ = signal_out.send(SignalMessage::Pong);
@@ -228,6 +337,11 @@ async fn main() -> Result<()> {
             // wobble, and measured buffer grew to ~100ms during motion. Encoding on a
             // metronome makes delivery uniform, which is what lets the buffer stay small.
             _ = cadence.tick() => {
+                // A viewer that lost sync asks for a keyframe over RTCP. Answering
+                // immediately turns a multi-second glitch into a single frame.
+                if host.take_keyframe_request() {
+                    force_idr = true;
+                }
                 let t_capture = std::time::Instant::now();
                 let Some(frame) = capturer.capture()? else { continue };
                 let ms_capture = t_capture.elapsed();
@@ -237,28 +351,38 @@ async fn main() -> Result<()> {
                 // encode. Everything below this block exists only for raw pixels.
                 let bgra = match frame {
                     capture::Captured::H264 { nal, keyframe } => {
-                        if force_idr || idr_burst > 0 {
-                            // The Windows encoder owns keyframe timing here, so ask it
-                            // rather than pretending we control the GOP.
-                            capturer.request_idr();
-                            force_idr = false;
-                            idr_burst = 0;
+                        host.set_video_size(
+                            capturer.width() as u32,
+                            capturer.height() as u32,
+                        );
+                        // Relay every encoded frame that has arrived, not one per
+                        // tick. The encoder's cadence is set on the Windows side; a
+                        // backlog here would be shown late, and H.264 frames cannot
+                        // be skipped to catch up without corrupting the decoder.
+                        let mut queue = vec![(nal, keyframe)];
+                        while let Some(capture::Captured::H264 { nal, keyframe }) =
+                            capturer.capture()?
+                        {
+                            queue.push((nal, keyframe));
+                            if queue.len() >= 8 {
+                                break;
+                            }
                         }
-                        if keyframe {
-                            last_idr = std::time::Instant::now();
-                        } else if last_idr.elapsed() >= IDR_INTERVAL {
-                            capturer.request_idr();
-                            last_idr = std::time::Instant::now();
-                        }
-                        if capture_ok_announced.is_none() {
-                            capture_ok_announced = Some(true);
-                            let _ = signal_out.send(stream_info_message(&preset, Some(true), None));
-                        }
-                        let real_gap = last_push
+                        // Spread the real elapsed time across the burst. Timing each
+                        // frame from the previous *push* would report ~1ms for every
+                        // frame after the first, so RTP media time would advance far
+                        // slower than the wall clock and the receiver would grow its
+                        // buffer to cover the drift — delay that accumulates.
+                        let burst_gap = last_push
                             .elapsed()
                             .clamp(Duration::from_millis(1), Duration::from_millis(500));
+                        let per_frame = burst_gap / queue.len().max(1) as u32;
                         last_push = std::time::Instant::now();
-                        if let Err(e) = host.push_h264(nal, real_gap).await {
+                        for (nal, keyframe) in queue {
+                        if keyframe {
+                            last_idr = std::time::Instant::now();
+                        }
+                        if let Err(e) = host.push_h264(nal, per_frame, keyframe).await {
                             warn!("push h264: {e}");
                         } else {
                             frames_out += 1;
@@ -278,6 +402,21 @@ async fn main() -> Result<()> {
                                 idle_frames = 0;
                                 stage_capture = Duration::ZERO;
                             }
+                        }
+                        }
+                        // Keyframe control lives on the Windows side here, so ask for
+                        // one rather than pretending we own the GOP.
+                        if force_idr || idr_burst > 0 {
+                            capturer.request_idr();
+                            force_idr = false;
+                            idr_burst = 0;
+                        } else if last_idr.elapsed() >= IDR_INTERVAL {
+                            capturer.request_idr();
+                            last_idr = std::time::Instant::now();
+                        }
+                        if capture_ok_announced.is_none() {
+                            capture_ok_announced = Some(true);
+                            let _ = signal_out.send(stream_info_message(&preset, Some(true), None));
                         }
                         continue;
                     }
@@ -378,7 +517,12 @@ async fn main() -> Result<()> {
                         .elapsed()
                         .clamp(Duration::from_millis(1), Duration::from_millis(500));
                     last_push = std::time::Instant::now();
-                    if let Err(e) = host.push_h264(nal, real_gap).await {
+                    if let Err(e) = host.push_h264(
+                        nal.clone(),
+                        real_gap,
+                        couchlink_proto::annex_b_is_keyframe(&nal),
+                    )
+                    .await {
                         warn!("push h264: {e}");
                     } else {
                         frames_out += 1;

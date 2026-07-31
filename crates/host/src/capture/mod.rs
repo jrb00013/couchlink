@@ -1,5 +1,7 @@
 mod bridge;
 mod local;
+#[cfg(target_os = "linux")]
+mod cursor_x11;
 
 use anyhow::{bail, Context, Result};
 pub use bridge::Captured;
@@ -60,6 +62,13 @@ impl FrameCapture {
     pub fn request_idr(&mut self) {
         if let Self::Windows(c) = self {
             c.request_idr();
+        }
+    }
+
+    /// Discard anything already buffered so the stream starts from *now*.
+    pub fn resync(&mut self) {
+        if let Self::Windows(c) = self {
+            c.resync();
         }
     }
 }

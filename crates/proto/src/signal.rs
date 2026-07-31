@@ -35,6 +35,10 @@ pub enum SignalMessage {
     },
     Answer {
         sdp: String,
+        /// Echo of the offer epoch so the host can drop answers for superseded offers
+        /// (rapid rejoin / double-tab races). Older clients omit this (treated as 0).
+        #[serde(default)]
+        epoch: u64,
     },
     IceCandidate {
         candidate: String,
@@ -88,25 +92,26 @@ impl StreamPreset {
         width: 1920,
         height: 1080,
         fps: 60,
-        bitrate_kbps: 12_000,
+        // Screen/UI text needs headroom — 12 Mbps at 1080p60 looked crunchy on LAN.
+        bitrate_kbps: 18_000,
     };
     pub const P1080_30: Self = Self {
         width: 1920,
         height: 1080,
         fps: 30,
-        bitrate_kbps: 8_000,
+        bitrate_kbps: 10_000,
     };
     pub const P720_60: Self = Self {
         width: 1280,
         height: 720,
         fps: 60,
-        bitrate_kbps: 8_000,
+        bitrate_kbps: 10_000,
     };
     pub const P720_30: Self = Self {
         width: 1280,
         height: 720,
         fps: 30,
-        bitrate_kbps: 4_000,
+        bitrate_kbps: 5_000,
     };
 
     pub fn parse(name: &str) -> Option<Self> {

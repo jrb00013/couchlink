@@ -14,6 +14,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use windows::core::{Interface, GUID, PWSTR};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::System::Variant::{VARIANT, VT_UI4};
 
 /// Annex-B start code. WebRTC wants byte-stream format; some encoders emit AVCC
@@ -33,15 +34,32 @@ pub struct HardwareEncoder {
     events: Option<IMFMediaEventGenerator>,
     width: u32,
     height: u32,
-    /// SPS/PPS from the output media type. Some encoders only emit these out of
-    /// band, so they are prepended to every keyframe — a decoder joining mid-stream
-    /// cannot start without them.
+    /// SPS/PPS, prepended to every keyframe that lacks them.
+    ///
+    /// A decoder cannot start without parameter sets, and MF encoders typically emit
+    /// them only once at the start of the stream. Any viewer joining later then
+    /// receives a stream it can never decode (openh264 reports dsNoParamSets), which
+    /// is invisible to whoever was already connected.
+    ///
+    /// Read from MF_MT_MPEG_SEQUENCE_HEADER where available, and otherwise learned
+    /// from the encoder's own output — that attribute is not always present.
     sequence_header: Vec<u8>,
     frame_index: i64,
     frame_duration: i64,
+    started: std::time::Instant,
     nv12: Vec<u8>,
     /// Set once we have seen how this encoder formats its output.
     annex_b_confirmed: bool,
+    /// True when the transform allocates its own output samples. When false we must
+    /// hand it a buffer of at least `output_sample_size` on every ProcessOutput.
+    provides_samples: bool,
+    output_sample_size: u32,
+    learned_parameter_sets: bool,
+    keyframe_request_broken: bool,
+    frames_logged: u32,
+    /// Held for the lifetime of the transform when running zero-copy; dropping it
+    /// would pull the device out from under the encoder.
+    dxgi_manager: Option<IMFDXGIDeviceManager>,
 }
 
 // SAFETY: COM is initialised as a multithreaded apartment (COINIT_MULTITHREADED),
@@ -64,7 +82,78 @@ pub struct EncodedFrame {
 }
 
 impl HardwareEncoder {
+    /// `fps` is the rate frames are submitted, and it sets the floor on latency:
+    /// the transform asks for input at roughly that rate, so a frame arriving at an
+    /// arbitrary moment waits about half an interval before it is taken. Measured,
+    /// capture->encoded tracks 1/(2*fps) + encode: ~12ms at 60, ~8ms at 120.
+    ///
+    /// Tried and rejected: raising MF_MT_FRAME_RATE above the submit rate to make the
+    /// transform ask more often. It changes rate-control accounting and does not move
+    /// the latency, because the request rate follows how fast the encoder actually
+    /// drains, not the declared nominal rate.
+    /// Zero-copy variant: the transform is given the D3D11 device the capture runs
+    /// on, so it can read NV12 textures directly instead of us reading the surface
+    /// back to system memory, converting on the CPU, and uploading it again.
+    ///
+    /// Returns an error if the transform is not D3D-aware or refuses the device, and
+    /// the caller is expected to fall back to the system-memory path.
+    pub fn new_with_device(
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Result<Self> {
+        Self::build(width, height, fps, bitrate_bps, Some(device))
+    }
+
+    /// True when frames may be submitted as textures.
+    pub fn is_zero_copy(&self) -> bool {
+        self.dxgi_manager.is_some()
+    }
+
+    /// Submit an NV12 texture the GPU already holds. No readback, no CPU conversion,
+    /// no upload.
+    pub fn submit_texture(&mut self, texture: &ID3D11Texture2D) -> Result<()> {
+        unsafe {
+            let buffer = MFCreateDXGISurfaceBuffer(
+                &ID3D11Texture2D::IID,
+                texture,
+                0,
+                false,
+            )
+            .context("MFCreateDXGISurfaceBuffer")?;
+            // A DXGI-backed buffer knows its own size, but the transform still wants
+            // the current length set.
+            if let Ok(len) = buffer.GetMaxLength() {
+                let _ = buffer.SetCurrentLength(len);
+            }
+
+            let sample = MFCreateSample().context("MFCreateSample")?;
+            sample.AddBuffer(&buffer)?;
+            let elapsed = self.started.elapsed();
+            sample.SetSampleTime((elapsed.as_nanos() / 100) as i64)?;
+            sample.SetSampleDuration(self.frame_duration)?;
+            self.frame_index += 1;
+
+            self.transform
+                .ProcessInput(0, &sample, 0)
+                .context("ProcessInput (texture)")?;
+        }
+        Ok(())
+    }
+
     pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Result<Self> {
+        Self::build(width, height, fps, bitrate_bps, None)
+    }
+
+    fn build(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_bps: u32,
+        device: Option<&windows::Win32::Graphics::Direct3D11::ID3D11Device>,
+    ) -> Result<Self> {
         if width % 2 != 0 || height % 2 != 0 {
             bail!("hardware encoder needs even dimensions, got {width}x{height}");
         }
@@ -96,6 +185,42 @@ impl HardwareEncoder {
             }
         };
 
+        // The device has to go in before the media types are negotiated: a transform
+        // asked to accept a device after it has already been configured for system
+        // memory answers with a bare E_FAIL that names nothing.
+        let mut dxgi_manager = None;
+        if let Some(device) = device {
+            unsafe {
+                let aware = transform
+                    .GetAttributes()
+                    .ok()
+                    .and_then(|a| a.GetUINT32(&MF_SA_D3D11_AWARE).ok())
+                    .unwrap_or(0);
+                if aware == 0 {
+                    bail!("encoder is not D3D11-aware; keeping the system-memory path");
+                }
+                // Media Foundation drives the device from its own threads and refuses
+                // one that is not multithread-protected.
+                let multithread: windows::Win32::Graphics::Direct3D10::ID3D10Multithread =
+                    device.cast().context("device has no ID3D10Multithread")?;
+                multithread.SetMultithreadProtected(true);
+
+                let mut manager: Option<IMFDXGIDeviceManager> = None;
+                let mut reset_token = 0u32;
+                MFCreateDXGIDeviceManager(&mut reset_token, &mut manager)
+                    .context("MFCreateDXGIDeviceManager")?;
+                let manager = manager.context("no DXGI device manager")?;
+                manager
+                    .ResetDevice(device, reset_token)
+                    .context("ResetDevice")?;
+                transform
+                    .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+                    .context("MFT_MESSAGE_SET_D3D_MANAGER")?;
+                tracing::info!("encoder accepted the D3D11 device — textures go in directly");
+                dxgi_manager = Some(manager);
+            }
+        }
+
         unsafe {
             // Output type must be set before input type for encoder MFTs.
             let out = MFCreateMediaType().context("create output type")?;
@@ -109,11 +234,24 @@ impl HardwareEncoder {
             set_ratio(&out, &MF_MT_FRAME_SIZE, width, height)?;
             set_ratio(&out, &MF_MT_FRAME_RATE, fps, 1)?;
             set_ratio(&out, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
-            // Baseline keeps decoding cheap and is universally supported by browsers.
-            out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
-            transform
-                .SetOutputType(0, &out, 0)
-                .context("SetOutputType(H264) — encoder rejected these parameters")?;
+            // Main is a big quality win over Baseline at the same bitrate (CABAC),
+            // and Chrome/WebCodecs decode it fine. Fall back to Baseline if rejected.
+            if out
+                .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)
+                .is_err()
+                || transform.SetOutputType(0, &out, 0).is_err()
+            {
+                tracing::warn!("Main profile rejected — falling back to Baseline");
+                out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+            // Bound the GOP so a viewer that joins mid-stream, or loses sync, always
+            // has a decodable frame coming within a known time — even if forcing one
+            // on demand is unsupported. One second of keyframes costs little at these
+            // bitrates and removes an unbounded wait.
+            let _ = out.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps);
+                transform
+                    .SetOutputType(0, &out, 0)
+                    .context("SetOutputType(H264) — encoder rejected these parameters")?;
+            }
 
             let inp = MFCreateMediaType().context("create input type")?;
             inp.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -134,8 +272,36 @@ impl HardwareEncoder {
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
         }
 
+        // Whether the transform allocates output samples decides how ProcessOutput
+        // must be called. Getting this wrong is E_UNEXPECTED partway into a stream.
+        let (provides_samples, output_sample_size) = unsafe {
+            match transform.GetOutputStreamInfo(0) {
+                Ok(info) => {
+                    const PROVIDES: u32 = 0x100; // MFT_OUTPUT_STREAM_PROVIDES_SAMPLES
+                    const CAN_PROVIDE: u32 = 0x200; // MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES
+                    let provides = info.dwFlags & (PROVIDES | CAN_PROVIDE) != 0;
+                    tracing::info!(
+                        "output stream: flags={:#x} size={} provides_samples={}",
+                        info.dwFlags,
+                        info.cbSize,
+                        provides
+                    );
+                    (provides, info.cbSize.max(1))
+                }
+                Err(e) => {
+                    tracing::warn!("GetOutputStreamInfo failed ({e}); assuming self-allocating");
+                    (true, 1)
+                }
+            }
+        };
+
         let sequence_header = unsafe { read_sequence_header(&transform) };
         let codec_api: Option<ICodecAPI> = transform.cast().ok();
+        if let Some(ref api) = codec_api {
+            unsafe {
+                apply_codec_api_defaults(api, bitrate_bps);
+            }
+        }
         let events: Option<IMFMediaEventGenerator> = if is_async {
             Some(
                 transform
@@ -160,8 +326,15 @@ impl HardwareEncoder {
             frame_index: 0,
             // Media Foundation time is in 100ns units.
             frame_duration: 10_000_000 / fps as i64,
+            started: std::time::Instant::now(),
             nv12: vec![0u8; nv12_len(width, height)],
             annex_b_confirmed: false,
+            provides_samples,
+            output_sample_size,
+            learned_parameter_sets: false,
+            keyframe_request_broken: false,
+            frames_logged: 0,
+            dxgi_manager,
         })
     }
 
@@ -170,17 +343,29 @@ impl HardwareEncoder {
     }
 
     /// Ask for an IDR on the next frame. Used when a player joins mid-session.
-    pub fn request_keyframe(&self) {
-        let Some(api) = &self.codec_api else { return };
-        unsafe {
-            // VARIANT's fields are ManuallyDrop unions; write through the deref
-            // explicitly rather than assigning, which would run a destructor on
-            // uninitialised memory.
-            let mut v = VARIANT::default();
-            let inner = &mut *v.Anonymous.Anonymous;
-            inner.vt = VT_UI4;
-            inner.Anonymous.ulVal = 1;
-            let _ = api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &v);
+    pub fn request_keyframe(&mut self) {
+        let Some(api) = &self.codec_api else {
+            if !self.keyframe_request_broken {
+                tracing::warn!(
+                    "encoder exposes no ICodecAPI — cannot force a keyframe, joiners \
+                     wait for the scheduled one"
+                );
+                self.keyframe_request_broken = true;
+            }
+            return;
+        };
+        // Silently discarding this is how a join ends up staring at undecodable
+        // video for seconds: if the transform refuses the request there is no other
+        // signal, and the viewer just waits out the GOP.
+        let result = unsafe { set_codec_u32(api, &CODECAPI_AVEncVideoForceKeyFrame, 1) };
+        if let Err(e) = result {
+            if !self.keyframe_request_broken {
+                tracing::warn!(
+                    "encoder rejected a forced keyframe ({e}) — relying on the \
+                     scheduled interval instead"
+                );
+                self.keyframe_request_broken = true;
+            }
         }
     }
 
@@ -251,6 +436,14 @@ impl HardwareEncoder {
         Ok(())
     }
 
+    unsafe fn alloc_output_sample(&self) -> Result<IMFSample> {
+        let buffer = MFCreateMemoryBuffer(self.output_sample_size)
+            .context("allocate output buffer")?;
+        let sample = MFCreateSample().context("allocate output sample")?;
+        sample.AddBuffer(&buffer)?;
+        Ok(sample)
+    }
+
     unsafe fn make_sample(&mut self, bgra: &[u8]) -> Result<IMFSample> {
         bgra_to_nv12(bgra, self.width as usize, self.height as usize, &mut self.nv12);
         let buffer =
@@ -264,7 +457,11 @@ impl HardwareEncoder {
 
         let sample = MFCreateSample().context("MFCreateSample")?;
         sample.AddBuffer(&buffer)?;
-        sample.SetSampleTime(self.frame_index * self.frame_duration)?;
+        // Real elapsed time rather than frame_index * nominal duration: frames are
+        // submitted whenever the source produces them, so a frame counter drifts away
+        // from the wall clock and rate control mis-allocates bits.
+        let elapsed = self.started.elapsed();
+        sample.SetSampleTime((elapsed.as_nanos() / 100) as i64)?;
         sample.SetSampleDuration(self.frame_duration)?;
         self.frame_index += 1;
         Ok(sample)
@@ -279,13 +476,21 @@ impl HardwareEncoder {
         Ok(out)
     }
 
-    /// One ProcessOutput call. `None` means the transform has nothing to give right
-    /// now (it wants more input).
+    /// Exactly one ProcessOutput call. `None` means the transform has nothing to give
+    /// right now — it wants more input, or it just renegotiated its output type.
     fn process_output_once(&mut self) -> Result<Option<EncodedFrame>> {
-        loop {
+        {
+            // A transform that does not allocate its own samples expects one from us,
+            // sized by GetOutputStreamInfo. Passing None to such a transform is what
+            // produces E_UNEXPECTED once its internal pool is exhausted.
+            let supplied = if self.provides_samples {
+                None
+            } else {
+                Some(unsafe { self.alloc_output_sample()? })
+            };
             let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: 0,
-                pSample: std::mem::ManuallyDrop::new(None),
+                pSample: std::mem::ManuallyDrop::new(supplied),
                 dwStatus: 0,
                 pEvents: std::mem::ManuallyDrop::new(None),
             }];
@@ -299,10 +504,12 @@ impl HardwareEncoder {
                     return Ok(None);
                 }
                 if e.code() == MF_E_TRANSFORM_STREAM_CHANGE {
-                    // The transform renegotiated its output type, which also
-                    // invalidates the SPS/PPS we cached. Re-read and retry.
+                    // Renegotiate, but do NOT call ProcessOutput again here. On an
+                    // asynchronous MFT every ProcessOutput must be invited by its own
+                    // METransformHaveOutput event; an unsolicited second call is
+                    // exactly what returns E_UNEXPECTED. Wait for the next event.
                     self.renegotiate_output()?;
-                    continue;
+                    return Ok(None);
                 }
                 return Err(anyhow!("ProcessOutput failed: {e}"));
             }
@@ -346,6 +553,34 @@ impl HardwareEncoder {
             self.annex_b_confirmed = true;
         }
 
+        // Every keyframe is worth a line: a joiner can only start on one, so if a
+        // join looks broken this says whether one was ever produced.
+        if keyframe || self.frames_logged < 2 {
+            let types: Vec<u8> = nal_types(&data).collect();
+            tracing::info!(
+                "output frame {}: keyframe={keyframe} {} bytes, NAL types {:?}",
+                self.frames_logged,
+                data.len(),
+                types
+            );
+            self.frames_logged = self.frames_logged.saturating_add(1);
+        }
+
+        // Prefer parameter sets observed in the stream over the media type's blob.
+        // MF_MT_MPEG_SEQUENCE_HEADER is sometimes an AVCDecoderConfigurationRecord
+        // (AVCC, length-prefixed) rather than Annex-B; prepending that to a keyframe
+        // feeds the decoder garbage and it reports "no parameter sets" forever.
+        if !self.learned_parameter_sets {
+            if let Some(sets) = extract_parameter_sets(&data) {
+                tracing::info!(
+                    "cached {} bytes of SPS/PPS from the stream (was {} from the media type)",
+                    sets.len(),
+                    self.sequence_header.len()
+                );
+                self.sequence_header = sets;
+                self.learned_parameter_sets = true;
+            }
+        }
         if keyframe && !self.sequence_header.is_empty() && !contains_sps(&data) {
             let mut with_header = self.sequence_header.clone();
             with_header.extend_from_slice(&data);
@@ -443,6 +678,33 @@ unsafe fn widestring_to_string(p: PWSTR, len: u32) -> String {
     s
 }
 
+/// Keep encode latency low while giving the rate controller enough bits for UI text.
+unsafe fn apply_codec_api_defaults(api: &ICodecAPI, bitrate_bps: u32) {
+    // Low-latency mode must stay on — quality bumps must not reintroduce encoder delay.
+    let _ = set_codec_u32(api, &CODECAPI_AVLowLatencyMode, 1);
+    let _ = set_codec_u32(
+        api,
+        &CODECAPI_AVEncCommonRateControlMode,
+        eAVEncCommonRateControlMode_CBR.0 as u32,
+    );
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, bitrate_bps);
+    // 0 = fastest/worst, 100 = slowest/best. Mid-high keeps text readable without
+    // a big latency cliff on NVENC/QuickSync.
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQualityVsSpeed, 60);
+}
+
+unsafe fn set_codec_u32(api: &ICodecAPI, key: &GUID, value: u32) -> Result<()> {
+    // VARIANT's fields are ManuallyDrop unions; write through the deref
+    // explicitly rather than assigning, which would run a destructor on
+    // uninitialised memory.
+    let mut v = VARIANT::default();
+    let inner = &mut *v.Anonymous.Anonymous;
+    inner.vt = VT_UI4;
+    inner.Anonymous.ulVal = value;
+    api.SetValue(key, &v)?;
+    Ok(())
+}
+
 /// MF packs paired 32-bit values (size, frame rate, aspect) into one 64-bit attribute.
 unsafe fn set_ratio(ty: &IMFMediaType, key: &GUID, high: u32, low: u32) -> Result<()> {
     ty.SetUINT64(key, ((high as u64) << 32) | low as u64)?;
@@ -468,12 +730,82 @@ unsafe fn read_sequence_header(transform: &IMFTransform) -> Vec<u8> {
         return Vec::new();
     }
     blob.truncate(written as usize);
+    // Only usable if it is already Annex-B. Anything else is a configuration record
+    // in disguise and must not be spliced into the byte stream.
+    if !blob.starts_with(&START_CODE) && !blob.starts_with(&START_CODE[1..]) {
+        tracing::warn!(
+            "sequence header is not Annex-B ({} bytes) — ignoring, will learn from the stream",
+            blob.len()
+        );
+        return Vec::new();
+    }
+    tracing::info!("sequence header: {} bytes of Annex-B SPS/PPS", blob.len());
     blob
 }
 
 /// Does this access unit already carry an SPS (NAL type 7)?
 fn contains_sps(data: &[u8]) -> bool {
     nal_types(data).any(|t| t == 7)
+}
+
+/// Pull the SPS (7) and PPS (8) NALs out of an access unit, start codes included,
+/// so they can be replayed ahead of a later keyframe for a viewer that joined after
+/// the encoder emitted them.
+fn extract_parameter_sets(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut have_sps = false;
+    let mut have_pps = false;
+    for (start, end) in nal_ranges(data) {
+        let nal_type = data[start] & 0x1F;
+        if nal_type != 7 && nal_type != 8 {
+            continue;
+        }
+        out.extend_from_slice(&START_CODE);
+        out.extend_from_slice(&data[start..end]);
+        have_sps |= nal_type == 7;
+        have_pps |= nal_type == 8;
+    }
+    (have_sps && have_pps).then_some(out)
+}
+
+/// Byte ranges of each NAL payload (after its start code).
+fn nal_ranges(data: &[u8]) -> Vec<(usize, usize)> {
+    let mut starts = Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            starts.push(i + 3);
+            i += 3;
+        } else if i + 4 <= data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
+            starts.push(i + 4);
+            i += 4;
+        } else {
+            i += 1;
+        }
+    }
+    let mut ranges = Vec::with_capacity(starts.len());
+    for (n, &start) in starts.iter().enumerate() {
+        // A NAL ends where the next one's start code begins.
+        let end = starts
+            .get(n + 1)
+            .map(|&next| {
+                let mut e = next.saturating_sub(3);
+                if e >= 1 && data.get(e - 1) == Some(&0) {
+                    e -= 1;
+                }
+                e
+            })
+            .unwrap_or(data.len());
+        if start < end {
+            ranges.push((start, end));
+        }
+    }
+    ranges
 }
 
 fn nal_types(data: &[u8]) -> impl Iterator<Item = u8> + '_ {
@@ -573,6 +905,26 @@ mod tests {
     fn malformed_avcc_is_an_error_not_a_panic() {
         let avcc = [0, 0, 0, 99, 0x65];
         assert!(avcc_to_annex_b(&avcc).is_err());
+    }
+
+    #[test]
+    fn parameter_sets_are_extracted_for_replay() {
+        // SPS (7), PPS (8), then an IDR (5).
+        let au = [
+            0, 0, 0, 1, 0x67, 0x42, 0xE0, //
+            0, 0, 0, 1, 0x68, 0xCE, //
+            0, 0, 0, 1, 0x65, 0xAA, 0xBB,
+        ];
+        let sets = extract_parameter_sets(&au).expect("sps+pps found");
+        assert!(contains_sps(&sets));
+        assert!(nal_types(&sets).any(|t| t == 8), "pps must be included");
+        assert!(!nal_types(&sets).any(|t| t == 5), "slice data must not be");
+    }
+
+    #[test]
+    fn parameter_sets_need_both_sps_and_pps() {
+        let sps_only = [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x65, 0xAA];
+        assert!(extract_parameter_sets(&sps_only).is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@ build:
 	cargo build --release --workspace
 
 install: build
-	install -Dm755 target/release/couchlink-signaling "$(HOME)/.local/bin/couchlink-signaling"
-	install -Dm755 target/release/couchlink-host "$(HOME)/.local/bin/couchlink-host"
-	install -Dm755 target/release/couchlink-client "$(HOME)/.local/bin/couchlink-client"
+	mkdir -p "$(HOME)/.local/bin"
+	install -m755 target/release/couchlink-signaling "$(HOME)/.local/bin/couchlink-signaling"
+	install -m755 target/release/couchlink-host "$(HOME)/.local/bin/couchlink-host"
+	install -m755 target/release/couchlink-client "$(HOME)/.local/bin/couchlink-client"
