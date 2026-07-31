@@ -15,7 +15,7 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Session / PIN / ICE | Rohomieo-style WebSocket signaling |
 | Video | WebRTC + OpenH264, presets up to **1080p60**, scaled capture |
 | Congestion / idle | WebRTC GCC + tile motion detector |
-| Path | **Automatic** — public STUN + local TURN relay (`scripts/start-turn.sh`); on WSL/--online, Windows UPnP prep (Private profile + NATUPnP) runs automatically; WireGuard optional for private LAN-style posture |
+| Path | **Automatic** — public STUN + local TURN; on WSL `--online` also firewall + WSL portproxy, then HTTPS (cloudflared) + IPv6 TURN if UPnP is off (bore = signaling-only last resort) |
 
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
 | Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |

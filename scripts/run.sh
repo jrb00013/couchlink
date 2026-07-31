@@ -15,6 +15,8 @@ cd "$ROOT"
 source "$ROOT/scripts/lib-platform.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-upnp.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-online-tunnel.sh"
 
 usage() {
   cat <<EOF
@@ -24,9 +26,9 @@ usage: $0 [host|client] [--local|--online]
   client  start couchlink-client (friend/player)
 
   --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
-  --online  Internet. Host: public IP + TURN + UPnP (Windows UPnP prep
-            auto-runs on WSL). Client: prompts for the host join URL if unset
-            (TURN required for NAT/WSL).
+  --online  Internet. Host: public IP + TURN + UPnP; on WSL also firewall,
+            WSL portproxy, IPv6 invite / bore tunnel if the router blocks UPnP.
+            Client: prompts for the host join URL if unset (TURN for NAT/WSL).
 
 Platform is auto-detected (linux / wsl / macos).
 EOF
@@ -77,13 +79,13 @@ export COUCHLINK_MODE="$MODE"
 PORT="${COUCHLINK_BIND##*:}"
 PORT="${PORT:-8443}"
 
-# On --online (WSL/Windows): Private profile + discovery + NATUPnP maps.
-# Uses saved task CouchlinkElevatedUpnp after the first UAC approve.
+# On --online (WSL/Windows): Private profile + discovery + firewall + WSL
+# portproxy + NATUPnP maps. Uses saved task CouchlinkElevatedUpnp after first UAC.
 couchlink_try_upnp_online() {
   [[ "${COUCHLINK_SKIP_UPNP_PREP:-}" == "1" ]] && return 0
   local ok=0
   if [[ "$PLATFORM" == "wsl" || "$PLATFORM" == "windows" ]] && command -v powershell.exe >/dev/null 2>&1; then
-    echo "==> --online: Windows UPnP prep (Private + discovery + maps)"
+    echo "==> --online: Windows prep (firewall + WSL portproxy + UPnP)"
     set +e
     bash "$ROOT/scripts/enable-upnp.sh"
     local ec=$?
@@ -104,6 +106,56 @@ couchlink_try_upnp_online() {
   upnp_open 3478 udp "turn" || true
   upnp_open 3478 tcp "turn" || true
   return $((1 - ok))
+}
+
+# When the router won't forward IPv4:
+#   1) cloudflared HTTPS signaling (browser WebCodecs needs a secure context)
+#   2) IPv6 TURN/invite when Windows has a global IPv6 (UDP/TCP without router NAT)
+#   3) bore signaling-only last resort — never put TURN on bore
+couchlink_apply_online_fallback() {
+  local public_ip="$1"
+  local v6=""
+  v6="$(couchlink_read_public_ipv6 2>/dev/null || true)"
+
+  local used_cf=0
+  if couchlink_start_cloudflared "$ROOT" "$PORT"; then
+    used_cf=1
+    # Host still dials loopback; friends get https://*.trycloudflare.com
+    export COUCHLINK_INVITE_SIGNALING="${COUCHLINK_CF_URL/https:/wss:}/ws"
+    echo "==> HTTPS invite via cloudflared (WebCodecs unlocked in browser)"
+  fi
+
+  if [[ -n "$v6" ]]; then
+    local v6br
+    v6br="$(couchlink_bracket_host "$v6")"
+    export COUCHLINK_TURN_URL="turn:${v6br}:3478"
+    export COUCHLINK_TURN_EXTERNAL_IP="$v6"
+    if [[ "$used_cf" != "1" ]]; then
+      export COUCHLINK_INVITE_SIGNALING="ws://${v6br}:${PORT}/ws"
+    fi
+    echo "==> TURN on public IPv6 ${v6} (no IPv4 port forward needed)"
+    return 0
+  fi
+
+  # No IPv6 — keep TURN on WAN IPv4 (needs UPnP/forward to actually work).
+  export COUCHLINK_TURN_URL="turn:${public_ip}:3478"
+  export COUCHLINK_TURN_EXTERNAL_IP="$public_ip"
+
+  if [[ "$used_cf" == "1" ]]; then
+    echo "==> WARN: no public IPv6 — TURN still ${public_ip}:3478 (forward UDP/TCP 3478 if ICE fails)"
+    return 0
+  fi
+
+  if couchlink_start_bore_signaling "$ROOT" "$PORT"; then
+    export COUCHLINK_INVITE_SIGNALING="ws://bore.pub:${COUCHLINK_BORE_SIG_PORT}/ws"
+    echo "==> bore signaling only; TURN remains ${public_ip}:3478"
+    echo "    browser WebCodecs needs https — prefer cloudflared; native client is fine on http"
+    return 0
+  fi
+
+  echo "==> UPnP incomplete — keeping IPv4 invite ${public_ip} (may need manual forward)"
+  echo "    forward TCP ${PORT} + UDP/TCP 3478 to this PC, or re-run ./scripts/enable-upnp.sh"
+  return 1
 }
 
 if [[ "$ROLE" == "host" ]]; then
@@ -135,9 +187,7 @@ if [[ "$ROLE" == "host" ]]; then
       echo "==> UPnP OK — ports should be reachable at ${PUBLIC_IP}"
       export COUCHLINK_SKIP_UPNP=1
     else
-      echo "==> UPnP incomplete — if friends can't join, forward TCP ${PORT} + UDP/TCP 3478"
-      echo "    or enable UPnP/IGD on the gateway (http://192.168.1.1)"
-      echo "    re-run Windows prep alone: ./scripts/enable-upnp.sh"
+      couchlink_apply_online_fallback "$PUBLIC_IP" || true
     fi
   fi
 elif [[ "$ROLE" == "client" ]]; then
@@ -161,6 +211,12 @@ PIDS=()
 cleanup() {
   echo "==> shutting down"
   for pid in "${PIDS[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in "${COUCHLINK_TUNNEL_PIDS[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in "${COUCHLINK_BORE_PIDS[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done
   if [[ "$PLATFORM" == "wsl" && "$ROLE" == "host" ]]; then
