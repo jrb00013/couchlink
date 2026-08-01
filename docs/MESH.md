@@ -17,21 +17,24 @@ Mesh sessions skip Cloudflare. On **native Linux/macOS**, TURN is skipped (direc
 Override order: `COUCHLINK_MESH_PREFER=wireguard,tailscale`  
 Skip mesh entirely: `COUCHLINK_SKIP_MESH=1`
 
-## Quick start — Tailscale (easiest)
+## Quick start — Tailscale (paste-link)
 
-**Host**
+**Host (gaming PC)**
 
 ```bash
-./scripts/setup-tailscale.sh          # install hints + status
-# sign in (Windows app / sudo tailscale up)
-./scripts/setup-tailscale.sh --check  # must print 100.x
-./scripts/run.sh host --online        # prints http://100.x.y.z:8443/?…
+./install.sh --host --online          # Tailscale + host; prints http://100.x…/?…
+# or: ./scripts/setup-tailscale.sh --ensure && ./scripts/run.sh host --online
 ```
 
 **Friend**
 
-1. Install Tailscale and join the **same tailnet** (host can share the node).  
-2. Paste the host join URL into **Couchlink Player** (native client preferred).  
+```bash
+./install.sh                          # player + Tailscale (default)
+./install.sh --online                 # prompts — paste the host join URL
+```
+
+1. Both sign into Tailscale on the **same tailnet** (host can share the node).  
+2. Friend pastes the host join URL into **Couchlink Player**.  
 3. Browser over `http://100.x` works for signaling/RTP fallback; WebCodecs wants https — use the native client.
 
 ## Quick start — WireGuard

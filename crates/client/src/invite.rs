@@ -11,6 +11,8 @@ pub struct ParsedInvite {
     pub turn_url: Option<String>,
     pub turn_user: Option<String>,
     pub turn_pass: Option<String>,
+    /// Optional mesh hint from host (`tailscale` / `wireguard`).
+    pub mesh: Option<String>,
 }
 
 pub fn parse_join_url(raw: &str) -> Result<ParsedInvite> {
@@ -30,6 +32,7 @@ pub fn parse_join_url(raw: &str) -> Result<ParsedInvite> {
     let turn_url = query(&url, &["turn"]);
     let turn_user = query(&url, &["turnu"]);
     let turn_pass = query(&url, &["turnp"]);
+    let mesh = query(&url, &["mesh"]);
 
     Ok(ParsedInvite {
         signaling,
@@ -38,6 +41,7 @@ pub fn parse_join_url(raw: &str) -> Result<ParsedInvite> {
         turn_url,
         turn_user,
         turn_pass,
+        mesh,
     })
 }
 
@@ -67,7 +71,30 @@ pub fn parse_join_input(raw: &str) -> Result<ParsedInvite> {
         turn_url: None,
         turn_user: None,
         turn_pass: None,
+        mesh: None,
     })
+}
+
+/// True when the invite targets a Tailscale CGNAT address (100.64.0.0/10).
+pub fn is_tailscale_invite(parsed: &ParsedInvite) -> bool {
+    if parsed.mesh.as_deref() == Some("tailscale") {
+        return true;
+    }
+    host_looks_tailscale(&parsed.signaling)
+}
+
+fn host_looks_tailscale(signaling: &str) -> bool {
+    let Ok(u) = Url::parse(signaling) else {
+        return false;
+    };
+    let Some(host) = u.host_str() else {
+        return false;
+    };
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    // Tailscale CGNAT: 100.64.0.0/10
+    (ip.octets()[0] == 100) && (ip.octets()[1] & 0xc0) == 64
 }
 
 fn query(url: &Url, keys: &[&str]) -> Option<String> {
@@ -102,6 +129,15 @@ mod tests {
         assert_eq!(p.pin, "482193");
         assert_eq!(p.signaling, "ws://203.0.113.10:8443/ws");
         assert_eq!(p.turn_url.as_deref(), Some("turn:203.0.113.10:3478"));
+        assert!(p.mesh.is_none());
+    }
+
+    #[test]
+    fn parses_tailscale_mesh_invite() {
+        let url = "http://100.64.1.2:8443/?s=a&p=1&auto=1&ws=ws://100.64.1.2:8443/ws&mesh=tailscale";
+        let p = parse_join_url(url).unwrap();
+        assert_eq!(p.mesh.as_deref(), Some("tailscale"));
+        assert!(is_tailscale_invite(&p));
     }
 
     #[test]

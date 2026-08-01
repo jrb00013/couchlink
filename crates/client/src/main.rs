@@ -112,20 +112,26 @@ impl Args {
         if let Some(url) = join_raw {
             let parsed = invite::parse_join_url(&url)?;
             if args.session_id.is_none() {
-                args.session_id = Some(parsed.session_id);
+                args.session_id = Some(parsed.session_id.clone());
             }
             if args.pin.is_none() {
-                args.pin = Some(parsed.pin);
+                args.pin = Some(parsed.pin.clone());
             }
-            args.signaling = parsed.signaling;
+            args.signaling = parsed.signaling.clone();
             if args.turn_url.is_none() {
-                args.turn_url = parsed.turn_url;
+                args.turn_url = parsed.turn_url.clone();
             }
             if args.turn_user.is_none() {
-                args.turn_user = parsed.turn_user;
+                args.turn_user = parsed.turn_user.clone();
             }
             if args.turn_pass.is_none() {
-                args.turn_pass = parsed.turn_pass;
+                args.turn_pass = parsed.turn_pass.clone();
+            }
+            if invite::is_tailscale_invite(&parsed) {
+                info!(
+                    "Tailscale join link — routing via {} (same tailnet as host)",
+                    parsed.signaling
+                );
             }
         }
 

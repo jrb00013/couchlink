@@ -50,6 +50,17 @@ fi
 pass "COUCHLINK_SKIP_MESH=1 falls through"
 unset COUCHLINK_SKIP_MESH
 
+# --- Tailscale override (paste-link path) ---
+export COUCHLINK_MESH=tailscale
+export COUCHLINK_MESH_IP=100.64.0.1
+unset COUCHLINK_ICE_IPS || true
+unset COUCHLINK_TURN_URL || true
+couchlink_try_mesh_online 8443 "$PLATFORM" || fail "tailscale override"
+[[ "${COUCHLINK_INVITE_SIGNALING}" == "ws://100.64.0.1:8443/ws" ]] || fail "TS INVITE"
+[[ "${COUCHLINK_MESH}" == "tailscale" ]] || fail "MESH kind"
+pass "Tailscale override sets 100.x invite"
+unset COUCHLINK_MESH COUCHLINK_MESH_IP
+
 # --- setup-wireguard idempotent ---
 if command -v wg >/dev/null 2>&1; then
   "$ROOT/scripts/setup-wireguard.sh" >/dev/null
@@ -73,6 +84,7 @@ bash -n "$ROOT/scripts/lib-mesh.sh"
 bash -n "$ROOT/scripts/start-host.sh"
 bash -n "$ROOT/scripts/setup-wireguard.sh"
 bash -n "$ROOT/scripts/setup-tailscale.sh"
+bash -n "$ROOT/install.sh"
 pass "bash -n clean"
 
 echo "ALL MESH SMOKE CHECKS PASSED (platform=$PLATFORM)"

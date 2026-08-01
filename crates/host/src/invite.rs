@@ -14,6 +14,7 @@ pub fn player_invite_url(
     pin: &str,
     signaling_ws: &str,
     turn: Option<TurnInfo>,
+    mesh: Option<&str>,
 ) -> String {
     let mut base = public_base.trim_end_matches('/').to_string();
     if base.is_empty() {
@@ -28,6 +29,9 @@ pub fn player_invite_url(
             .append_pair("p", pin)
             .append_pair("auto", "1")
             .append_pair("ws", signaling_ws);
+        if let Some(m) = mesh.filter(|s| !s.is_empty()) {
+            q.append_pair("mesh", m);
+        }
         if let Some(t) = turn {
             q.append_pair("turn", t.url)
                 .append_pair("turnu", t.user)
@@ -35,4 +39,24 @@ pub fn player_invite_url(
         }
     }
     u.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_includes_mesh_tailscale() {
+        let u = player_invite_url(
+            "http://100.64.0.1:8443",
+            "abc",
+            "123456",
+            "ws://100.64.0.1:8443/ws",
+            None,
+            Some("tailscale"),
+        );
+        assert!(u.contains("mesh=tailscale"));
+        assert!(u.contains("s=abc"));
+        assert!(!u.contains("turn="));
+    }
 }

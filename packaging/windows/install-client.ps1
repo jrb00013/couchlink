@@ -52,3 +52,34 @@ foreach ($LinkDir in @(
 
 Write-Host "Installed to $InstallDir"
 Write-Host "Double-click 'Couchlink Player' on Desktop or Start Menu."
+
+# Tailscale paste-link (http://100.x… / mesh=tailscale): ensure the friend can route.
+$NeedsTs = $false
+if ($JoinUrl -match 'mesh=tailscale' -or $JoinUrl -match '://100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.') {
+    $NeedsTs = $true
+}
+if ($NeedsTs) {
+    Write-Host ""
+    Write-Host "This join link uses Tailscale (same tailnet as the host)."
+    $tsCmd = Get-Command tailscale -ErrorAction SilentlyContinue
+    if (-not $tsCmd) {
+        $cand = @(
+            "$env:ProgramFiles\Tailscale\tailscale.exe",
+            "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe",
+            "$env:LOCALAPPDATA\Tailscale\tailscale.exe"
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($cand) { $tsCmd = Get-Item $cand }
+    }
+    if (-not $tsCmd) {
+        Write-Host "Tailscale not found — opening download page. Install, sign in (same account / shared node), then open Couchlink Player."
+        Start-Process "https://tailscale.com/download/windows"
+    } else {
+        $ip = & $tsCmd.Source ip -4 2>$null
+        if (-not $ip) {
+            Write-Host "Tailscale installed but not signed in — open the Tailscale app, then Couchlink Player."
+            Start-Process "tailscale://" -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "Tailscale ready ($ip). Open Couchlink Player and paste/confirm the join link."
+        }
+    }
+}

@@ -176,16 +176,26 @@ if [[ "$ROLE" == "host" ]]; then
     unset COUCHLINK_TURN_URL || true
     echo "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
   else
-    # PRIME: ensure WireGuard is up when conf exists, then prefer Tailscale / WG.
-    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" && "${COUCHLINK_AUTO_WIREGUARD:-1}" != "0" ]]; then
-      if [[ -f "$ROOT/infra/wireguard/wg0-host.conf" ]] || [[ "${COUCHLINK_ENSURE_WIREGUARD:-0}" == "1" ]]; then
-        echo "==> ensuring WireGuard tunnel is up (PRIME mesh)"
-        bash "$ROOT/scripts/enable-wireguard.sh" || \
-          echo "==> WireGuard bring-up failed — will try Tailscale / public fallback"
+    # PRIME: Tailscale first (paste-link). Only auto-bring WireGuard if Tailscale is down.
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" ]]; then
+      if couchlink_tailscale_ip >/dev/null 2>&1; then
+        :
+      elif [[ "${COUCHLINK_AUTO_WIREGUARD:-1}" != "0" ]]; then
+        if [[ -f "$ROOT/infra/wireguard/wg0-host.conf" ]] || [[ "${COUCHLINK_ENSURE_WIREGUARD:-0}" == "1" ]]; then
+          echo "==> Tailscale not up — ensuring WireGuard tunnel (mesh fallback)"
+          bash "$ROOT/scripts/enable-wireguard.sh" || \
+            echo "==> WireGuard bring-up failed — will try public fallback"
+        fi
       fi
     fi
     if couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
       COUCHLINK_USING_MESH=1
+      # WSL: friends hit Windows mesh IP (Tailscale 100.x / WG) — need portproxy → WSL.
+      if [[ "$PLATFORM" == "wsl" && "${COUCHLINK_SKIP_UPNP_PREP:-}" != "1" ]]; then
+        echo "==> WSL mesh: Windows firewall + portproxy for ${COUCHLINK_MESH_IP:-mesh}"
+        bash "$ROOT/scripts/enable-upnp.sh" --skip-map >/dev/null 2>&1 \
+          || echo "==> portproxy prep skipped/failed — if join fails, run ./scripts/enable-upnp.sh --skip-map"
+      fi
     else
       PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
       if [[ -z "$PUBLIC_IP" ]]; then
@@ -212,20 +222,19 @@ if [[ "$ROLE" == "host" ]]; then
     fi
   fi
 elif [[ "$ROLE" == "client" ]]; then
-  # Client reachability: remote joins need the host's TURN (UDP+TCP expanded in-process).
-  # WSL auto-discovers the Windows LAN IP for ICE host candidates inside couchlink-client.
-  # If COUCHLINK_JOIN_URL is unset, couchlink-client prompts in the terminal (or a GUI dialog).
+  # Client: ensure Tailscale so pasted http://100.x links route; then prompt for URL.
   if [[ "$MODE" == "online" ]]; then
+    couchlink_ensure_client_tailscale "$ROOT" || true
     if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
       echo "==> online client — join URL set (TURN from invite)"
     elif [[ -n "${COUCHLINK_TURN_URL:-}" && -n "${COUCHLINK_TURN_USER:-}" && -n "${COUCHLINK_TURN_PASS:-}" ]]; then
       echo "==> online client — TURN credentials from env"
     else
-      echo "==> online client — will prompt for the host join URL (needed for TURN/NAT)"
-      echo "    on Tailscale/WireGuard with the host: paste the mesh join URL (often no TURN)"
+      echo "==> online client — paste the host join URL when prompted"
+      echo "    Tailscale: http://100.x…  ·  else use the full URL host printed (may include turn=)"
     fi
   else
-    echo "==> local client — will prompt for join URL if credentials are missing"
+    echo "==> local client — paste join URL if credentials are missing"
   fi
 fi
 

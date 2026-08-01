@@ -8,22 +8,33 @@ source "$ROOT/scripts/lib-platform.sh"
 
 RUN_AFTER=0
 RUN_MODE="local"
+# Default = friend/player. Gaming PC uses --host.
+INSTALL_ROLE="${COUCHLINK_INSTALL_ROLE:-client}"
 INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
 for arg in "$@"; do
   case "$arg" in
     --run) RUN_AFTER=1 ;;
     --online) RUN_MODE="online"; RUN_AFTER=1 ;;
-    --local) RUN_MODE="local" ;;
+    --local) RUN_MODE="local"; RUN_AFTER=1 ;;
+    --host) INSTALL_ROLE="host" ;;
+    --client|--player) INSTALL_ROLE="client" ;; # legacy aliases; default is already client
     --mesh) INSTALL_MESH=1 ;;
     --no-mesh) INSTALL_MESH=0 ;;
     -h|--help)
       cat <<EOF
-usage: ./install.sh [--run|--online|--local] [--mesh|--no-mesh]
+usage: ./install.sh [--host] [--run|--online|--local] [--mesh|--no-mesh]
 
-  --online / --run --online  after install, bring up WireGuard and run host --online
-  --run / --local            after install, run host --local
-  --mesh                     install WireGuard/Tailscale tooling (default on)
-  --no-mesh                  skip mesh tooling
+  Default (friend / player):
+    ./install.sh              build player + Tailscale (paste host join URL)
+    ./install.sh --run        then start client --local
+    ./install.sh --online     then start client --online (paste http://100.x… link)
+
+  Host (gaming PC):
+    ./install.sh --host                 build host stack + mesh tooling
+    ./install.sh --host --online        then host --online (Tailscale paste-link)
+    ./install.sh --host --local|--run   then host --local
+
+  --mesh / --no-mesh   Tailscale (and WireGuard on --host); default on
 EOF
       exit 0
       ;;
@@ -31,9 +42,11 @@ EOF
 done
 # Keep env override authoritative when set explicitly to 0/1 before invoke.
 COUCHLINK_INSTALL_MESH="$INSTALL_MESH"
-export COUCHLINK_INSTALL_MESH
+COUCHLINK_INSTALL_ROLE="$INSTALL_ROLE"
+export COUCHLINK_INSTALL_MESH COUCHLINK_INSTALL_ROLE
 
-echo "==> couchlink install"
+echo "==> couchlink install ($INSTALL_ROLE)"
+
 
 # When invoked via `sudo ./install.sh`, keep the invoking user's home/PATH —
 # root's login PATH does not include ~/.cargo/bin, and we must not install
@@ -131,42 +144,55 @@ case "$PLATFORM" in
         echo "warning: apt-get update reported errors (often a dead PPA) — continuing with existing indexes"
       fi
       echo "==> apt: installing build + runtime deps…"
-      if ! as_root apt-get install -y -qq \
-        build-essential pkg-config curl ca-certificates \
-        libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev \
-        libhidapi-hidraw-dev libudev-dev udev coturn miniupnpc; then
+      APT_PKGS=(
+        build-essential pkg-config curl ca-certificates
+        libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev
+        libhidapi-hidraw-dev libudev-dev udev
+      )
+      if [[ "$INSTALL_ROLE" == "host" ]]; then
+        APT_PKGS+=(coturn miniupnpc)
+      fi
+      if ! as_root apt-get install -y -qq "${APT_PKGS[@]}"; then
         echo "warning: some apt packages failed to install — build may still succeed"
       fi
     fi
-    echo "==> configuring /dev/uinput access…"
-    as_root tee /etc/udev/rules.d/99-couchlink-uinput.rules >/dev/null <<'RULE'
+    if [[ "$INSTALL_ROLE" == "host" ]]; then
+      echo "==> configuring /dev/uinput access…"
+      as_root tee /etc/udev/rules.d/99-couchlink-uinput.rules >/dev/null <<'RULE'
 KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
 RULE
-    as_root udevadm control --reload-rules || true
-    as_root modprobe uinput || true
-    if getent group input >/dev/null; then
-      as_root usermod -aG input "$REAL_USER" || true
-      echo "Added $REAL_USER to group 'input' — re-login may be required for /dev/uinput"
+      as_root udevadm control --reload-rules || true
+      as_root modprobe uinput || true
+      if getent group input >/dev/null; then
+        as_root usermod -aG input "$REAL_USER" || true
+        echo "Added $REAL_USER to group 'input' — re-login may be required for /dev/uinput"
+      fi
+      if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        chmod 666 /dev/uinput 2>/dev/null || true
+      fi
+      [[ "$PLATFORM" == "wsl" ]] && echo "WSL: host role needs uinput passed through (usbipd-win / wsl2 kernel with CONFIG_INPUT_UINPUT)"
     fi
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-      chmod 666 /dev/uinput 2>/dev/null || true
-    fi
-    [[ "$PLATFORM" == "wsl" ]] && echo "WSL: host role needs uinput passed through (usbipd-win / wsl2 kernel with CONFIG_INPUT_UINPUT)"
     ;;
   macos)
-    echo "==> macOS deps via Homebrew (client + signaling + video-only host)"
+    echo "==> macOS deps via Homebrew"
     BREW="$(couchlink_brew_bin || true)"
     if [[ -z "$BREW" ]]; then
       echo "Homebrew not found — install from https://brew.sh then re-run ./install.sh"
       echo "Continuing without brew formulae (cargo build may still succeed)…"
     else
       echo "==> brew: $BREW"
-      # pkg-config for native crates; coturn/miniupnpc for --online; cmake for some deps.
-      run_as_user "$BREW" install pkg-config cmake coturn miniupnpc || \
-        echo "warning: brew install had errors — continuing"
+      if [[ "$INSTALL_ROLE" == "host" ]]; then
+        run_as_user "$BREW" install pkg-config cmake coturn miniupnpc || \
+          echo "warning: brew install had errors — continuing"
+      else
+        run_as_user "$BREW" install pkg-config cmake || \
+          echo "warning: brew install had errors — continuing"
+      fi
       TOOL_PATH="$(couchlink_tool_path "$REAL_HOME")"
     fi
-    echo "note: virtual DualSense injection is Linux/WSL-only — macOS host streams video only; use './scripts/run.sh client' to play."
+    if [[ "$INSTALL_ROLE" == "host" ]]; then
+      echo "note: virtual DualSense injection is Linux/WSL-only — macOS host streams video only."
+    fi
     ;;
   *)
     echo "warning: unrecognized platform '$PLATFORM' — attempting cargo build anyway"
@@ -177,28 +203,43 @@ esac
 # shellcheck disable=SC1091
 source "$ROOT/scripts/ensure-linux-link-libs.sh"
 
-echo "==> cargo build --release (this can take several minutes on first run)…"
-run_as_user env "PATH=$TOOL_PATH${PATH:+:$PATH}" bash -c "
-  set -euo pipefail
-  cd \"$ROOT\"
-  # shellcheck disable=SC1091
-  source \"$ROOT/scripts/ensure-linux-link-libs.sh\"
-  cargo build --release --workspace
-"
+if [[ "$INSTALL_ROLE" == "client" ]]; then
+  echo "==> cargo build --release -p couchlink-client …"
+  run_as_user env "PATH=$TOOL_PATH${PATH:+:$PATH}" bash -c "
+    set -euo pipefail
+    cd \"$ROOT\"
+    # shellcheck disable=SC1091
+    source \"$ROOT/scripts/ensure-linux-link-libs.sh\"
+    cargo build --release -p couchlink-client
+  "
+else
+  echo "==> cargo build --release (workspace — this can take several minutes on first run)…"
+  run_as_user env "PATH=$TOOL_PATH${PATH:+:$PATH}" bash -c "
+    set -euo pipefail
+    cd \"$ROOT\"
+    # shellcheck disable=SC1091
+    source \"$ROOT/scripts/ensure-linux-link-libs.sh\"
+    cargo build --release --workspace
+  "
+fi
 echo "==> cargo build done"
 
 mkdir -p "$REAL_HOME/.local/bin"
-couchlink_install_bin target/release/couchlink-signaling "$REAL_HOME/.local/bin/couchlink-signaling"
-couchlink_install_bin target/release/couchlink-host "$REAL_HOME/.local/bin/couchlink-host"
+if [[ "$INSTALL_ROLE" == "host" ]]; then
+  couchlink_install_bin target/release/couchlink-signaling "$REAL_HOME/.local/bin/couchlink-signaling"
+  couchlink_install_bin target/release/couchlink-host "$REAL_HOME/.local/bin/couchlink-host"
+fi
 couchlink_install_bin target/release/couchlink-client "$REAL_HOME/.local/bin/couchlink-client"
 if [[ "${EUID:-$(id -u)}" -eq 0 && "$REAL_USER" != "root" ]]; then
-  chown "$REAL_USER" \
-    "$REAL_HOME/.local/bin/couchlink-signaling" \
-    "$REAL_HOME/.local/bin/couchlink-host" \
-    "$REAL_HOME/.local/bin/couchlink-client" 2>/dev/null || true
+  chown "$REAL_USER" "$REAL_HOME/.local/bin/couchlink-client" 2>/dev/null || true
+  if [[ "$INSTALL_ROLE" == "host" ]]; then
+    chown "$REAL_USER" \
+      "$REAL_HOME/.local/bin/couchlink-signaling" \
+      "$REAL_HOME/.local/bin/couchlink-host" 2>/dev/null || true
+  fi
 fi
 
-if [[ "$PLATFORM" == "wsl" ]]; then
+if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "wsl" ]]; then
   echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
   if command -v powershell.exe >/dev/null 2>&1; then
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
@@ -208,11 +249,15 @@ if [[ "$PLATFORM" == "wsl" ]]; then
   fi
 fi
 
-if run_as_user bash -lc 'command -v npm >/dev/null'; then
-  echo "==> building player UI"
-  run_as_user bash -c "cd '$ROOT/web' && npm install && npm run build"
+if [[ "$INSTALL_ROLE" == "host" ]]; then
+  if run_as_user bash -lc 'command -v npm >/dev/null'; then
+    echo "==> building player UI"
+    run_as_user bash -c "cd '$ROOT/web' && npm install && npm run build"
+  else
+    echo "npm not found — skipping player UI (browser client needs: cd web && npm install && npm run build)"
+  fi
 else
-  echo "npm not found — skipping player UI (browser client needs: cd web && npm install && npm run build)"
+  echo "==> skipping web UI build (client uses native Couchlink Player)"
 fi
 
 # Optional helpers only — not required for host/client. Skip unless opted in;
@@ -231,62 +276,66 @@ if [[ ! -f .env.couchlink ]]; then
   fi
 fi
 
-# PRIME mesh tooling (WireGuard conf + Windows/Linux bring-up helpers + Tailscale hints).
+# PRIME mesh: Tailscale is the paste-link path for friends. Hosts also get WireGuard.
 # Default ON — disable with --no-mesh or COUCHLINK_INSTALL_MESH=0.
 if [[ "${COUCHLINK_INSTALL_MESH:-1}" == "1" ]]; then
-  echo "==> mesh tooling (WireGuard + Tailscale)"
-  case "$PLATFORM" in
-    linux|wsl)
-      if command -v apt-get >/dev/null; then
-        as_root apt-get install -y -qq wireguard wireguard-tools 2>/dev/null \
-          || echo "warning: apt wireguard install failed — install wireguard-tools manually"
-      fi
-      ;;
-    macos)
-      BREW="$(couchlink_brew_bin || true)"
-      if [[ -n "${BREW:-}" ]]; then
-        run_as_user "$BREW" install wireguard-tools \
-          || echo "warning: brew wireguard-tools failed"
-        run_as_user "$BREW" install --cask tailscale \
-          || echo "warning: brew cask tailscale failed (install from https://tailscale.com/download)"
-      fi
-      ;;
-  esac
-  if [[ -x "$ROOT/scripts/setup-wireguard.sh" ]]; then
-    run_as_user bash "$ROOT/scripts/setup-wireguard.sh" \
-      || echo "warning: setup-wireguard.sh failed — see docs/WIREGUARD.md"
-  fi
-  if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
-    run_as_user bash "$ROOT/scripts/setup-tailscale.sh" \
-      || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
-  fi
-  if [[ -x "$ROOT/scripts/enable-wireguard.sh" ]]; then
-    echo "==> bringing WireGuard tunnel up (UAC once on Windows/WSL)"
-    bash "$ROOT/scripts/enable-wireguard.sh" \
-      || echo "warning: enable-wireguard failed — import conf manually (docs/MESH.md)"
+  if [[ "$INSTALL_ROLE" == "client" ]]; then
+    echo "==> client mesh: Tailscale (same tailnet as host → paste join link)"
+    if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/setup-tailscale.sh" --ensure \
+        || echo "warning: Tailscale not ready — install/sign-in, same account as host (docs/MESH.md)"
+    fi
+  else
+    echo "==> mesh tooling (Tailscale + WireGuard)"
+    case "$PLATFORM" in
+      linux|wsl)
+        if command -v apt-get >/dev/null; then
+          as_root apt-get install -y -qq wireguard wireguard-tools 2>/dev/null \
+            || echo "warning: apt wireguard install failed — install wireguard-tools manually"
+        fi
+        ;;
+      macos)
+        BREW="$(couchlink_brew_bin || true)"
+        if [[ -n "${BREW:-}" ]]; then
+          run_as_user "$BREW" install wireguard-tools \
+            || echo "warning: brew wireguard-tools failed"
+          run_as_user "$BREW" install --cask tailscale \
+            || echo "warning: brew cask tailscale failed (install from https://tailscale.com/download)"
+        fi
+        ;;
+    esac
+    if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/setup-tailscale.sh" --ensure \
+        || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
+    fi
+    if [[ -x "$ROOT/scripts/setup-wireguard.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/setup-wireguard.sh" \
+        || echo "warning: setup-wireguard.sh failed — see docs/WIREGUARD.md"
+    fi
+    if [[ -x "$ROOT/scripts/enable-wireguard.sh" ]]; then
+      echo "==> bringing WireGuard tunnel up (fallback if Tailscale is down; UAC once on Windows/WSL)"
+      bash "$ROOT/scripts/enable-wireguard.sh" \
+        || echo "warning: enable-wireguard failed — import conf manually (docs/MESH.md)"
+    fi
   fi
 fi
 
 echo ""
-echo "OK — install finished"
+echo "OK — install finished ($INSTALL_ROLE)"
 echo "  binaries: $REAL_HOME/.local/bin"
-case "$PLATFORM" in
-  macos)
-    echo "  next:    ./scripts/run.sh client"
-    echo "           ./scripts/run.sh host --local   (video-only on macOS)"
-    echo "           ./install.sh --online           (mesh + host --online)"
-    ;;
-  *)
-    echo "  next:    ./scripts/run.sh host --online  # PRIME: Tailscale/WireGuard if up"
-    echo "           ./install.sh --online           # install + WG up + host --online"
-    echo "           ./scripts/run.sh client"
-    ;;
-esac
+if [[ "$INSTALL_ROLE" == "client" ]]; then
+  echo "  next:    ./install.sh --online     # or: ./scripts/run.sh client --online"
+  echo "           → paste the host join URL (Tailscale http://100.x… or full link)"
+  echo "  need:    Tailscale on the SAME tailnet as the host"
+else
+  echo "  next:    ./install.sh --host --online"
+  echo "  friend:  ./install.sh && ./install.sh --online   # paste your join URL"
+fi
 echo ""
 
 if [[ "$RUN_AFTER" == "1" ]]; then
-  echo "==> starting ./scripts/run.sh host --${RUN_MODE}"
-  exec bash "$ROOT/scripts/run.sh" host "--${RUN_MODE}"
+  echo "==> starting ./scripts/run.sh ${INSTALL_ROLE} --${RUN_MODE}"
+  exec bash "$ROOT/scripts/run.sh" "$INSTALL_ROLE" "--${RUN_MODE}"
 fi
 
 # Auto-source .env.couchlink only when explicitly requested — the interactive

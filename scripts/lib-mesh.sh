@@ -178,15 +178,39 @@ couchlink_apply_mesh_invite() {
 
   case "$kind" in
     tailscale)
-      echo "    friend must be on your Tailscale tailnet (same account / shared node)"
-      echo "    native client preferred; browser WebCodecs wants https"
+      echo "    Friend: ./install.sh && ./install.sh --online  → paste this join URL"
+      echo "            (Tailscale on same tailnet as host)"
+      echo "    Host can share the machine in Tailscale admin if friend uses another account"
       ;;
     wireguard)
       echo "    friend imports infra/wireguard/wg0-player.conf then brings WireGuard up"
-      echo "    native client preferred; browser WebCodecs wants https"
+      echo "    (prefer Tailscale paste-link: ./install.sh --host + friend ./install.sh)"
       ;;
   esac
   return 0
+}
+
+# Friend/client: make sure Tailscale is up so a pasted http://100.x join URL routes.
+# Returns 0 if ready, 1 if not (still safe to start client — Cloudflare/LAN links work).
+couchlink_ensure_client_tailscale() {
+  [[ "${COUCHLINK_SKIP_MESH:-0}" == "1" ]] && return 0
+  local root="${1:-}"
+  local ip=""
+  if ip="$(couchlink_tailscale_ip 2>/dev/null)"; then
+    echo "==> Tailscale ready ($ip) — paste the host join URL when prompted"
+    return 0
+  fi
+  echo "==> Tailscale not up — paste-link over 100.x needs the same tailnet as the host"
+  if [[ -n "$root" && -x "$root/scripts/setup-tailscale.sh" ]]; then
+    bash "$root/scripts/setup-tailscale.sh" --ensure || true
+    if ip="$(couchlink_tailscale_ip 2>/dev/null)"; then
+      echo "==> Tailscale ready ($ip) — paste the host join URL when prompted"
+      return 0
+    fi
+  fi
+  echo "    Install/sign in: ./scripts/setup-tailscale.sh --ensure"
+  echo "    Public Cloudflare/LAN join links still work without Tailscale"
+  return 1
 }
 
 # Prefer Tailscale, then WireGuard. Skip with COUCHLINK_SKIP_MESH=1.
