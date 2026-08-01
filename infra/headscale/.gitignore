@@ -1,0 +1,5 @@
+# Runtime / secrets — never commit
+*
+!.gitignore
+!config-example.yaml
+!README.md

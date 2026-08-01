@@ -59,6 +59,19 @@ async fn main() -> Result<()> {
     let mesh = std::env::var("COUCHLINK_MESH")
         .ok()
         .filter(|s| !s.trim().is_empty());
+    let hs_url = std::env::var("COUCHLINK_HS_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let ts_key = std::env::var("COUCHLINK_TS_AUTHKEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let headscale = match (&hs_url, &ts_key) {
+        (Some(server_url), Some(auth_key)) => Some(invite::HeadscaleInvite {
+            server_url,
+            auth_key,
+        }),
+        _ => None,
+    };
     let join = invite::player_invite_url(
         &public_http,
         &args.session_id,
@@ -66,9 +79,14 @@ async fn main() -> Result<()> {
         invite_ws,
         turn,
         mesh.as_deref(),
+        headscale,
     );
     info!("friend join URL: {join}");
-    if mesh.as_deref() == Some("tailscale") {
+    if mesh.as_deref() == Some("headscale") || (hs_url.is_some() && ts_key.is_some()) {
+        info!(
+            "Headscale paste-link — friend: ./install.sh --online (no Tailscale Inc account)"
+        );
+    } else if mesh.as_deref() == Some("tailscale") {
         info!(
             "Tailscale paste-link — friend: ./install.sh --online (paste this URL)"
         );

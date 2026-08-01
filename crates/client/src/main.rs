@@ -127,7 +127,12 @@ impl Args {
             if args.turn_pass.is_none() {
                 args.turn_pass = parsed.turn_pass.clone();
             }
-            if invite::is_tailscale_invite(&parsed) {
+            if invite::is_headscale_invite(&parsed) {
+                info!(
+                    "Headscale join link — use ./scripts/join-headscale.sh (or install.sh --online) then route via {}",
+                    parsed.signaling
+                );
+            } else if invite::is_tailscale_invite(&parsed) {
                 info!(
                     "Tailscale join link — routing via {} (same tailnet as host)",
                     parsed.signaling
@@ -220,7 +225,12 @@ fn init_tracing() {
 
 fn resolve_join_string(raw: &str, cli: &Args) -> Result<ResolvedArgs> {
     let parsed = invite::parse_join_input(raw)?;
-    if invite::is_tailscale_invite(&parsed) {
+    if invite::is_headscale_invite(&parsed) {
+        info!(
+            "Headscale join link — use ./scripts/join-headscale.sh (or install.sh --online) then route via {}",
+            parsed.signaling
+        );
+    } else if invite::is_tailscale_invite(&parsed) {
         info!(
             "Tailscale join link — routing via {} (same tailnet as host)",
             parsed.signaling

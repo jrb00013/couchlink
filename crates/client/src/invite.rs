@@ -11,8 +11,12 @@ pub struct ParsedInvite {
     pub turn_url: Option<String>,
     pub turn_user: Option<String>,
     pub turn_pass: Option<String>,
-    /// Optional mesh hint from host (`tailscale` / `wireguard`).
+    /// Optional mesh hint from host (`headscale` / `tailscale` / `wireguard`).
     pub mesh: Option<String>,
+    /// Headscale control-plane URL (`hs=`).
+    pub hs_url: Option<String>,
+    /// Headscale / Tailscale preauth key (`tskey=`).
+    pub ts_authkey: Option<String>,
 }
 
 pub fn parse_join_url(raw: &str) -> Result<ParsedInvite> {
@@ -33,6 +37,8 @@ pub fn parse_join_url(raw: &str) -> Result<ParsedInvite> {
     let turn_user = query(&url, &["turnu"]);
     let turn_pass = query(&url, &["turnp"]);
     let mesh = query(&url, &["mesh"]);
+    let hs_url = query(&url, &["hs"]);
+    let ts_authkey = query(&url, &["tskey"]);
 
     Ok(ParsedInvite {
         signaling,
@@ -42,6 +48,8 @@ pub fn parse_join_url(raw: &str) -> Result<ParsedInvite> {
         turn_user,
         turn_pass,
         mesh,
+        hs_url,
+        ts_authkey,
     })
 }
 
@@ -72,11 +80,28 @@ pub fn parse_join_input(raw: &str) -> Result<ParsedInvite> {
         turn_user: None,
         turn_pass: None,
         mesh: None,
+        hs_url: None,
+        ts_authkey: None,
     })
+}
+
+/// True when invite carries Headscale control URL + preauth key (or mesh=headscale).
+pub fn is_headscale_invite(parsed: &ParsedInvite) -> bool {
+    if parsed.mesh.as_deref() == Some("headscale") {
+        return true;
+    }
+    matches!(
+        (&parsed.hs_url, &parsed.ts_authkey),
+        (Some(h), Some(k)) if !h.is_empty() && !k.is_empty()
+    )
 }
 
 /// True when the invite targets a Tailscale CGNAT address (100.64.0.0/10).
 pub fn is_tailscale_invite(parsed: &ParsedInvite) -> bool {
+    if is_headscale_invite(parsed) {
+        // Headscale also uses 100.x — prefer the headscale message path.
+        return false;
+    }
     if parsed.mesh.as_deref() == Some("tailscale") {
         return true;
     }
@@ -130,6 +155,7 @@ mod tests {
         assert_eq!(p.signaling, "ws://203.0.113.10:8443/ws");
         assert_eq!(p.turn_url.as_deref(), Some("turn:203.0.113.10:3478"));
         assert!(p.mesh.is_none());
+        assert!(p.hs_url.is_none());
     }
 
     #[test]
@@ -138,6 +164,18 @@ mod tests {
         let p = parse_join_url(url).unwrap();
         assert_eq!(p.mesh.as_deref(), Some("tailscale"));
         assert!(is_tailscale_invite(&p));
+        assert!(!is_headscale_invite(&p));
+    }
+
+    #[test]
+    fn parses_headscale_mesh_invite() {
+        let url = "http://100.64.1.3:8443/?s=a&p=1&auto=1&ws=ws://100.64.1.3:8443/ws&mesh=headscale&hs=https%3A%2F%2Fhs.example.com&tskey=tskey-auth-xyz";
+        let p = parse_join_url(url).unwrap();
+        assert_eq!(p.mesh.as_deref(), Some("headscale"));
+        assert_eq!(p.hs_url.as_deref(), Some("https://hs.example.com"));
+        assert_eq!(p.ts_authkey.as_deref(), Some("tskey-auth-xyz"));
+        assert!(is_headscale_invite(&p));
+        assert!(!is_tailscale_invite(&p));
     }
 
     #[test]

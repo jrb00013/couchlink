@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# One command to run couchlink: ./scripts/run.sh [host|client] [--local|--online]
+# One command to run couchlink: ./scripts/run.sh [host|client] [--local|--online] [--unblock-firewall]
 # Auto-detects platform (Linux / WSL / macOS), starts signaling + TURN + host
 # (or just the client) as background child processes of this one script, and
 # tears them all down together on Ctrl-C. No separate terminals needed.
 #
 # Reachability:
 #   host  --local   (default) same Wi‑Fi / LAN — join URL uses LAN IP, no UPnP/TURN
-#   host  --online  internet — PRIME: Tailscale / WireGuard mesh if up; else public IP
-#                   + TURN + UPnP; then Cloudflare HTTPS + IPv6 / bore fallback
+#   host  --online  internet — PRIME: Headscale / Tailscale / WireGuard mesh if up;
+#                   else public IP + TURN + UPnP; then Cloudflare HTTPS + IPv6 / bore fallback
 #   client --online requires host TURN (join URL or COUCHLINK_TURN_*) unless on mesh;
-#                   WSL auto ICE IPs
+#                   WSL auto ICE IPs; Headscale invites auto-join via hs=+tskey=
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -24,19 +24,22 @@ source "$ROOT/scripts/lib-mesh.sh"
 
 usage() {
   cat <<EOF
-usage: $0 [host|client] [--local|--online]
+usage: $0 [host|client] [--local|--online] [--unblock-firewall]
 
   host    start signaling + (optional TURN) + couchlink-host
   client  start couchlink-client (friend/player)
 
   --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
-  --online  Internet. Host prefers Tailscale / WireGuard (PRIME mesh) when up;
-            else public IP + TURN + UPnP; on WSL also firewall + WSL portproxy;
-            then Cloudflare HTTPS + IPv6 / bore if the router blocks UPnP.
-            Client: prompts for the host join URL if unset (TURN for NAT/WSL).
+  --online  Internet. Host prefers Headscale / Tailscale / WireGuard (PRIME mesh)
+            when up; else public IP + TURN + UPnP; on WSL also firewall + WSL
+            portproxy; then Cloudflare HTTPS + IPv6 / bore if the router blocks UPnP.
+            Client: prompts for the host join URL if unset; auto-joins Headscale
+            when the invite has hs= + tskey=.
+  --unblock-firewall
+            Client: open local OS firewall for mesh/TURN (Windows UAC once).
 
-  Mesh setup: ./scripts/setup-tailscale.sh · ./scripts/setup-wireguard.sh
-  Docs:       docs/MESH.md · docs/WIREGUARD.md
+  Mesh: ./scripts/enable-headscale.sh · ./scripts/setup-tailscale.sh · ./scripts/setup-wireguard.sh
+  Docs: docs/HEADSCALE.md · docs/MESH.md · docs/WIREGUARD.md
 
 Platform is auto-detected (linux / wsl / macos).
 EOF
@@ -44,11 +47,13 @@ EOF
 
 ROLE="host"
 MODE="local"
+UNBLOCK_FIREWALL=0
 for arg in "$@"; do
   case "$arg" in
     host|client) ROLE="$arg" ;;
     --local) MODE="local" ;;
     --online) MODE="online" ;;
+    --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "unknown argument: $arg" >&2
@@ -176,15 +181,33 @@ if [[ "$ROLE" == "host" ]]; then
     unset COUCHLINK_TURN_URL || true
     echo "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
   else
-    # PRIME: Tailscale first (paste-link). Only auto-bring WireGuard if Tailscale is down.
+    # PRIME: Headscale first (self-hosted; paste-link, no Tailscale Inc for friends).
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" && "${COUCHLINK_SKIP_HEADSCALE:-0}" != "1" ]]; then
+      if [[ -z "${COUCHLINK_MESH_IP:-}" || "${COUCHLINK_MESH:-}" != "headscale" ]]; then
+        echo "==> bringing up Headscale mesh (PRIME)…"
+        if bash "$ROOT/scripts/enable-headscale.sh"; then
+          # shellcheck disable=SC1091
+          source "$ROOT/infra/headscale/data/mesh.env"
+          # Keep Headscale's cloudflared tunnel alive with this run.
+          if [[ -n "${COUCHLINK_TUNNEL_PIDS[*]:-}" ]]; then
+            :
+          fi
+        else
+          echo "==> Headscale bring-up skipped/failed — trying Tailscale / WireGuard / public"
+        fi
+      fi
+    fi
+    # Tailscale cloud (if already up) or WireGuard fallback when Headscale didn't apply.
     if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" ]]; then
-      if couchlink_tailscale_ip >/dev/null 2>&1; then
-        :
-      elif [[ "${COUCHLINK_AUTO_WIREGUARD:-1}" != "0" ]]; then
-        if [[ -f "$ROOT/infra/wireguard/wg0-host.conf" ]] || [[ "${COUCHLINK_ENSURE_WIREGUARD:-0}" == "1" ]]; then
-          echo "==> Tailscale not up — ensuring WireGuard tunnel (mesh fallback)"
-          bash "$ROOT/scripts/enable-wireguard.sh" || \
-            echo "==> WireGuard bring-up failed — will try public fallback"
+      if [[ -z "${COUCHLINK_MESH_IP:-}" ]]; then
+        if couchlink_tailscale_ip >/dev/null 2>&1; then
+          :
+        elif [[ "${COUCHLINK_AUTO_WIREGUARD:-1}" != "0" ]]; then
+          if [[ -f "$ROOT/infra/wireguard/wg0-host.conf" ]] || [[ "${COUCHLINK_ENSURE_WIREGUARD:-0}" == "1" ]]; then
+            echo "==> no Headscale/Tailscale mesh — ensuring WireGuard tunnel"
+            bash "$ROOT/scripts/enable-wireguard.sh" || \
+              echo "==> WireGuard bring-up failed — will try public fallback"
+          fi
         fi
       fi
     fi
@@ -203,7 +226,7 @@ if [[ "$ROLE" == "host" ]]; then
       fi
       if [[ -z "$PUBLIC_IP" ]]; then
         echo "online mode needs a public IP (curl ifconfig.me failed) or an up mesh." >&2
-        echo "Set COUCHLINK_PUBLIC_IP, or: ./scripts/setup-tailscale.sh / ./scripts/setup-wireguard.sh" >&2
+        echo "Set COUCHLINK_PUBLIC_IP, or: ./scripts/enable-headscale.sh / setup-tailscale / setup-wireguard" >&2
         exit 1
       fi
       export COUCHLINK_PUBLIC_IP="$PUBLIC_IP"
@@ -222,10 +245,29 @@ if [[ "$ROLE" == "host" ]]; then
     fi
   fi
 elif [[ "$ROLE" == "client" ]]; then
-  # Tailscale is installed at ./install.sh time; just start and paste the URL.
+  if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
+    bash "$ROOT/scripts/unblock-firewall.sh" || \
+      echo "==> unblock-firewall failed (continuing)"
+  fi
   if [[ "$MODE" == "online" ]]; then
+    # Prompt early so Headscale auto-join can run before the UI starts.
+    if [[ -z "${COUCHLINK_JOIN_URL:-}" ]]; then
+      if [[ -t 0 ]]; then
+        echo -n "Paste host join URL (or Enter to type later in the player): "
+        read -r _join || true
+        if [[ -n "${_join:-}" ]]; then
+          export COUCHLINK_JOIN_URL="$_join"
+        fi
+      fi
+    fi
+    if couchlink_try_client_headscale_join "$ROOT"; then
+      echo "==> Headscale join OK — starting player"
+    else
+      # Tailscale cloud / already-up mesh: best-effort ensure client can route 100.x
+      couchlink_ensure_client_tailscale "$ROOT" || true
+    fi
     if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
-      echo "==> online client — join URL set (TURN from invite)"
+      echo "==> online client — join URL set (TURN / mesh from invite)"
     elif [[ -n "${COUCHLINK_TURN_URL:-}" && -n "${COUCHLINK_TURN_USER:-}" && -n "${COUCHLINK_TURN_PASS:-}" ]]; then
       echo "==> online client — TURN credentials from env"
     else
