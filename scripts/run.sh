@@ -176,7 +176,14 @@ if [[ "$ROLE" == "host" ]]; then
     unset COUCHLINK_TURN_URL || true
     echo "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
   else
-    # PRIME: Tailscale / WireGuard when already up — mesh invite (TURN on WSL only).
+    # PRIME: ensure WireGuard is up when conf exists, then prefer Tailscale / WG.
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" && "${COUCHLINK_AUTO_WIREGUARD:-1}" != "0" ]]; then
+      if [[ -f "$ROOT/infra/wireguard/wg0-host.conf" ]] || [[ "${COUCHLINK_ENSURE_WIREGUARD:-0}" == "1" ]]; then
+        echo "==> ensuring WireGuard tunnel is up (PRIME mesh)"
+        bash "$ROOT/scripts/enable-wireguard.sh" || \
+          echo "==> WireGuard bring-up failed — will try Tailscale / public fallback"
+      fi
+    fi
     if couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
       COUCHLINK_USING_MESH=1
     else

@@ -6,6 +6,33 @@ cd "$ROOT"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-platform.sh"
 
+RUN_AFTER=0
+RUN_MODE="local"
+INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
+for arg in "$@"; do
+  case "$arg" in
+    --run) RUN_AFTER=1 ;;
+    --online) RUN_MODE="online"; RUN_AFTER=1 ;;
+    --local) RUN_MODE="local" ;;
+    --mesh) INSTALL_MESH=1 ;;
+    --no-mesh) INSTALL_MESH=0 ;;
+    -h|--help)
+      cat <<EOF
+usage: ./install.sh [--run|--online|--local] [--mesh|--no-mesh]
+
+  --online / --run --online  after install, bring up WireGuard and run host --online
+  --run / --local            after install, run host --local
+  --mesh                     install WireGuard/Tailscale tooling (default on)
+  --no-mesh                  skip mesh tooling
+EOF
+      exit 0
+      ;;
+  esac
+done
+# Keep env override authoritative when set explicitly to 0/1 before invoke.
+COUCHLINK_INSTALL_MESH="$INSTALL_MESH"
+export COUCHLINK_INSTALL_MESH
+
 echo "==> couchlink install"
 
 # When invoked via `sudo ./install.sh`, keep the invoking user's home/PATH —
@@ -204,10 +231,10 @@ if [[ ! -f .env.couchlink ]]; then
   fi
 fi
 
-# Opt-in PRIME mesh tooling (Tailscale hints + WireGuard conf generation).
-# Bring-up stays manual — see docs/MESH.md. Default off so installs stay light.
-if [[ "${COUCHLINK_INSTALL_MESH:-0}" == "1" ]]; then
-  echo "==> mesh tooling (COUCHLINK_INSTALL_MESH=1)"
+# PRIME mesh tooling (WireGuard conf + Windows/Linux bring-up helpers + Tailscale hints).
+# Default ON — disable with --no-mesh or COUCHLINK_INSTALL_MESH=0.
+if [[ "${COUCHLINK_INSTALL_MESH:-1}" == "1" ]]; then
+  echo "==> mesh tooling (WireGuard + Tailscale)"
   case "$PLATFORM" in
     linux|wsl)
       if command -v apt-get >/dev/null; then
@@ -233,7 +260,11 @@ if [[ "${COUCHLINK_INSTALL_MESH:-0}" == "1" ]]; then
     run_as_user bash "$ROOT/scripts/setup-tailscale.sh" \
       || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
   fi
-  echo "    mesh bring-up is manual (tailscale up / wg-quick up) — then: ./scripts/run.sh host --online"
+  if [[ -x "$ROOT/scripts/enable-wireguard.sh" ]]; then
+    echo "==> bringing WireGuard tunnel up (UAC once on Windows/WSL)"
+    bash "$ROOT/scripts/enable-wireguard.sh" \
+      || echo "warning: enable-wireguard failed — import conf manually (docs/MESH.md)"
+  fi
 fi
 
 echo ""
@@ -243,13 +274,20 @@ case "$PLATFORM" in
   macos)
     echo "  next:    ./scripts/run.sh client"
     echo "           ./scripts/run.sh host --local   (video-only on macOS)"
+    echo "           ./install.sh --online           (mesh + host --online)"
     ;;
   *)
-    echo "  next:    ./scripts/run.sh host --local"
+    echo "  next:    ./scripts/run.sh host --online  # PRIME: Tailscale/WireGuard if up"
+    echo "           ./install.sh --online           # install + WG up + host --online"
     echo "           ./scripts/run.sh client"
     ;;
 esac
 echo ""
+
+if [[ "$RUN_AFTER" == "1" ]]; then
+  echo "==> starting ./scripts/run.sh host --${RUN_MODE}"
+  exec bash "$ROOT/scripts/run.sh" host "--${RUN_MODE}"
+fi
 
 # Auto-source .env.couchlink only when explicitly requested — the interactive
 # shell handoff looks like a hang / mysterious prompt after a long cargo build.

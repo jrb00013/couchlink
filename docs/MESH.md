@@ -37,13 +37,14 @@ Skip mesh entirely: `COUCHLINK_SKIP_MESH=1`
 ## Quick start — WireGuard
 
 ```bash
-# Optional with install:
-COUCHLINK_INSTALL_MESH=1 ./install.sh
-
-./scripts/setup-wireguard.sh          # writes gitignored confs under infra/wireguard/
-# Host: wg-quick up (or Windows WireGuard import) — see docs/WIREGUARD.md
-./scripts/run.sh host --online        # detects wg0 → http://10.66.0.1:8443/?…
+./install.sh --online
+# or step-by-step:
+./scripts/setup-wireguard.sh
+./scripts/enable-wireguard.sh      # Windows UAC once, then Task Scheduler; Linux: wg-quick
+./scripts/run.sh host --online     # auto-calls enable-wireguard when conf exists
 ```
+
+`host --online` now **brings the tunnel up** when `infra/wireguard/wg0-host.conf` exists (`COUCHLINK_AUTO_WIREGUARD=0` to skip).
 
 Friend imports `infra/wireguard/wg0-player.conf`, brings the tunnel up, opens the join URL.
 
