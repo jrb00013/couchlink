@@ -7,12 +7,12 @@ Cloudflare / UPnP / IPv6 TURN remain automatic **fallbacks** if no mesh is up.
 ## Priority (`./scripts/run.sh host --online`)
 
 1. **Tailscale** — if `tailscale ip -4` returns a `100.x` address  
-2. **WireGuard** — if `wg0` (or `COUCHLINK_WG_IF`) is up (`10.66.0.1` by default)  
+2. **WireGuard** — if `wg0` (Linux) or Windows WireGuard tunnel is up (`10.66.0.1` by default)  
 3. **UPnP + public IPv4 TURN**  
 4. **Cloudflare HTTPS** invite + **IPv6 TURN** (or IPv4 TURN warning)  
 5. **bore** signaling-only last resort  
 
-Mesh sessions are LAN-style: join URL uses the mesh IP, **no local TURN**, no Cloudflare.
+Mesh sessions skip Cloudflare. On **native Linux/macOS**, TURN is skipped (direct ICE on the mesh iface). On **WSL**, TURN stays on `turn:MESH_IP:3478` because WebRTC UDP is not covered by WSL portproxy — friends still get a working media path.
 
 Override order: `COUCHLINK_MESH_PREFER=wireguard,tailscale`  
 Skip mesh entirely: `COUCHLINK_SKIP_MESH=1`

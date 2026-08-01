@@ -176,8 +176,8 @@ if [[ "$ROLE" == "host" ]]; then
     unset COUCHLINK_TURN_URL || true
     echo "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
   else
-    # PRIME: Tailscale / WireGuard when already up — LAN-style invite, no TURN.
-    if couchlink_try_mesh_online "$PORT"; then
+    # PRIME: Tailscale / WireGuard when already up — mesh invite (TURN on WSL only).
+    if couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
       COUCHLINK_USING_MESH=1
     else
       PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
@@ -253,11 +253,13 @@ if [[ "$ROLE" == "host" ]]; then
   ./scripts/start-signaling.sh &
   PIDS+=($!)
   sleep 1
-  # Mesh sessions are LAN-like — skip local TURN (friend reaches you on 100.x / 10.66.x).
-  if [[ "$MODE" == "online" && "$COUCHLINK_USING_MESH" != "1" ]]; then
-    ./scripts/start-turn.sh &
-    PIDS+=($!)
-    sleep 1
+  # Mesh on native Linux/macOS: skip TURN. WSL mesh: keep TURN (UDP via portproxy).
+  if [[ "$MODE" == "online" ]]; then
+    if [[ "$COUCHLINK_USING_MESH" != "1" || "${COUCHLINK_MESH_NEED_TURN:-0}" == "1" ]]; then
+      ./scripts/start-turn.sh &
+      PIDS+=($!)
+      sleep 1
+    fi
   fi
   ./scripts/start-host.sh &
   PIDS+=($!)

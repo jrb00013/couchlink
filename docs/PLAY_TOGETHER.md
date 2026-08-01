@@ -38,22 +38,22 @@ source .env.couchlink
 This starts, in one terminal:
 
 - Signaling + web UI on **`:8443`**
-- **TURN** on **`:3478`** (online only)
+- **TURN** on **`:3478`** (public `--online`, and **WSL mesh** — skipped on native Linux/macOS mesh)
 - **couchlink-host** (capture + encode + virtual DualSense for player 2)
 
 Watch the log for:
 
 ```text
-friend join URL: http://…/?s=…&p=…&auto=1&ws=ws://…&turn=turn:…&turnu=…&turnp=…
+friend join URL: http://…/?s=…&p=…&auto=1&ws=ws://…
 ```
 
-Copy that **entire URL** (or QR) and send it to your friend (Discord, Signal, etc.). That link already includes session, PIN, signaling WebSocket, and TURN credentials (when online).
+Mesh URLs use `100.x` / `10.66.0.1` and may omit `turn=` on native Linux. Public online URLs include TURN creds. Copy the **entire URL** (or QR) to your friend.
 
 ### 3. Make yourself reachable from the internet (`--online`)
 
 The join URL must use addresses your friend can reach—not `127.0.0.1`.
 
-`./scripts/run.sh host --online` prepares Windows for UPnP automatically on WSL (Private network profile + Network Discovery + NATUPnP maps; one UAC the first time, then a saved elevated task). Ensure **TCP 8443** (signaling/web) and **UDP+TCP 3478** (TURN) reach your PC. If the ISP gateway still has UPnP/IGD off, forward those ports manually to your gaming machine’s LAN IP.
+`./scripts/run.sh host --online` first uses a **PRIME mesh** if Tailscale (`100.x`) or WireGuard (`wg0`) is up — see [MESH.md](MESH.md). Otherwise it prepares Windows for UPnP automatically on WSL (Private network profile + Network Discovery + NATUPnP maps; one UAC the first time, then a saved elevated task). Ensure **TCP 8443** (signaling/web) and **UDP+TCP 3478** (TURN) reach your PC. If the ISP gateway still has UPnP/IGD off, forward those ports manually, or use Cloudflare/IPv6 fallback / a mesh.
 
 2. **Public IP:** Detected via `ifconfig.me`. If that fails or you’re on CGNAT, set in `.env.couchlink` before starting:
    - `COUCHLINK_PUBLIC_IP=your.public.ip`
