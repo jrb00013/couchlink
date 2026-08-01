@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Best-effort local firewall allow for couchlink + Tailscale/Headscale mesh.
+# Best-effort local firewall allow for couchlink + Headscale mesh.
 # Usage: ./scripts/unblock-firewall.sh
+#
+# Dispatches to platform scripts:
+#   scripts/windows/unblock-firewall.ps1
+#   scripts/linux/unblock-firewall.sh
+#   (macOS handled inline — Application Firewall)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
@@ -9,50 +14,54 @@ source "$ROOT/scripts/lib-platform.sh"
 PLATFORM="$(couchlink_detect_platform)"
 echo "==> unblock-firewall (platform=$PLATFORM)"
 
+unblock_windows() {
+  local ps_script="$ROOT/scripts/windows/unblock-firewall.ps1"
+  if [[ ! -f "$ps_script" ]]; then
+    echo "missing $ps_script" >&2
+    return 1
+  fi
+  local win_user run script_w ps_exe ps_launch ec
+  win_user="$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r' || true)"
+  win_user="${win_user:-$USER}"
+  run="/mnt/c/Users/${win_user}/AppData/Local/couchlink-run"
+  mkdir -p "$run"
+  cp -f "$ps_script" "$run/unblock-firewall.ps1"
+  script_w="$(wslpath -w "$run/unblock-firewall.ps1")"
+  ps_exe='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+  ps_launch='/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+  [[ -x "$ps_launch" ]] || ps_launch="$(command -v powershell.exe)"
+  echo "==> elevating Windows firewall rules (UAC once)…"
+  set +e
+  "$ps_launch" -NoProfile -Command \
+    "\$p = Start-Process -FilePath '$ps_exe' -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$script_w'); if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
+  ec=$?
+  set -e
+  if [[ "$ec" != "0" ]]; then
+    echo "==> elevated failed — trying without UAC…"
+    "$ps_launch" -NoProfile -ExecutionPolicy Bypass -File "$script_w" || true
+  fi
+}
+
+unblock_linux() {
+  local sh="$ROOT/scripts/linux/unblock-firewall.sh"
+  [[ -x "$sh" || -f "$sh" ]] || {
+    echo "missing $sh" >&2
+    return 1
+  }
+  bash "$sh"
+}
+
 case "$PLATFORM" in
-  wsl|windows)
-    ps_script="$ROOT/scripts/windows/unblock-firewall.ps1"
-    if [[ ! -f "$ps_script" ]]; then
-      echo "missing $ps_script" >&2
-      exit 1
-    fi
-    win_user="$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r' || true)"
-    win_user="${win_user:-$USER}"
-    run="/mnt/c/Users/${win_user}/AppData/Local/couchlink-run"
-    mkdir -p "$run"
-    cp -f "$ps_script" "$run/unblock-firewall.ps1"
-    script_w="$(wslpath -w "$run/unblock-firewall.ps1")"
-    ps_exe='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-    ps_launch='/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
-    [[ -x "$ps_launch" ]] || ps_launch="$(command -v powershell.exe)"
-    echo "==> elevating Windows firewall rules (UAC once)…"
-    set +e
-    "$ps_launch" -NoProfile -Command \
-      "\$p = Start-Process -FilePath '$ps_exe' -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$script_w'); if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
-    ec=$?
-    set -e
-    # Non-elevated fallback
-    if [[ "$ec" != "0" ]]; then
-      echo "==> elevated failed — trying without UAC…"
-      "$ps_launch" -NoProfile -ExecutionPolicy Bypass -File "$script_w" || true
-    fi
+  windows)
+    unblock_windows
+    ;;
+  wsl)
+    # Both sides matter: Windows host NIC + WSL distro firewall.
+    unblock_windows || true
+    unblock_linux || true
     ;;
   linux)
-    echo "==> Linux firewall best-effort (ufw/firewalld/nft)…"
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
-      sudo ufw allow 41641/udp comment 'tailscale' || true
-      sudo ufw allow 3478 comment 'couchlink-turn' || true
-      sudo ufw allow 34790/udp comment 'headscale-stun' || true
-      sudo ufw allow 8443/tcp comment 'couchlink-signaling' || true
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-      sudo firewall-cmd --permanent --add-port=41641/udp || true
-      sudo firewall-cmd --permanent --add-port=3478/tcp --add-port=3478/udp || true
-      sudo firewall-cmd --permanent --add-port=34790/udp || true
-      sudo firewall-cmd --permanent --add-port=8443/tcp || true
-      sudo firewall-cmd --reload || true
-    else
-      echo "    no ufw/firewalld — ensure UDP 41641/3478/34790 and TCP 8443 are allowed"
-    fi
+    unblock_linux
     ;;
   macos)
     echo "==> macOS: granting couchlink/tailscale through Application Firewall (may prompt)…"
