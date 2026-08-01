@@ -15,7 +15,7 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Session / PIN / ICE | Rohomieo-style WebSocket signaling |
 | Video | WebRTC + OpenH264, presets up to **1080p60**, scaled capture |
 | Congestion / idle | WebRTC GCC + tile motion detector |
-| Path | **Automatic** — public STUN + local TURN relay (`scripts/start-turn.sh`); on WSL/--online, Windows UPnP prep (Private profile + NATUPnP) runs automatically; WireGuard optional for private LAN-style posture |
+| Path | **PRIME mesh** — Tailscale / WireGuard when up; else public STUN + local TURN; on WSL `--online` also firewall + WSL portproxy; then HTTPS (cloudflared) + IPv6 TURN if UPnP is off (bore = signaling-only last resort) |
 
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
 | Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |
@@ -39,14 +39,16 @@ and tears everything down together on Ctrl-C. Detects Linux / WSL / macOS.
 
 ```bash
 ./scripts/run.sh host --local    # same Wi‑Fi (default) — LAN join URL, no UPnP/TURN
-./scripts/run.sh host --online   # internet — public IP + TURN + UPnP
+./scripts/run.sh host --online   # internet — Tailscale/WireGuard if up, else TURN + UPnP / Cloudflare
+# Mesh (PRIME): ./scripts/setup-tailscale.sh  or  ./scripts/setup-wireguard.sh  — see docs/MESH.md
 # On WSL: --online auto-runs Windows UPnP prep (one UAC, then no prompt)
 # prints the friend's join URL + QR (session, PIN, and TURN creds baked in when online)
 ```
 
-Friend — open the printed URL. For `--online`, no VPN needed if UPnP (or manual
-port forward of **8443/tcp** + **3478/udp+tcp**) works. Press a button on their
-DualSense, then Join. Or, for a native client instead of the browser:
+Friend — open the printed URL. On a **mesh**, they must be on the same Tailscale
+tailnet or have WireGuard up. Otherwise, for public `--online`, no VPN needed if
+UPnP (or manual port forward of **8443/tcp** + **3478/udp+tcp**) works. Press a
+button on their DualSense, then Join. Or, for a native client instead of the browser:
 
 ```bash
 ./scripts/run.sh client --online   # Linux / WSL / macOS (needs host join URL / TURN)
@@ -86,6 +88,7 @@ Bind Player 2 in RPCS3/PCSX2 to **DualSense Wireless Controller**.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Protocol](docs/PROTOCOL.md)
 - [Getting started](docs/GETTING_STARTED.md)
+- [Mesh (Tailscale + WireGuard)](docs/MESH.md) — **PRIME** path for `--online`
 - [WireGuard](docs/WIREGUARD.md)
 - [Latency](docs/LATENCY.md)
 - [Emulators](docs/EMULATORS.md)

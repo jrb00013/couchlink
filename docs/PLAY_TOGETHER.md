@@ -4,7 +4,9 @@ One host runs the game. One friend joins from **anywhere** with the browser or t
 
 > **WSL + Windows games (PCSX2/RPCS3):** `./install.sh` and host start **auto-build** `couchlink-win-capture.exe` via Windows cargo. Host start opens the **Windows capture picker** so you choose which window/monitor to stream (or set `COUCHLINK_CAPTURE_SOURCE=desktop` / `COUCHLINK_CAPTURE_WINDOW=PCSX2`). WSL listens on TCP **9876**; Windows connects outbound via localhost forwarding.
 
-Internet play uses **STUN + your host’s TURN relay** (started automatically with `./scripts/run.sh host`) and **UPnP** when your router supports it.
+Internet play prefers a **Tailscale / WireGuard mesh** when one is up ([MESH.md](MESH.md)).
+Otherwise it uses **STUN + your host’s TURN relay** (started with `./scripts/run.sh host --online`)
+and **UPnP** when your router supports it (Cloudflare / IPv6 fallbacks if not).
 
 ---
 
@@ -31,7 +33,7 @@ source .env.couchlink
 ```
 
 `--local` (default) prints a LAN join URL and skips UPnP/TURN.  
-`--online` fetches your public IP, starts TURN, and opens ports via UPnP (on WSL/Windows it auto-runs `./scripts/enable-upnp.sh` — Private network + discovery + NATUPnP; one UAC, then Task Scheduler with no prompt).
+`--online` prefers **Tailscale / WireGuard** if already up (mesh join URL, no TURN). Else it fetches your public IP, starts TURN, and opens ports via UPnP (on WSL/Windows it auto-runs `./scripts/enable-upnp.sh` — Private network + discovery + NATUPnP; one UAC, then Task Scheduler with no prompt). Mesh setup: `./scripts/setup-tailscale.sh` / `./scripts/setup-wireguard.sh`.
 
 This starts, in one terminal:
 

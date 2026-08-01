@@ -204,6 +204,38 @@ if [[ ! -f .env.couchlink ]]; then
   fi
 fi
 
+# Opt-in PRIME mesh tooling (Tailscale hints + WireGuard conf generation).
+# Bring-up stays manual — see docs/MESH.md. Default off so installs stay light.
+if [[ "${COUCHLINK_INSTALL_MESH:-0}" == "1" ]]; then
+  echo "==> mesh tooling (COUCHLINK_INSTALL_MESH=1)"
+  case "$PLATFORM" in
+    linux|wsl)
+      if command -v apt-get >/dev/null; then
+        as_root apt-get install -y -qq wireguard wireguard-tools 2>/dev/null \
+          || echo "warning: apt wireguard install failed — install wireguard-tools manually"
+      fi
+      ;;
+    macos)
+      BREW="$(couchlink_brew_bin || true)"
+      if [[ -n "${BREW:-}" ]]; then
+        run_as_user "$BREW" install wireguard-tools \
+          || echo "warning: brew wireguard-tools failed"
+        run_as_user "$BREW" install --cask tailscale \
+          || echo "warning: brew cask tailscale failed (install from https://tailscale.com/download)"
+      fi
+      ;;
+  esac
+  if [[ -x "$ROOT/scripts/setup-wireguard.sh" ]]; then
+    run_as_user bash "$ROOT/scripts/setup-wireguard.sh" \
+      || echo "warning: setup-wireguard.sh failed — see docs/WIREGUARD.md"
+  fi
+  if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+    run_as_user bash "$ROOT/scripts/setup-tailscale.sh" \
+      || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
+  fi
+  echo "    mesh bring-up is manual (tailscale up / wg-quick up) — then: ./scripts/run.sh host --online"
+fi
+
 echo ""
 echo "OK — install finished"
 echo "  binaries: $REAL_HOME/.local/bin"

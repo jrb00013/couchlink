@@ -4,22 +4,28 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-platform.sh"
 export PATH="$(couchlink_tool_path "${HOME:-}")${PATH:+:$PATH}"
-# Preserve reachability overrides exported by run.sh (--local / --online).
+# Preserve reachability overrides exported by run.sh (--local / --online / mesh).
 _KEEP_MODE="${COUCHLINK_MODE:-}"
 _KEEP_SIGNALING="${COUCHLINK_SIGNALING:-}"
 _KEEP_INVITE_SIGNALING="${COUCHLINK_INVITE_SIGNALING:-}"
 _KEEP_PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
 _KEEP_TURN_URL="${COUCHLINK_TURN_URL:-}"
+_KEEP_MESH="${COUCHLINK_MESH:-}"
+_KEEP_MESH_IP="${COUCHLINK_MESH_IP:-}"
 # shellcheck disable=SC1091
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
 [[ -n "$_KEEP_MODE" ]] && COUCHLINK_MODE="$_KEEP_MODE"
 [[ -n "$_KEEP_SIGNALING" ]] && COUCHLINK_SIGNALING="$_KEEP_SIGNALING"
 [[ -n "$_KEEP_INVITE_SIGNALING" ]] && COUCHLINK_INVITE_SIGNALING="$_KEEP_INVITE_SIGNALING"
 [[ -n "$_KEEP_PUBLIC_IP" ]] && COUCHLINK_PUBLIC_IP="$_KEEP_PUBLIC_IP"
-# Empty TURN URL in local mode is intentional — restore even when blanked via unset.
+[[ -n "$_KEEP_MESH" ]] && COUCHLINK_MESH="$_KEEP_MESH"
+[[ -n "$_KEEP_MESH_IP" ]] && COUCHLINK_MESH_IP="$_KEEP_MESH_IP"
+# Empty TURN in local / Tailscale / WireGuard mesh is intentional — do not revive .env TURN.
 if [[ "$_KEEP_MODE" == "local" ]]; then
   unset COUCHLINK_TURN_URL || true
   unset COUCHLINK_INVITE_SIGNALING || true
+elif [[ -n "${COUCHLINK_MESH:-}" ]]; then
+  unset COUCHLINK_TURN_URL || true
 elif [[ -n "$_KEEP_TURN_URL" ]]; then
   COUCHLINK_TURN_URL="$_KEEP_TURN_URL"
 fi
