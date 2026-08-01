@@ -39,7 +39,7 @@ pub use linux_impl::XboxReader;
 mod linux_impl {
 use anyhow::{bail, Context, Result};
 use couchlink_pad::parse_xbox_input_report;
-use couchlink_pad::xbox::{KNOWN_PIDS, MICROSOFT_VID};
+use couchlink_pad::recognize::is_supported_xbox;
 use couchlink_proto::PadFrame;
 use std::fs::{self, File};
 use std::io::Read;
@@ -113,7 +113,7 @@ fn find_xbox_hidraw() -> Result<Option<PathBuf>> {
         }
         let vid = u16::from_str_radix(parts[1], 16).unwrap_or(0);
         let pid = u16::from_str_radix(parts[2], 16).unwrap_or(0);
-        if vid != MICROSOFT_VID || !KNOWN_PIDS.contains(&pid) {
+        if !is_supported_xbox(vid, pid) {
             continue;
         }
         let node = PathBuf::from(format!("/dev/{name}"));
@@ -135,4 +135,41 @@ fn set_nonblocking(fd: i32) -> Result<()> {
     fcntl(fd, FcntlArg::F_SETFL(flags)).context("F_SETFL")?;
     Ok(())
 }
+}
+
+#[cfg(test)]
+mod client_xbox_recognition_tests {
+    use couchlink_pad::recognize::{
+        is_supported_xbox, parse_hid_id_line, product_label, XboxVariant,
+    };
+    use couchlink_pad::sim::{simulate_xbox_frame, xbox_press, SimButton};
+    use couchlink_pad::MICROSOFT_VID;
+    use couchlink_proto::pad_frame::buttons;
+
+    /// Mirrors `find_xbox_hidraw` VID/PID accept rules for every supported SKU.
+    #[test]
+    fn client_would_open_every_supported_xbox() {
+        for v in XboxVariant::ALL {
+            for bus in ["0003", "0005"] {
+                let line = format!(
+                    "HID_ID={bus}:{:08X}:{:08X}",
+                    MICROSOFT_VID as u32,
+                    v.pid() as u32
+                );
+                let (_, vid, pid) = parse_hid_id_line(&line).unwrap();
+                assert!(
+                    is_supported_xbox(vid, pid),
+                    "XboxReader must accept {}",
+                    v.label()
+                );
+                assert_eq!(product_label(vid, pid), Some(v.label()));
+            }
+        }
+    }
+
+    #[test]
+    fn client_parse_path_maps_a_to_cross() {
+        let f = simulate_xbox_frame(&xbox_press(SimButton::Cross)).unwrap();
+        assert!(f.buttons & buttons::CROSS != 0);
+    }
 }

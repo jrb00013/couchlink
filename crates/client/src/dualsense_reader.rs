@@ -36,8 +36,8 @@ pub use linux_impl::DualSenseReader;
 #[cfg(target_os = "linux")]
 mod linux_impl {
 use anyhow::{bail, Context, Result};
-use couchlink_pad::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
 use couchlink_pad::parse_input_report;
+use couchlink_pad::recognize::is_supported_dualsense;
 use couchlink_proto::PadFrame;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -123,7 +123,7 @@ fn find_dualsense_hidraw() -> Result<Option<PathBuf>> {
         }
         let vid = u16::from_str_radix(parts[1], 16).unwrap_or(0);
         let pid = u16::from_str_radix(parts[2], 16).unwrap_or(0);
-        if vid != SONY_VID || (pid != PID_DUALSENSE && pid != PID_DUALSENSE_EDGE) {
+        if !is_supported_dualsense(vid, pid) {
             continue;
         }
         let node = PathBuf::from(format!("/dev/{name}"));
@@ -145,4 +145,39 @@ fn set_nonblocking(fd: i32) -> Result<()> {
     let _ = Duration::from_millis(1);
     Ok(())
 }
+}
+
+#[cfg(test)]
+mod client_dualsense_recognition_tests {
+    use couchlink_pad::recognize::{
+        classify, is_dualshock4, is_supported_dualsense, parse_hid_id_line, ControllerFamily,
+        DUALSHOCK4_PIDS,
+    };
+    use couchlink_pad::sim::{dualsense_usb_press, simulate_dualsense_frame, SimButton};
+    use couchlink_pad::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
+    use couchlink_proto::pad_frame::buttons;
+
+    #[test]
+    fn client_would_open_dualsense_and_edge() {
+        for pid in [PID_DUALSENSE, PID_DUALSENSE_EDGE] {
+            let line = format!("HID_ID=0003:{:08X}:{:08X}", SONY_VID as u32, pid as u32);
+            let (_, vid, p) = parse_hid_id_line(&line).unwrap();
+            assert!(is_supported_dualsense(vid, p));
+        }
+    }
+
+    #[test]
+    fn client_rejects_ps4_dualshock4_on_hidraw_path() {
+        for &pid in DUALSHOCK4_PIDS {
+            assert!(is_dualshock4(SONY_VID, pid));
+            assert!(!is_supported_dualsense(SONY_VID, pid));
+            assert_eq!(classify(SONY_VID, pid), ControllerFamily::DualShock4);
+        }
+    }
+
+    #[test]
+    fn client_parse_path_maps_cross() {
+        let f = simulate_dualsense_frame(&dualsense_usb_press(SimButton::Cross)).unwrap();
+        assert!(f.buttons & buttons::CROSS != 0);
+    }
 }
