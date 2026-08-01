@@ -182,13 +182,12 @@ couchlink_apply_mesh_invite() {
       echo "    Optional: ./install.sh --online --unblock-firewall"
       ;;
     tailscale)
-      echo "    Friend: ./install.sh && ./install.sh --online  → paste this join URL"
-      echo "            (Tailscale already installed by install.sh — same tailnet as host)"
-      echo "    Host can share the machine in Tailscale admin if friend uses another account"
+      echo "    Friend: COUCHLINK_INSTALL_TAILSCALE_CLOUD=1 ./install.sh && ./install.sh --online"
+      echo "            (optional Tailscale Inc cloud fallback — not required for Headscale)"
       ;;
     wireguard)
       echo "    friend imports infra/wireguard/wg0-player.conf then brings WireGuard up"
-      echo "    (prefer Headscale/Tailscale: ./install.sh --host --online + friend ./install.sh)"
+      echo "    (prefer Headscale: ./install.sh --host --online + friend ./install.sh --online)"
       ;;
   esac
   return 0
