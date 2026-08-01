@@ -80,7 +80,7 @@
 - [x] Host install runs `setup-headscale.sh`; `--host --online` enables Headscale before mesh detect
 - [x] `test-mesh.sh` headscale override
 - [x] `.env.example` docs
-- [ ] Push branch + `gh pr create`
+- [x] Push branch + `gh pr create`
 
 ## Test plan
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Headless join to host Headscale from invite (hs= + tskey=). No Tailscale Inc account.
+# Headless join to host Headscale from invite (hs= + tskey=).
+# No Tailscale Inc account. No Windows Tailscale MSI/UAC popup.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
@@ -9,13 +10,22 @@ HS_URL="${COUCHLINK_HS_URL:-}"
 TSKEY="${COUCHLINK_TS_AUTHKEY:-}"
 JOIN="${COUCHLINK_JOIN_URL:-}"
 
-# Parse from join URL if needed
 if [[ -n "$JOIN" ]]; then
   if [[ -z "$HS_URL" ]]; then
-    HS_URL="$(printf '%s' "$JOIN" | grep -oE '[?&]hs=[^&]+' | head -1 | sed 's/.*hs=//;s/%3A/:/g;s/%2F/\//g' | python3 -c 'import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))' 2>/dev/null || true)"
+    HS_URL="$(printf '%s' "$JOIN" | python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlparse(sys.stdin.read().strip())
+q = urllib.parse.parse_qs(u.query)
+print((q.get("hs") or [""])[0])
+' 2>/dev/null || true)"
   fi
   if [[ -z "$TSKEY" ]]; then
-    TSKEY="$(printf '%s' "$JOIN" | grep -oE '[?&]tskey=[^&]+' | head -1 | sed 's/.*tskey=//' | python3 -c 'import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))' 2>/dev/null || true)"
+    TSKEY="$(printf '%s' "$JOIN" | python3 -c '
+import sys, urllib.parse
+u = urllib.parse.urlparse(sys.stdin.read().strip())
+q = urllib.parse.parse_qs(u.query)
+print((q.get("tskey") or [""])[0])
+' 2>/dev/null || true)"
   fi
 fi
 
@@ -28,16 +38,13 @@ if [[ -z "$HS_URL" || -z "$TSKEY" ]]; then
 fi
 HS_URL="${HS_URL%/}"
 
-if ! couchlink_find_tailscale_bin >/dev/null 2>&1; then
-  echo "==> installing Tailscale client…"
-  bash "$ROOT/scripts/setup-tailscale.sh" --ensure || true
-fi
-BIN="$(couchlink_find_tailscale_bin)" || {
-  echo "Tailscale client not found" >&2
+BIN="$(bash "$ROOT/scripts/ensure-headscale-client.sh")" || BIN=""
+if [[ -z "$BIN" || ! -e "$BIN" ]]; then
+  echo "Headscale client binary not found — run: ./scripts/ensure-headscale-client.sh" >&2
   exit 1
-}
+fi
 
-echo "==> Headscale headless join"
+echo "==> Headscale headless join (NOT Tailscale Inc)"
 echo "    login-server=$HS_URL"
 HOSTN="couchlink-player-$(hostname -s 2>/dev/null || echo friend)"
 

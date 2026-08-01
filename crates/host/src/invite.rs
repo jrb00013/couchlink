@@ -86,11 +86,11 @@ mod tests {
             Some("headscale"),
             Some(HeadscaleInvite {
                 server_url: "https://hs.example.com",
-                auth_key: "tskey-auth-test",
+                auth_key: "hskey-auth-test",
             }),
         );
         assert!(u.contains("mesh=headscale"));
         assert!(u.contains("hs=https%3A%2F%2Fhs.example.com") || u.contains("hs=https://hs.example.com"));
-        assert!(u.contains("tskey=tskey-auth-test"));
+        assert!(u.contains("tskey=hskey-auth-test"));
     }
 }

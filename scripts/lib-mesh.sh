@@ -251,26 +251,31 @@ print((q.get("tskey") or [""])[0])
 # Prefer Headscale (when env already set / enable wrote mesh.env), then Tailscale, then WireGuard.
 # Skip with COUCHLINK_SKIP_MESH=1. Returns 0 if a mesh invite was applied.
 
-# Friend/client: make sure Tailscale is up so a pasted http://100.x join URL routes.
-# Returns 0 if ready, 1 if not (still safe to start client — Cloudflare/LAN links work).
+# Friend/client: optional Tailscale Inc cloud path (SUPPRESSED by default).
+# Kept for fallback: COUCHLINK_ENSURE_TAILSCALE_CLOUD=1 ./scripts/run.sh client --online
+# Headscale joins use join-headscale.sh / ensure-headscale-client.sh instead.
 couchlink_ensure_client_tailscale() {
   [[ "${COUCHLINK_SKIP_MESH:-0}" == "1" ]] && return 0
   local root="${1:-}"
   local ip=""
   if ip="$(couchlink_tailscale_ip 2>/dev/null)"; then
-    echo "==> Tailscale ready ($ip) — paste the host join URL when prompted"
+    echo "==> mesh client ready ($ip)"
     return 0
   fi
-  echo "==> Tailscale not up — paste-link over 100.x needs the same tailnet as the host"
+  # Do NOT auto-run setup-tailscale.sh — that pops Windows Tailscale / UAC / login.tailscale.com.
+  if [[ "${COUCHLINK_ENSURE_TAILSCALE_CLOUD:-0}" != "1" ]]; then
+    echo "==> no Tailscale Inc mesh (ok — Headscale paste-link does not need it)"
+    echo "    optional cloud fallback: COUCHLINK_ENSURE_TAILSCALE_CLOUD=1 + ./scripts/setup-tailscale.sh --ensure"
+    return 1
+  fi
+  echo "==> COUCHLINK_ENSURE_TAILSCALE_CLOUD=1 — ensuring Tailscale Inc client…"
   if [[ -n "$root" && -x "$root/scripts/setup-tailscale.sh" ]]; then
     bash "$root/scripts/setup-tailscale.sh" --ensure || true
     if ip="$(couchlink_tailscale_ip 2>/dev/null)"; then
-      echo "==> Tailscale ready ($ip) — paste the host join URL when prompted"
+      echo "==> Tailscale cloud ready ($ip)"
       return 0
     fi
   fi
-  echo "    Install/sign in: ./scripts/setup-tailscale.sh --ensure"
-  echo "    Public Cloudflare/LAN join links still work without Tailscale"
   return 1
 }
 

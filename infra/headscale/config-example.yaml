@@ -4,6 +4,7 @@
 server_url: http://127.0.0.1:8080
 listen_addr: 0.0.0.0:8080
 metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
 
 noise:
   private_key_path: REPLACE_DATA_DIR/noise_private.key
@@ -21,12 +22,16 @@ derp:
     region_code: "couchlink"
     region_name: "Couchlink DERP"
     verify_clients: true
+    # 3479 avoids clash with couchlink coturn on 3478
     stun_listen_addr: "0.0.0.0:3479"
     private_key_path: REPLACE_DATA_DIR/derp_server_private.key
     automatically_add_embedded_derp_region: true
-  urls: []
+  # Required so Headscale can boot before embedded DERP/HTTPS is ready.
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
   paths: []
-  auto_update_enabled: false
+  auto_update_enabled: true
+  update_frequency: 24h
 
 database:
   type: sqlite
@@ -34,8 +39,13 @@ database:
     path: REPLACE_DATA_DIR/db.sqlite
     write_ahead_log: true
 
+policy:
+  mode: file
+  path: ""
+
 dns:
   magic_dns: true
+  # Must differ from the server_url host.
   base_domain: couchlink.local
   override_local_dns: false
   nameservers:

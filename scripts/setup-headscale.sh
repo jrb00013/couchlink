@@ -4,11 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-platform.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-headscale.sh"
 HS_DIR="$ROOT/infra/headscale"
 TOOLS="$ROOT/.tools"
 BIN="$TOOLS/headscale"
 DATA="$HS_DIR/data"
 CFG="$HS_DIR/config.yaml"
+EXAMPLE="$HS_DIR/config-example.yaml"
 
 PLATFORM="$(couchlink_detect_platform)"
 case "$PLATFORM" in
@@ -36,9 +39,21 @@ else
   echo "==> Headscale binary present: $BIN"
 fi
 
+# Always refresh from example when missing, or when missing required DERP bootstrap URL.
+need_rewrite=0
 if [[ ! -f "$CFG" ]]; then
-  sed "s|REPLACE_DATA_DIR|${DATA}|g" \
-    "$HS_DIR/config-example.yaml" >"$CFG"
+  need_rewrite=1
+elif ! grep -q 'controlplane.tailscale.com/derpmap' "$CFG" 2>/dev/null; then
+  echo "==> upgrading $CFG (add default DERP map — required for Headscale boot)"
+  need_rewrite=1
+fi
+
+if [[ "$need_rewrite" == "1" ]]; then
+  # Preserve noise/db if present by only rewriting from example when absent/broken.
+  if [[ -f "$CFG" ]]; then
+    cp -f "$CFG" "$CFG.bak.$(date +%s)" 2>/dev/null || true
+  fi
+  sed "s|REPLACE_DATA_DIR|${DATA}|g" "$EXAMPLE" >"$CFG"
   echo "==> wrote $CFG"
 else
   echo "==> keep existing $CFG"

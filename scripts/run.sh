@@ -38,7 +38,8 @@ usage: $0 [host|client] [--local|--online] [--unblock-firewall]
   --unblock-firewall
             Client: open local OS firewall for mesh/TURN (Windows UAC once).
 
-  Mesh: ./scripts/enable-headscale.sh · ./scripts/setup-tailscale.sh · ./scripts/setup-wireguard.sh
+  Mesh: ./scripts/enable-headscale.sh · ./scripts/setup-wireguard.sh
+  (optional Tailscale Inc cloud: ./scripts/setup-tailscale.sh — not auto-run)
   Docs: docs/HEADSCALE.md · docs/MESH.md · docs/WIREGUARD.md
 
 Platform is auto-detected (linux / wsl / macos).
@@ -263,8 +264,10 @@ elif [[ "$ROLE" == "client" ]]; then
     if couchlink_try_client_headscale_join "$ROOT"; then
       echo "==> Headscale join OK — starting player"
     else
-      # Tailscale cloud / already-up mesh: best-effort ensure client can route 100.x
-      couchlink_ensure_client_tailscale "$ROOT" || true
+      # Opt-in only: Tailscale Inc cloud. Default stays quiet (no Windows popup).
+      if [[ "${COUCHLINK_ENSURE_TAILSCALE_CLOUD:-0}" == "1" ]]; then
+        couchlink_ensure_client_tailscale "$ROOT" || true
+      fi
     fi
     if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
       echo "==> online client — join URL set (TURN / mesh from invite)"

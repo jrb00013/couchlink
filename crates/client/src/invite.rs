@@ -169,11 +169,11 @@ mod tests {
 
     #[test]
     fn parses_headscale_mesh_invite() {
-        let url = "http://100.64.1.3:8443/?s=a&p=1&auto=1&ws=ws://100.64.1.3:8443/ws&mesh=headscale&hs=https%3A%2F%2Fhs.example.com&tskey=tskey-auth-xyz";
+        let url = "http://100.64.1.3:8443/?s=a&p=1&auto=1&ws=ws://100.64.1.3:8443/ws&mesh=headscale&hs=https%3A%2F%2Fhs.example.com&tskey=hskey-auth-xyz";
         let p = parse_join_url(url).unwrap();
         assert_eq!(p.mesh.as_deref(), Some("headscale"));
         assert_eq!(p.hs_url.as_deref(), Some("https://hs.example.com"));
-        assert_eq!(p.ts_authkey.as_deref(), Some("tskey-auth-xyz"));
+        assert_eq!(p.ts_authkey.as_deref(), Some("hskey-auth-xyz"));
         assert!(is_headscale_invite(&p));
         assert!(!is_tailscale_invite(&p));
     }

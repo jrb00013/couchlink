@@ -116,4 +116,12 @@ bash -n "$ROOT/scripts/setup-tailscale.sh"
 bash -n "$ROOT/install.sh"
 pass "bash -n clean"
 
+# --- headscale control-plane smoke (local, no cloudflared) ---
+if [[ "${COUCHLINK_SKIP_HEADSCALE_SMOKE:-0}" != "1" ]]; then
+  if [[ -x "$ROOT/scripts/test-headscale.sh" ]]; then
+    "$ROOT/scripts/test-headscale.sh" || fail "test-headscale.sh"
+    pass "test-headscale.sh"
+  fi
+fi
+
 echo "ALL MESH SMOKE CHECKS PASSED (platform=$PLATFORM)"
