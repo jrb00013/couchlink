@@ -51,7 +51,7 @@ Copy that **entire URL** (or QR) and send it to your friend (Discord, Signal, et
 
 The join URL must use addresses your friend can reach—not `127.0.0.1`.
 
-`./scripts/run.sh host --online` prepares Windows for UPnP automatically on WSL (Private network profile + Network Discovery + NATUPnP maps; one UAC the first time, then a saved elevated task). Ensure **TCP 8443** (signaling/web) and **UDP+TCP 3478** (TURN) reach your PC. If the ISP gateway still has UPnP/IGD off, forward those ports manually to your gaming machine’s LAN IP.
+`./scripts/run.sh host --online` prepares Windows automatically on WSL (Private network + discovery + firewall + WSL portproxy for IPv4/IPv6 + NATUPnP). If the router has UPnP off, it prefers **cloudflared HTTPS** (browser WebCodecs) + **IPv6 TURN**, and only falls back to **bore signaling** (never bore TURN — that starves video). One UAC the first time, then Task Scheduler with no prompt.
 
 2. **Public IP:** Detected via `ifconfig.me`. If that fails or you’re on CGNAT, set in `.env.couchlink` before starting:
    - `COUCHLINK_PUBLIC_IP=your.public.ip`

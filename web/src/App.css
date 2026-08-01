@@ -244,53 +244,202 @@ button.ghost {
   font-size: 0.85rem;
 }
 
-.pads-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.pads-viz {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.45rem;
+  gap: 0.85rem 1.1rem;
+  align-items: flex-end;
 }
 
-.pads-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  max-width: 100%;
-  padding: 0.4rem 0.7rem;
+.cv {
+  margin: 0;
+  flex: 1 1 220px;
+  max-width: 340px;
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.55rem 0.65rem 0.5rem;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 14px;
   background: rgba(8, 12, 18, 0.55);
-  font-size: 0.88rem;
 }
 
-.pads-item.is-active {
+.cv.is-active {
   border-color: rgba(62, 207, 142, 0.4);
-  background: rgba(62, 207, 142, 0.08);
+  background: rgba(62, 207, 142, 0.07);
 }
 
-.pads-slot {
+.cv-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.cv-shell {
+  fill: #1a2433;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 1.5;
+}
+
+.cv-grip {
+  fill: rgba(0, 0, 0, 0.25);
+}
+
+.cv-ds .cv-shell {
+  fill: #d8dee8;
+  stroke: rgba(20, 28, 40, 0.2);
+}
+
+.cv-ds .cv-lightbar {
+  fill: #4aa3ff;
+  opacity: 0.85;
+}
+
+.cv-btn rect,
+.cv-btn circle {
+  fill: #2a3648;
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 1;
+  transition: fill 60ms linear, filter 60ms linear;
+}
+
+.cv-ds .cv-btn rect,
+.cv-ds .cv-btn circle {
+  fill: #c5ccd8;
+  stroke: rgba(20, 28, 40, 0.18);
+}
+
+.cv-btn text {
+  fill: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  pointer-events: none;
+  user-select: none;
+}
+
+.cv-ds .cv-btn text {
+  fill: #3a4658;
+  font-size: 11px;
+}
+
+.cv-btn.is-on rect,
+.cv-btn.is-on circle {
+  fill: var(--accent);
+  filter: drop-shadow(0 0 6px rgba(62, 207, 142, 0.55));
+}
+
+.cv-btn.is-on text {
+  fill: #04140c;
+}
+
+.cv-xbox .cv-a.is-on circle {
+  fill: #3ecf8e;
+}
+.cv-xbox .cv-b.is-on circle {
+  fill: #ff6b6b;
+}
+.cv-xbox .cv-x.is-on circle {
+  fill: #4aa3ff;
+}
+.cv-xbox .cv-y.is-on circle {
+  fill: #f0b429;
+}
+
+.cv-ds .cv-cross.is-on circle {
+  fill: #7eb6ff;
+}
+.cv-ds .cv-circle.is-on circle {
+  fill: #ff7eb6;
+}
+.cv-ds .cv-square.is-on circle {
+  fill: #c9a0ff;
+}
+.cv-ds .cv-tri.is-on circle {
+  fill: #7ee0b8;
+}
+
+.cv-trigger-well {
+  fill: rgba(0, 0, 0, 0.35);
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 1;
+}
+
+.cv-trigger-fill {
+  fill: #2a3648;
+}
+
+.cv-trigger-fill.is-on {
+  fill: var(--accent);
+}
+
+.cv-trigger text {
+  fill: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.cv-stick-well {
+  fill: rgba(0, 0, 0, 0.35);
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
+
+.cv-ds .cv-stick-well {
+  fill: rgba(20, 28, 40, 0.12);
+}
+
+.cv-stick-knob {
+  fill: #3a4a5e;
+}
+
+.cv-ds .cv-stick-knob {
+  fill: #aeb6c4;
+}
+
+.cv-btn.is-on .cv-stick-knob {
+  fill: var(--accent);
+}
+
+.cv-dpad-hub {
+  fill: #1a2433;
+}
+
+.cv-guide.is-on circle,
+.cv-ps.is-on circle {
+  fill: var(--accent);
+}
+
+.cv-cap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  font-size: 0.82rem;
+}
+
+.cv-slot {
   flex-shrink: 0;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.06em;
   color: var(--muted);
 }
 
-.pads-item.is-active .pads-slot {
+.cv.is-active .cv-slot {
   color: var(--accent);
 }
 
-.pads-name {
+.cv-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.pads-active {
+.cv-active {
   flex-shrink: 0;
-  font-size: 0.68rem;
+  margin-left: auto;
+  font-size: 0.66rem;
   font-weight: 650;
   letter-spacing: 0.05em;
   text-transform: uppercase;

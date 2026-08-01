@@ -65,14 +65,23 @@ impl VirtualPad {
         }
     }
 
-    /// Accept pad frames but do not inject (video-only host on Windows/macOS).
-    #[cfg(not(target_os = "linux"))]
+    /// Accept pad frames but do not inject. Used for video-only hosts and for
+    /// controller tests that exercise the apply path without `/dev/uinput`.
     pub fn create_noop(cfg: VirtualPadConfig) -> Self {
         info!(
-            "virtual pad noop — video-only host on this OS ('{}')",
+            "virtual pad noop — no uinput injection ('{}')",
             cfg.name
         );
-        Self { _cfg: cfg }
+        #[cfg(target_os = "linux")]
+        {
+            Self {
+                inner: linux::LinuxUInput::noop(),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self { _cfg: cfg }
+        }
     }
 
     pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
@@ -161,10 +170,15 @@ mod linux {
     }
 
     pub struct LinuxUInput {
-        file: std::fs::File,
+        /// `None` = noop (tests / video-only); no `/dev/uinput` traffic.
+        file: Option<std::fs::File>,
     }
 
     impl LinuxUInput {
+        pub fn noop() -> Self {
+            Self { file: None }
+        }
+
         pub fn create(cfg: &VirtualPadConfig) -> Result<Self> {
             let file = OpenOptions::new()
                 .read(true)
@@ -219,10 +233,13 @@ mod linux {
 
             // Give udev a moment to create /dev/input/event*
             std::thread::sleep(std::time::Duration::from_millis(100));
-            Ok(Self { file })
+            Ok(Self { file: Some(file) })
         }
 
         pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
+            if self.file.is_none() {
+                return Ok(());
+            }
             let b = frame.buttons;
             self.emit_key(BTN_WEST, b & buttons::SQUARE != 0)?;
             self.emit_key(BTN_SOUTH, b & buttons::CROSS != 0)?;
@@ -261,6 +278,9 @@ mod linux {
         }
 
         fn emit(&mut self, type_: u16, code: u16, value: i32) -> Result<()> {
+            let Some(file) = self.file.as_mut() else {
+                return Ok(());
+            };
             let ev = InputEvent {
                 time_sec: 0,
                 time_usec: 0,
@@ -274,15 +294,18 @@ mod linux {
                     std::mem::size_of::<InputEvent>(),
                 )
             };
-            self.file.write_all(bytes)?;
+            file.write_all(bytes)?;
             Ok(())
         }
     }
 
     impl Drop for LinuxUInput {
         fn drop(&mut self) {
+            let Some(file) = self.file.as_ref() else {
+                return;
+            };
             unsafe {
-                let _ = libc_ioctl(self.file.as_raw_fd(), UI_DEV_DESTROY, 0);
+                let _ = libc_ioctl(file.as_raw_fd(), UI_DEV_DESTROY, 0);
             }
         }
     }

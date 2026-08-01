@@ -1,4 +1,5 @@
 /target/
+.tools/
 .local-libs/
 **/node_modules/
 infra/certs/*.pem

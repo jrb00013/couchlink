@@ -163,13 +163,58 @@ struct ResolvedArgs {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse().resolve()?;
-
-    if args.headless {
-        run_headless(args)
-    } else {
-        run_windowed(args)
+    let cli = Args::parse();
+    if cli.headless {
+        let args = cli.resolve()?;
+        return run_headless(args);
     }
+
+    // Windowed: skip the OS dialog — the waiting screen has an editable join field.
+    let mut join_prefill = cli
+        .join_url
+        .clone()
+        .or(cli.positional_join.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("COUCHLINK_JOIN_URL").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(config_file::read_join_url_from_config)
+        .unwrap_or_default();
+
+    loop {
+        let resolved = if join_prefill.trim().is_empty() {
+            None
+        } else {
+            match resolve_join_string(&join_prefill, &cli) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    warn!("join prefill invalid ({e}) — edit the waiting-screen field");
+                    None
+                }
+            }
+        };
+        match run_windowed(resolved, join_prefill.clone())? {
+            view::ViewResult::Closed => return Ok(()),
+            view::ViewResult::Rejoin(url) => {
+                let _ = config_file::write_join_url(&url);
+                join_prefill = url;
+            }
+        }
+    }
+}
+
+fn resolve_join_string(raw: &str, cli: &Args) -> Result<ResolvedArgs> {
+    let parsed = invite::parse_join_input(raw)?;
+    let ice_ips = reachability::discover_ice_ips(cli.ice_ips.clone());
+    Ok(ResolvedArgs {
+        signaling: parsed.signaling,
+        session_id: parsed.session_id,
+        pin: parsed.pin,
+        send_pad: cli.send_pad,
+        turn_url: parsed.turn_url.or_else(|| cli.turn_url.clone()),
+        turn_user: parsed.turn_user.or_else(|| cli.turn_user.clone()),
+        turn_pass: parsed.turn_pass.or_else(|| cli.turn_pass.clone()),
+        ice_ips,
+        headless: false,
+    })
 }
 
 /// Today's exact pad-only behavior, unchanged, just renamed and made callable
@@ -190,7 +235,10 @@ fn run_headless(args: ResolvedArgs) -> Result<()> {
 /// Opens the video window on this (main) thread; networking + decode + pad
 /// polling run on a background thread with its own Tokio runtime. Falls back
 /// to `run_headless` if window/GPU creation fails.
-fn run_windowed(args: ResolvedArgs) -> Result<()> {
+///
+/// `join_prefill` seeds the waiting-screen field. `args` starts networking when
+/// present; otherwise the window waits until the user submits a join link.
+fn run_windowed(args: Option<ResolvedArgs>, join_prefill: String) -> Result<view::ViewResult> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -203,38 +251,48 @@ fn run_windowed(args: ResolvedArgs) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
     let keyboard_pad = Arc::new(Mutex::new(KeyboardPad::new()));
 
-    let net_args = args.clone();
-    let net_keyboard_pad = keyboard_pad.clone();
-    let net_thread = std::thread::Builder::new()
-        .name("couchlink-net".into())
-        .spawn(move || -> Result<()> {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async_main(
-                net_args,
-                Some(frame_tx),
-                Some((net_keyboard_pad, shutdown_rx)),
-            ))
-        })
-        .expect("spawn network thread");
+    let net_thread = if let Some(net_args) = args.clone() {
+        let net_keyboard_pad = keyboard_pad.clone();
+        Some(
+            std::thread::Builder::new()
+                .name("couchlink-net".into())
+                .spawn(move || -> Result<()> {
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(async_main(
+                        net_args,
+                        Some(frame_tx),
+                        Some((net_keyboard_pad, shutdown_rx)),
+                    ))
+                })
+                .expect("spawn network thread"),
+        )
+    } else {
+        drop(frame_tx);
+        drop(shutdown_rx);
+        None
+    };
 
-    match view::run(frame_rx, keyboard_pad, shutdown_tx) {
-        Ok(()) => {}
+    let view_result = match view::run(frame_rx, keyboard_pad, shutdown_tx, join_prefill) {
+        Ok(r) => r,
         Err(e) => {
             warn!("windowed viewer failed ({e}), falling back to headless mode");
-            // `shutdown_tx` was moved into `view::run` and is dropped now that
-            // it has returned; the net thread observes that as a disconnect
-            // (see the shutdown check in `async_main`) and winds down on its
-            // own. Join it before starting a second networking stack so the
-            // two never run concurrently against the same session.
-            if let Err(join_err) = net_thread.join() {
-                warn!("network thread panicked during fallback shutdown: {join_err:?}");
+            if let Some(net_thread) = net_thread {
+                if let Err(join_err) = net_thread.join() {
+                    warn!("network thread panicked during fallback shutdown: {join_err:?}");
+                }
             }
-            return run_headless(args);
+            let Some(args) = args else {
+                return Err(e).context("window failed and no join credentials for headless");
+            };
+            run_headless(args)?;
+            return Ok(view::ViewResult::Closed);
         }
-    }
+    };
 
-    let _ = net_thread.join();
-    Ok(())
+    if let Some(net_thread) = net_thread {
+        let _ = net_thread.join();
+    }
+    Ok(view_result)
 }
 
 /// Shared networking core for both modes. In windowed mode, `video_frame_out`

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Point humans at the virtual Bluetooth DualSense created by couchlink-host.
+# For two local Windows DualSenses fighting over the same RPCS3 slot, use:
+#   powershell.exe -ExecutionPolicy Bypass -File adapters/rpcs3/configure_local_pads.ps1
 set -euo pipefail
 echo "Couchlink virtual pad should appear as:"
 echo "  DualSense Wireless Controller (Bluetooth, 054c:0ce6)"
@@ -18,4 +20,4 @@ PY
 fi
 echo
 echo "In RPCS3 → Pads, bind Player 2 to that device."
-echo "Windows users: see dualsensekit scripts/windows/rpcs3_configure_pads.ps1 for local pads."
+echo "Windows local two-pad fix: adapters/rpcs3/configure_local_pads.ps1 (SDL handler)."
