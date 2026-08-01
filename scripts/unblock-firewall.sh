@@ -42,16 +42,16 @@ case "$PLATFORM" in
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
       sudo ufw allow 41641/udp comment 'tailscale' || true
       sudo ufw allow 3478 comment 'couchlink-turn' || true
-      sudo ufw allow 3479/udp comment 'headscale-stun' || true
+      sudo ufw allow 34790/udp comment 'headscale-stun' || true
       sudo ufw allow 8443/tcp comment 'couchlink-signaling' || true
     elif command -v firewall-cmd >/dev/null 2>&1; then
       sudo firewall-cmd --permanent --add-port=41641/udp || true
       sudo firewall-cmd --permanent --add-port=3478/tcp --add-port=3478/udp || true
-      sudo firewall-cmd --permanent --add-port=3479/udp || true
+      sudo firewall-cmd --permanent --add-port=34790/udp || true
       sudo firewall-cmd --permanent --add-port=8443/tcp || true
       sudo firewall-cmd --reload || true
     else
-      echo "    no ufw/firewalld — ensure UDP 41641/3478/3479 and TCP 8443 are allowed"
+      echo "    no ufw/firewalld — ensure UDP 41641/3478/34790 and TCP 8443 are allowed"
     fi
     ;;
   macos)

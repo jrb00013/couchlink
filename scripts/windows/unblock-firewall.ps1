@@ -31,7 +31,7 @@ Write-Host "Couchlink: unblock Windows firewall"
 Ensure-Rule "couchlink-signaling-8443" "TCP" 8443
 Ensure-Rule "couchlink-turn-3478-tcp" "TCP" 3478
 Ensure-Rule "couchlink-turn-3478-udp" "UDP" 3478
-Ensure-Rule "couchlink-headscale-stun-3479" "UDP" 3479
+Ensure-Rule "couchlink-headscale-stun-34790" "UDP" 34790
 Ensure-Rule "tailscale-wireguard-41641" "UDP" 41641
 
 # Allow Tailscale binaries if present

@@ -26,9 +26,11 @@ tailscale up --login-server="$hs" --auth-key="$tskey"
 4. Join the host mesh client to **this** Headscale (`--login-server=$hs`, never login.tailscale.com)
 5. Export `COUCHLINK_MESH=headscale`, mesh IP, `COUCHLINK_HS_URL`, `COUCHLINK_TS_AUTHKEY`
 
-Override public URL: `COUCHLINK_HS_URL=https://hs.example.com`
+Override public URL: `COUCHLINK_HS_URL=https://hs.example.com`  
+Local-only (dev): `COUCHLINK_HS_LOCAL=1`  
+Default invite `hs=` is `http://PUBLIC_IP:8080` (open TCP 8080). Cloudflare quick tunnels break Noise register — opt-in only via `COUCHLINK_HS_USE_CLOUDFLARED=1`.
 
-Client binary helper (Linux/WSL, no Windows Tailscale popup):
+Client binary helper (Linux/WSL userspace, no Windows Tailscale popup):
 `./scripts/ensure-headscale-client.sh`
 
 Optional Tailscale Inc cloud (kept, not auto-run):
@@ -59,7 +61,7 @@ If Headscale fails, `host --online` still tries Tailscale cloud / WireGuard / Cl
 
 - Treat join URLs as secrets (auth keys).
 - Bootstrap DERP uses Tailscale’s public DERP map so Headscale can start before HTTPS;
-  once `hs=` is HTTPS (cloudflared), embedded DERP on the host is enabled (STUN **UDP 3479**).
-- STUN for embedded DERP uses **UDP 3479** (3478 stays couchlink TURN).
-- Smoke: `./scripts/test-headscale.sh`
+  once `hs=` is HTTPS (cloudflared), embedded DERP on the host is enabled (STUN **UDP 34790**).
+- STUN for embedded DERP uses **UDP 34790** (3478/3479 stay available for coturn).
+- Smoke: `./scripts/test-headscale.sh` · live: `./scripts/smoke-headscale-live.sh`
 - See design: `docs/superpowers/specs/2026-08-01-headscale-mesh-design.md`

@@ -22,8 +22,8 @@ derp:
     region_code: "couchlink"
     region_name: "Couchlink DERP"
     verify_clients: true
-    # 3479 avoids clash with couchlink coturn on 3478
-    stun_listen_addr: "0.0.0.0:3479"
+    # Avoid clash with coturn (3478) and coturn alt/relay ports that bind 3479 on some setups
+    stun_listen_addr: "0.0.0.0:34790"
     private_key_path: REPLACE_DATA_DIR/derp_server_private.key
     automatically_add_embedded_derp_region: true
   # Required so Headscale can boot before embedded DERP/HTTPS is ready.

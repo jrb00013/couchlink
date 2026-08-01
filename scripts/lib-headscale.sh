@@ -133,3 +133,54 @@ if m:
 sys.exit(1)
 ' <<<"$out"
 }
+
+# Userspace tailscaled for Headscale (no sudo / no Windows Tailscale popup).
+# Prints socket path on stdout.
+couchlink_headscale_userspace_start() {
+  local root="$1"
+  local name="${2:-host}"
+  local dir="$root/infra/headscale/data/us-$name"
+  local sock="$dir/tailscaled.sock"
+  local pidf="$dir/tailscaled.pid"
+  local logf="$dir/tailscaled.log"
+  local tsbin
+  tsbin="$(command -v tailscaled 2>/dev/null || true)"
+  [[ -n "$tsbin" ]] || tsbin="/usr/sbin/tailscaled"
+  [[ -x "$tsbin" ]] || return 1
+  mkdir -p "$dir"
+  if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+    [[ -S "$sock" ]] && { printf '%s' "$sock"; return 0; }
+  fi
+  if [[ -f "$pidf" ]]; then
+    kill "$(cat "$pidf")" 2>/dev/null || true
+    rm -f "$pidf"
+  fi
+  rm -f "$sock"
+  "$tsbin" --tun=userspace-networking --statedir="$dir" --socket="$sock" >"$logf" 2>&1 &
+  echo $! >"$pidf"
+  local i
+  for i in $(seq 1 30); do
+    [[ -S "$sock" ]] && { printf '%s' "$sock"; return 0; }
+    sleep 0.2
+  done
+  return 1
+}
+
+# Join Headscale via userspace client. Args: root name login_url auth_key
+couchlink_headscale_userspace_up() {
+  local root="$1" name="$2" login="$3" key="$4"
+  local sock ts
+  sock="$(couchlink_headscale_userspace_start "$root" "$name")" || return 1
+  ts="$(command -v tailscale)" || return 1
+  "$ts" --socket="$sock" up --login-server="$login" --auth-key="$key" \
+    --accept-dns=false --accept-routes=false --hostname="couchlink-${name}" \
+    || return 1
+  printf '%s' "$sock"
+}
+
+couchlink_headscale_userspace_ip() {
+  local sock="$1"
+  local ts
+  ts="$(command -v tailscale)" || return 1
+  "$ts" --socket="$sock" ip -4 2>/dev/null | head -1 | tr -d ' \r\n'
+}

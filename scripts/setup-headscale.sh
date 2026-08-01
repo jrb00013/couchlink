@@ -49,13 +49,17 @@ elif ! grep -q 'controlplane.tailscale.com/derpmap' "$CFG" 2>/dev/null; then
 fi
 
 if [[ "$need_rewrite" == "1" ]]; then
-  # Preserve noise/db if present by only rewriting from example when absent/broken.
   if [[ -f "$CFG" ]]; then
     cp -f "$CFG" "$CFG.bak.$(date +%s)" 2>/dev/null || true
   fi
   sed "s|REPLACE_DATA_DIR|${DATA}|g" "$EXAMPLE" >"$CFG"
   echo "==> wrote $CFG"
 else
+  # In-place upgrades for known conflicts
+  if grep -q 'stun_listen_addr: "0.0.0.0:3479"' "$CFG" 2>/dev/null; then
+    sed -i 's/stun_listen_addr: "0.0.0.0:3479"/stun_listen_addr: "0.0.0.0:34790"/' "$CFG"
+    echo "==> upgraded STUN listen port to 34790 (avoid coturn clash)"
+  fi
   echo "==> keep existing $CFG"
 fi
 
