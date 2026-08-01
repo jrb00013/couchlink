@@ -28,7 +28,7 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 git clone https://github.com/jrb00013/couchlink.git
 cd couchlink
 
-# Friend (default): player + Tailscale — paste the host join URL
+# Friend (default): player — paste the host join URL (LAN or remote)
 ./install.sh
 ./install.sh --online
 

@@ -222,19 +222,26 @@ if [[ "$ROLE" == "host" ]]; then
     fi
   fi
 elif [[ "$ROLE" == "client" ]]; then
-  # Client: ensure Tailscale so pasted http://100.x links route; then prompt for URL.
-  if [[ "$MODE" == "online" ]]; then
+  # Only nudge Tailscale when the join URL is clearly a Tailscale mesh invite.
+  _join="${COUCHLINK_JOIN_URL:-}"
+  if [[ -n "$_join" ]] && {
+       [[ "$_join" == *mesh=tailscale* ]] \
+       || [[ "$_join" =~ ://100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]
+     }; then
+    echo "==> join URL is Tailscale mesh — ensuring Tailscale is up"
     couchlink_ensure_client_tailscale "$ROOT" || true
+  fi
+  if [[ "$MODE" == "online" ]]; then
     if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
       echo "==> online client — join URL set (TURN from invite)"
     elif [[ -n "${COUCHLINK_TURN_URL:-}" && -n "${COUCHLINK_TURN_USER:-}" && -n "${COUCHLINK_TURN_PASS:-}" ]]; then
       echo "==> online client — TURN credentials from env"
     else
       echo "==> online client — paste the host join URL when prompted"
-      echo "    Tailscale: http://100.x…  ·  else use the full URL host printed (may include turn=)"
+      echo "    LAN/Cloudflare links need no Tailscale; http://100.x… needs the same tailnet"
     fi
   else
-    echo "==> local client — paste join URL if credentials are missing"
+    echo "==> local client — paste join URL if credentials are missing (no Tailscale needed)"
   fi
 fi
 

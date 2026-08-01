@@ -29,12 +29,12 @@ Skip mesh entirely: `COUCHLINK_SKIP_MESH=1`
 **Friend**
 
 ```bash
-./install.sh                          # player + Tailscale (default)
+./install.sh                          # player only (no Tailscale required)
 ./install.sh --online                 # prompts — paste the host join URL
 ```
 
-1. Both sign into Tailscale on the **same tailnet** (host can share the node).  
-2. Friend pastes the host join URL into **Couchlink Player**.  
+1. Paste the host join URL into **Couchlink Player**.  
+2. **Only if** the URL is `http://100.x…` / `mesh=tailscale`: install Tailscale and join the **same tailnet** (host can share the node). LAN and Cloudflare links need no Tailscale.  
 3. Browser over `http://100.x` works for signaling/RTP fallback; WebCodecs wants https — use the native client.
 
 ## Quick start — WireGuard

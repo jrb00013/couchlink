@@ -1,19 +1,20 @@
 # Couchlink Player — for friends (download & install)
 
-## From source (easiest paste-link)
+## From source
 
 ```bash
-./install.sh              # player + Tailscale (default)
-./install.sh --online     # start client — paste the host join URL
+./install.sh              # player only — no Tailscale required
+./install.sh --run        # LAN: paste the host’s LAN join URL
+./install.sh --online     # remote: paste whatever URL the host sent
 ```
 
-Host (gaming PC) instead:
+Host (gaming PC):
 
 ```bash
-./install.sh --host --online   # prints http://100.x… join URL when Tailscale is up
+./install.sh --host --online   # may print http://100.x… if Tailscale is up
 ```
 
-Both need Tailscale signed in on the **same tailnet**. Then the friend pastes the link into the player.
+**Tailscale is only needed** when the join URL is a Tailscale address (`http://100.x…` / `mesh=tailscale`). Same Wi‑Fi and Cloudflare/public links work without it.
 
 ## Packaged download
 

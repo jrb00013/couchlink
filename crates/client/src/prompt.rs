@@ -56,7 +56,7 @@ fn prompt_stdin(prefill: &str) -> Result<PromptedJoin> {
     writeln!(stdout, "\n=== Couchlink — join a session ===")?;
     writeln!(
         stdout,
-        "Paste the full join URL from the host (http://100.x… Tailscale, or the link they sent)."
+        "Paste the full join URL from the host (LAN, Cloudflare, or Tailscale http://100.x…)."
     )?;
     if !prefill.is_empty() {
         writeln!(stdout, "Current: {prefill}")?;
