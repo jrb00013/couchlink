@@ -27,7 +27,7 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 ```bash
 git clone https://github.com/jrb00013/couchlink.git
 cd couchlink
-./install.sh
+./install.sh --online    # deps + WireGuard up + host --online (or plain ./install.sh)
 source .env.couchlink
 ```
 
