@@ -1,0 +1,66 @@
+# Minimal Headscale config for couchlink (paths filled by setup-headscale.sh).
+# See docs/HEADSCALE.md.
+
+server_url: http://127.0.0.1:8080
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
+
+noise:
+  private_key_path: REPLACE_DATA_DIR/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+derp:
+  server:
+    # Requires HTTPS server_url (cloudflared). Enabled by enable-headscale.sh when public.
+    enabled: false
+    region_id: 999
+    region_code: "couchlink"
+    region_name: "Couchlink DERP"
+    verify_clients: true
+    # Avoid clash with coturn (3478) and coturn alt/relay ports that bind 3479 on some setups
+    stun_listen_addr: "0.0.0.0:34790"
+    private_key_path: REPLACE_DATA_DIR/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+  # Required so Headscale can boot before embedded DERP/HTTPS is ready.
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths: []
+  auto_update_enabled: true
+  update_frequency: 24h
+
+database:
+  type: sqlite
+  sqlite:
+    path: REPLACE_DATA_DIR/db.sqlite
+    write_ahead_log: true
+
+policy:
+  mode: file
+  path: ""
+
+dns:
+  magic_dns: true
+  # Must differ from the server_url host.
+  base_domain: couchlink.local
+  override_local_dns: false
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 8.8.8.8
+
+unix_socket: REPLACE_DATA_DIR/headscale.sock
+unix_socket_permission: "0770"
+
+log:
+  level: info
+  format: text
+
+logtail:
+  enabled: false
+
+disable_check_updates: true

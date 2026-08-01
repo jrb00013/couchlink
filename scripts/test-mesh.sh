@@ -61,6 +61,30 @@ couchlink_try_mesh_online 8443 "$PLATFORM" || fail "tailscale override"
 pass "Tailscale override sets 100.x invite"
 unset COUCHLINK_MESH COUCHLINK_MESH_IP
 
+# --- Headscale override ---
+export COUCHLINK_MESH=headscale
+export COUCHLINK_MESH_IP=100.64.0.2
+export COUCHLINK_HS_URL=https://hs.example.com
+export COUCHLINK_TS_AUTHKEY=tskey-auth-test
+unset COUCHLINK_ICE_IPS || true
+unset COUCHLINK_TURN_URL || true
+couchlink_try_mesh_online 8443 "$PLATFORM" || fail "headscale override"
+[[ "${COUCHLINK_INVITE_SIGNALING}" == "ws://100.64.0.2:8443/ws" ]] || fail "HS INVITE"
+[[ "${COUCHLINK_MESH}" == "headscale" ]] || fail "MESH kind headscale"
+pass "Headscale override sets 100.x invite"
+unset COUCHLINK_MESH COUCHLINK_MESH_IP COUCHLINK_HS_URL COUCHLINK_TS_AUTHKEY
+
+# --- write_mesh_env_file ---
+_tmp_env="$(mktemp)"
+export COUCHLINK_MESH=headscale COUCHLINK_MESH_IP=100.64.0.3 COUCHLINK_HS_URL=https://x COUCHLINK_TS_AUTHKEY=k
+couchlink_apply_mesh_invite headscale 100.64.0.3 8443 "$PLATFORM" || fail "apply headscale"
+couchlink_write_mesh_env_file "$_tmp_env"
+grep -q 'COUCHLINK_MESH=headscale' "$_tmp_env" || fail "mesh.env MESH"
+grep -q 'COUCHLINK_HS_URL=' "$_tmp_env" || fail "mesh.env HS_URL"
+rm -f "$_tmp_env"
+unset COUCHLINK_MESH COUCHLINK_MESH_IP COUCHLINK_HS_URL COUCHLINK_TS_AUTHKEY
+pass "couchlink_write_mesh_env_file"
+
 # --- setup-wireguard idempotent ---
 if command -v wg >/dev/null 2>&1; then
   "$ROOT/scripts/setup-wireguard.sh" >/dev/null
@@ -81,10 +105,23 @@ pass "setup-tailscale --check runs"
 # --- bash syntax ---
 bash -n "$ROOT/scripts/run.sh"
 bash -n "$ROOT/scripts/lib-mesh.sh"
+bash -n "$ROOT/scripts/lib-headscale.sh"
+bash -n "$ROOT/scripts/setup-headscale.sh"
+bash -n "$ROOT/scripts/enable-headscale.sh"
+bash -n "$ROOT/scripts/join-headscale.sh"
+bash -n "$ROOT/scripts/unblock-firewall.sh"
 bash -n "$ROOT/scripts/start-host.sh"
 bash -n "$ROOT/scripts/setup-wireguard.sh"
 bash -n "$ROOT/scripts/setup-tailscale.sh"
 bash -n "$ROOT/install.sh"
 pass "bash -n clean"
+
+# --- headscale control-plane smoke (local, no cloudflared) ---
+if [[ "${COUCHLINK_SKIP_HEADSCALE_SMOKE:-0}" != "1" ]]; then
+  if [[ -x "$ROOT/scripts/test-headscale.sh" ]]; then
+    "$ROOT/scripts/test-headscale.sh" || fail "test-headscale.sh"
+    pass "test-headscale.sh"
+  fi
+fi
 
 echo "ALL MESH SMOKE CHECKS PASSED (platform=$PLATFORM)"

@@ -8,6 +8,7 @@ source "$ROOT/scripts/lib-platform.sh"
 
 RUN_AFTER=0
 RUN_MODE="local"
+UNBLOCK_FIREWALL=0
 # Default = friend/player. Gaming PC uses --host.
 INSTALL_ROLE="${COUCHLINK_INSTALL_ROLE:-client}"
 INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
@@ -20,21 +21,26 @@ for arg in "$@"; do
     --client|--player) INSTALL_ROLE="client" ;; # legacy aliases; default is already client
     --mesh) INSTALL_MESH=1 ;;
     --no-mesh) INSTALL_MESH=0 ;;
+    --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
     -h|--help)
       cat <<EOF
-usage: ./install.sh [--host] [--run|--online|--local] [--mesh|--no-mesh]
+usage: ./install.sh [--host] [--run|--online|--local] [--mesh|--no-mesh] [--unblock-firewall]
 
   Default (friend / player):
-    ./install.sh              build player + Tailscale
+    ./install.sh              build player (Headscale-ready; no Tailscale Inc popup)
     ./install.sh --run        then start client --local (paste host join URL)
-    ./install.sh --online     then start client --online (paste host join URL)
+    ./install.sh --online     then start client --online (paste host join URL;
+                              auto-joins Headscale when invite has hs= + tskey=)
+    ./install.sh --online --unblock-firewall
+                              also open local OS firewall for mesh/TURN
 
   Host (gaming PC):
-    ./install.sh --host                 build host stack + mesh tooling
-    ./install.sh --host --online        then host --online
+    ./install.sh --host                 build host + Headscale + WireGuard
+    ./install.sh --host --online        then host --online (Headscale PRIME mesh)
     ./install.sh --host --local|--run   then host --local
 
-  --mesh / --no-mesh   Tailscale (and WireGuard on --host); default on
+  --mesh / --no-mesh   mesh tooling; default on
+  Opt-in Tailscale Inc cloud install: COUCHLINK_INSTALL_TAILSCALE_CLOUD=1
 EOF
       exit 0
       ;;
@@ -276,17 +282,28 @@ if [[ ! -f .env.couchlink ]]; then
   fi
 fi
 
-# Always install Tailscale (simple). Hosts also get WireGuard as mesh fallback.
-# Disable with --no-mesh or COUCHLINK_INSTALL_MESH=0.
+# Mesh tooling — Headscale PRIME. Tailscale Inc cloud install is OPT-IN only
+# (kept in scripts/setup-tailscale.sh — do not auto-run; it pops Windows UAC).
+# Disable mesh tooling with --no-mesh or COUCHLINK_INSTALL_MESH=0.
+# Opt into Tailscale Inc cloud: COUCHLINK_INSTALL_TAILSCALE_CLOUD=1
 if [[ "${COUCHLINK_INSTALL_MESH:-1}" == "1" ]]; then
   if [[ "$INSTALL_ROLE" == "client" ]]; then
-    echo "==> Tailscale (always — ready when the host sends a mesh join URL)"
-    if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+    echo "==> Headscale-ready client (open-source mesh client; no Tailscale Inc login)"
+    if [[ -x "$ROOT/scripts/ensure-headscale-client.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/ensure-headscale-client.sh" >/dev/null \
+        || echo "warning: Headscale client binary not ready — will install on first --online join"
+    fi
+    if [[ "${COUCHLINK_INSTALL_TAILSCALE_CLOUD:-0}" == "1" && -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+      echo "==> COUCHLINK_INSTALL_TAILSCALE_CLOUD=1 — installing Tailscale Inc client (optional fallback)"
       run_as_user bash "$ROOT/scripts/setup-tailscale.sh" --ensure \
-        || echo "warning: Tailscale not ready — install/sign-in from https://tailscale.com/download"
+        || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
+    fi
+    if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
+      bash "$ROOT/scripts/unblock-firewall.sh" \
+        || echo "warning: unblock-firewall failed (best-effort)"
     fi
   else
-    echo "==> mesh tooling (Tailscale + WireGuard)"
+    echo "==> mesh tooling (Headscale PRIME + WireGuard fallback)"
     case "$PLATFORM" in
       linux|wsl)
         if command -v apt-get >/dev/null; then
@@ -299,12 +316,20 @@ if [[ "${COUCHLINK_INSTALL_MESH:-1}" == "1" ]]; then
         if [[ -n "${BREW:-}" ]]; then
           run_as_user "$BREW" install wireguard-tools \
             || echo "warning: brew wireguard-tools failed"
-          run_as_user "$BREW" install --cask tailscale \
-            || echo "warning: brew cask tailscale failed (install from https://tailscale.com/download)"
         fi
         ;;
     esac
-    if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+    if [[ -x "$ROOT/scripts/setup-headscale.sh" ]]; then
+      echo "==> Headscale binary + config (PRIME mesh for --online)"
+      run_as_user bash "$ROOT/scripts/setup-headscale.sh" \
+        || echo "warning: setup-headscale.sh failed — see docs/HEADSCALE.md"
+    fi
+    if [[ -x "$ROOT/scripts/ensure-headscale-client.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/ensure-headscale-client.sh" >/dev/null \
+        || echo "warning: Headscale client binary not ready — enable-headscale will retry"
+    fi
+    if [[ "${COUCHLINK_INSTALL_TAILSCALE_CLOUD:-0}" == "1" && -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+      echo "==> COUCHLINK_INSTALL_TAILSCALE_CLOUD=1 — Tailscale Inc fallback (optional)"
       run_as_user bash "$ROOT/scripts/setup-tailscale.sh" --ensure \
         || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
     fi
@@ -313,7 +338,7 @@ if [[ "${COUCHLINK_INSTALL_MESH:-1}" == "1" ]]; then
         || echo "warning: setup-wireguard.sh failed — see docs/WIREGUARD.md"
     fi
     if [[ -x "$ROOT/scripts/enable-wireguard.sh" ]]; then
-      echo "==> bringing WireGuard tunnel up (fallback if Tailscale is down; UAC once on Windows/WSL)"
+      echo "==> bringing WireGuard tunnel up (fallback if Headscale down; UAC once on Windows/WSL)"
       bash "$ROOT/scripts/enable-wireguard.sh" \
         || echo "warning: enable-wireguard failed — import conf manually (docs/MESH.md)"
     fi
@@ -324,18 +349,23 @@ echo ""
 echo "OK — install finished ($INSTALL_ROLE)"
 echo "  binaries: $REAL_HOME/.local/bin"
 if [[ "$INSTALL_ROLE" == "client" ]]; then
-  echo "  next:    ./install.sh --run        # or: ./install.sh --online"
-  echo "           → paste the host join URL when prompted"
-  echo "  tip:     sign into Tailscale (same account / shared node as host) for mesh links"
+  echo "  next:    ./install.sh --online                 # paste host join URL (Headscale auto-join)"
+  echo "           ./install.sh --online --unblock-firewall"
+  echo "  tip:     no Tailscale Inc account — hs=/tskey= in the invite"
 else
   echo "  next:    ./install.sh --host --online"
   echo "  friend:  ./install.sh && ./install.sh --online"
+  echo "  docs:    docs/HEADSCALE.md"
 fi
 echo ""
 
 if [[ "$RUN_AFTER" == "1" ]]; then
-  echo "==> starting ./scripts/run.sh ${INSTALL_ROLE} --${RUN_MODE}"
-  exec bash "$ROOT/scripts/run.sh" "$INSTALL_ROLE" "--${RUN_MODE}"
+  RUN_ARGS=("$INSTALL_ROLE" "--${RUN_MODE}")
+  if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
+    RUN_ARGS+=(--unblock-firewall)
+  fi
+  echo "==> starting ./scripts/run.sh ${RUN_ARGS[*]}"
+  exec bash "$ROOT/scripts/run.sh" "${RUN_ARGS[@]}"
 fi
 
 # Auto-source .env.couchlink only when explicitly requested — the interactive

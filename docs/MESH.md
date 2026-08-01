@@ -1,28 +1,48 @@
-# Mesh path (Tailscale + WireGuard) — PRIME for `--online`
+# Mesh path (Headscale + Tailscale + WireGuard) — PRIME for `--online`
 
 When your router won’t do UPnP and IPv6 isn’t an option for your friend,
-**Tailscale** or **WireGuard** is the intended way to play across the globe.
-Cloudflare / UPnP / IPv6 TURN remain automatic **fallbacks** if no mesh is up.
+**Headscale** (self-hosted), **Tailscale**, or **WireGuard** is the intended way
+to play across the globe. Cloudflare / UPnP / IPv6 TURN remain automatic
+**fallbacks** if no mesh is up.
 
 ## Priority (`./scripts/run.sh host --online`)
 
-1. **Tailscale** — if `tailscale ip -4` returns a `100.x` address  
-2. **WireGuard** — if `wg0` (Linux) or Windows WireGuard tunnel is up (`10.66.0.1` by default)  
-3. **UPnP + public IPv4 TURN**  
-4. **Cloudflare HTTPS** invite + **IPv6 TURN** (or IPv4 TURN warning)  
-5. **bore** signaling-only last resort  
+1. **Headscale** — host runs control plane + DERP; invite has `mesh=headscale&hs=&tskey=`  
+2. **Tailscale** (Tailscale Inc) — if `tailscale ip -4` returns a `100.x` address  
+3. **WireGuard** — if `wg0` (Linux) or Windows WireGuard tunnel is up (`10.66.0.1` by default)  
+4. **UPnP + public IPv4 TURN**  
+5. **Cloudflare HTTPS** invite + **IPv6 TURN** (or IPv4 TURN warning)  
+6. **bore** signaling-only last resort  
 
-Mesh sessions skip Cloudflare. On **native Linux/macOS**, TURN is skipped (direct ICE on the mesh iface). On **WSL**, TURN stays on `turn:MESH_IP:3478` because WebRTC UDP is not covered by WSL portproxy — friends still get a working media path.
+Mesh sessions skip Cloudflare for signaling. On **native Linux/macOS**, TURN is skipped (direct ICE on the mesh iface). On **WSL**, TURN stays on `turn:MESH_IP:3478` because WebRTC UDP is not covered by WSL portproxy — friends still get a working media path.
 
-Override order: `COUCHLINK_MESH_PREFER=wireguard,tailscale`  
-Skip mesh entirely: `COUCHLINK_SKIP_MESH=1`
+Override order: `COUCHLINK_MESH_PREFER=tailscale,wireguard`  
+Skip mesh entirely: `COUCHLINK_SKIP_MESH=1`  
+Skip Headscale only: `COUCHLINK_SKIP_HEADSCALE=1`
 
-## Quick start — Tailscale (paste-link)
+## Quick start — Headscale (paste-link, no Tailscale Inc account for friends)
+
+See **[docs/HEADSCALE.md](HEADSCALE.md)**.
+
+**Host**
+
+```bash
+./install.sh --host --online          # enable-headscale + host; prints http://100.x…/?…&hs=…&tskey=…
+```
+
+**Friend**
+
+```bash
+./install.sh --online                 # paste URL → auto `tailscale up --login-server --auth-key`
+./install.sh --online --unblock-firewall
+```
+
+## Quick start — Tailscale cloud (paste-link)
 
 **Host (gaming PC)**
 
 ```bash
-./install.sh --host --online          # Tailscale + host; prints http://100.x…/?…
+COUCHLINK_SKIP_HEADSCALE=1 ./install.sh --host --online
 # or: ./scripts/setup-tailscale.sh --ensure && ./scripts/run.sh host --online
 ```
 

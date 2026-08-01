@@ -69,15 +69,16 @@ install_windows_tailscale() {
   marker="$run_linux/install-tailscale.exit"
   rm -f "$marker"
 
-  echo "==> installing Tailscale for Windows (UAC once if needed)…"
+  echo "==> installing Tailscale for Windows (UAC once if needed; ${COUCHLINK_TS_UAC_TIMEOUT:-90}s max)…"
 
+  local uac_timeout="${COUCHLINK_TS_UAC_TIMEOUT:-90}"
   schtasks="/mnt/c/Windows/System32/schtasks.exe"
   task_name="CouchlinkInstallTailscale"
   if [[ -x "$schtasks" ]] && "$schtasks" /Query /TN "$task_name" &>/dev/null; then
     if "$schtasks" /Run /TN "$task_name" &>/dev/null; then
       used_task=1
       local waited=0
-      while [[ ! -f "$marker" && $waited -lt 180 ]]; do
+      while [[ ! -f "$marker" && $waited -lt "$uac_timeout" ]]; do
         sleep 1
         waited=$((waited + 1))
       done
@@ -91,9 +92,18 @@ install_windows_tailscale() {
 
   if [[ "$used_task" -eq 0 ]]; then
     set +e
-    "$ps_win_launch" -NoProfile -Command \
-      "\$p = Start-Process -FilePath '$ps_win_exe' -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$script_w'); if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
-    ec=$?
+    if command -v timeout >/dev/null 2>&1; then
+      timeout "$uac_timeout" "$ps_win_launch" -NoProfile -Command \
+        "\$p = Start-Process -FilePath '$ps_win_exe' -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$script_w'); if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
+      ec=$?
+      if [[ "$ec" -eq 124 ]]; then
+        echo "==> Windows Tailscale UAC wait timed out after ${uac_timeout}s" >&2
+      fi
+    else
+      "$ps_win_launch" -NoProfile -Command \
+        "\$p = Start-Process -FilePath '$ps_win_exe' -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$script_w'); if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
+      ec=$?
+    fi
     set -e
     if [[ -f "$marker" ]]; then
       ec="$(tr -d '\r\n' <"$marker")"
@@ -103,8 +113,13 @@ install_windows_tailscale() {
       echo "==> elevated install failed (exit ${ec:-?}) — retrying without UAC…"
       rm -f "$marker"
       set +e
-      "$ps_win_launch" -NoProfile -ExecutionPolicy Bypass -File "$script_w"
-      ec=$?
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 120 "$ps_win_launch" -NoProfile -ExecutionPolicy Bypass -File "$script_w"
+        ec=$?
+      else
+        "$ps_win_launch" -NoProfile -ExecutionPolicy Bypass -File "$script_w"
+        ec=$?
+      fi
       set -e
       if [[ -f "$marker" ]]; then
         ec="$(tr -d '\r\n' <"$marker")"
