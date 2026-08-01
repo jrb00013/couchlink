@@ -71,7 +71,7 @@ Does **not** auto-login Tailscale or `wg-quick up`.
 
 ## WSL notes
 
-- **Tailscale:** prefer the **Windows** Tailscale app; `run.sh` looks for `tailscale.exe`.  
+- **Tailscale:** prefer the **Windows** Tailscale app; `./scripts/setup-tailscale.sh --ensure` installs it from WSL via winget/MSI (UAC once). `run.sh` looks for `tailscale.exe`.  
 - **WireGuard:** prefer the **Windows** WireGuard app with `wg0-host.conf`. If the tunnel lives only on Windows while couchlink runs in WSL, set `COUCHLINK_WG_HOST_IP=10.66.0.1` (and ensure Windows can reach WSL `:8443`, or run signaling bound accordingly). Full WSL layout notes: [WIREGUARD.md](WIREGUARD.md).
 
 ## Related
