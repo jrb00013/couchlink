@@ -1,0 +1,5 @@
+keys/
+wg0-host.conf
+wg0-player.conf
+*.key
+*.pub

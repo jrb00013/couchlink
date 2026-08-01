@@ -6,8 +6,10 @@ use couchlink_pad::{VirtualPad, VirtualPadConfig};
 use couchlink_proto::{
     PadFeedback, PadFrame, SignalMessage, VideoAccessUnit, PAD_CHANNEL, VIDEO_CHANNEL,
 };
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -28,7 +30,53 @@ use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::media::Sample;
-use std::time::Duration;
+
+/// webrtc-ice allows at most one *sole* IPv4 and one *sole* IPv6 in `nat_1to1_ips`.
+/// Passing `["10.66.0.1", "172.18.x"]` (two sole IPv4s) returns `invalid 1:1 NAT IP mapping`
+/// and used to kill the host when a player joined. Keep explicit `ext/local` pairs; for sole
+/// IPs keep the first of each family and warn on the rest.
+pub(crate) fn sanitize_nat_1to1_ips(ice_ips: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut have_sole_v4 = false;
+    let mut have_sole_v6 = false;
+    for raw in ice_ips {
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        if s.contains('/') {
+            // explicit external/local mapping — validate both sides parse
+            let mut parts = s.split('/');
+            let (Some(ext), Some(loc), None) = (parts.next(), parts.next(), parts.next()) else {
+                warn!("skipping malformed ICE NAT mapping {s:?}");
+                continue;
+            };
+            match (ext.parse::<IpAddr>(), loc.parse::<IpAddr>()) {
+                (Ok(e), Ok(l)) if e.is_ipv4() == l.is_ipv4() => out.push(s.to_string()),
+                _ => warn!("skipping invalid ICE NAT mapping {s:?}"),
+            }
+            continue;
+        }
+        match s.parse::<IpAddr>() {
+            Ok(IpAddr::V4(_)) if !have_sole_v4 => {
+                out.push(s.to_string());
+                have_sole_v4 = true;
+            }
+            Ok(IpAddr::V4(_)) => {
+                warn!("skipping extra sole IPv4 ICE NAT IP {s} (webrtc-ice allows only one)");
+            }
+            Ok(IpAddr::V6(_)) if !have_sole_v6 => {
+                out.push(s.to_string());
+                have_sole_v6 = true;
+            }
+            Ok(IpAddr::V6(_)) => {
+                warn!("skipping extra sole IPv6 ICE NAT IP {s} (webrtc-ice allows only one)");
+            }
+            Err(_) => warn!("skipping invalid ICE NAT IP {s:?}"),
+        }
+    }
+    out
+}
 
 pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
@@ -74,11 +122,7 @@ impl WebRtcHost {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
         let mut setting_engine = SettingEngine::default();
-        let nat_ips: Vec<String> = ice_ips
-            .into_iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let nat_ips = sanitize_nat_1to1_ips(ice_ips);
         if !nat_ips.is_empty() {
             info!("ICE NAT 1:1 IPs: {nat_ips:?}");
             setting_engine.set_nat_1to1_ips(nat_ips, RTCIceCandidateType::Host);
@@ -464,6 +508,33 @@ mod controller_host_tests {
             let frame = simulate_dualsense_frame(&dualsense_usb_press(btn)).unwrap();
             apply_pad_bytes(&mut pad, &encode_clpd(&frame)).unwrap();
         }
+    }
+
+    #[test]
+    fn sanitize_nat_keeps_one_sole_ipv4() {
+        let out = sanitize_nat_1to1_ips(vec![
+            "10.66.0.1".into(),
+            "172.18.223.133".into(),
+            "".into(),
+            "not-an-ip".into(),
+        ]);
+        assert_eq!(out, vec!["10.66.0.1".to_string()]);
+    }
+
+    #[test]
+    fn sanitize_nat_keeps_explicit_mapping_and_sole_v6() {
+        let out = sanitize_nat_1to1_ips(vec![
+            "10.66.0.1/172.18.223.133".into(),
+            "2001:db8::1".into(),
+            "2001:db8::2".into(),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                "10.66.0.1/172.18.223.133".to_string(),
+                "2001:db8::1".to_string()
+            ]
+        );
     }
 
     #[test]

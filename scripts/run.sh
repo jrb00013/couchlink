@@ -6,8 +6,10 @@
 #
 # Reachability:
 #   host  --local   (default) same Wi‑Fi / LAN — join URL uses LAN IP, no UPnP/TURN
-#   host  --online  internet — public IP + TURN + UPnP so a friend can open the URL anywhere
-#   client --online requires host TURN (join URL or COUCHLINK_TURN_*); WSL auto ICE IPs
+#   host  --online  internet — PRIME: Tailscale / WireGuard mesh if up; else public IP
+#                   + TURN + UPnP; then Cloudflare HTTPS + IPv6 / bore fallback
+#   client --online requires host TURN (join URL or COUCHLINK_TURN_*) unless on mesh;
+#                   WSL auto ICE IPs
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -17,6 +19,8 @@ source "$ROOT/scripts/lib-platform.sh"
 source "$ROOT/scripts/lib-upnp.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-online-tunnel.sh"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-mesh.sh"
 
 usage() {
   cat <<EOF
@@ -26,9 +30,13 @@ usage: $0 [host|client] [--local|--online]
   client  start couchlink-client (friend/player)
 
   --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
-  --online  Internet. Host: public IP + TURN + UPnP; on WSL also firewall,
-            WSL portproxy, IPv6 invite / bore tunnel if the router blocks UPnP.
+  --online  Internet. Host prefers Tailscale / WireGuard (PRIME mesh) when up;
+            else public IP + TURN + UPnP; on WSL also firewall + WSL portproxy;
+            then Cloudflare HTTPS + IPv6 / bore if the router blocks UPnP.
             Client: prompts for the host join URL if unset (TURN for NAT/WSL).
+
+  Mesh setup: ./scripts/setup-tailscale.sh · ./scripts/setup-wireguard.sh
+  Docs:       docs/MESH.md · docs/WIREGUARD.md
 
 Platform is auto-detected (linux / wsl / macos).
 EOF
@@ -78,6 +86,7 @@ fi
 export COUCHLINK_MODE="$MODE"
 PORT="${COUCHLINK_BIND##*:}"
 PORT="${PORT:-8443}"
+COUCHLINK_USING_MESH=0
 
 # On --online (WSL/Windows): Private profile + discovery + firewall + WSL
 # portproxy + NATUPnP maps. Uses saved task CouchlinkElevatedUpnp after first UAC.
@@ -167,43 +176,63 @@ if [[ "$ROLE" == "host" ]]; then
     unset COUCHLINK_TURN_URL || true
     echo "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
   else
-    PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
-    if [[ -z "$PUBLIC_IP" ]]; then
-      PUBLIC_IP="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+    # PRIME: Tailscale first (paste-link). Only auto-bring WireGuard if Tailscale is down.
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" ]]; then
+      if couchlink_tailscale_ip >/dev/null 2>&1; then
+        :
+      elif [[ "${COUCHLINK_AUTO_WIREGUARD:-1}" != "0" ]]; then
+        if [[ -f "$ROOT/infra/wireguard/wg0-host.conf" ]] || [[ "${COUCHLINK_ENSURE_WIREGUARD:-0}" == "1" ]]; then
+          echo "==> Tailscale not up — ensuring WireGuard tunnel (mesh fallback)"
+          bash "$ROOT/scripts/enable-wireguard.sh" || \
+            echo "==> WireGuard bring-up failed — will try public fallback"
+        fi
+      fi
     fi
-    if [[ -z "$PUBLIC_IP" ]]; then
-      echo "online mode needs a public IP (curl ifconfig.me failed)." >&2
-      echo "Set COUCHLINK_PUBLIC_IP in .env.couchlink and re-run." >&2
-      exit 1
-    fi
-    export COUCHLINK_PUBLIC_IP="$PUBLIC_IP"
-    # Host must dial signaling on loopback/LAN — WSL/NAT often cannot hairpin
-    # back to the public IP. Friends still get the public invite URL below.
-    export COUCHLINK_SIGNALING="ws://127.0.0.1:${PORT}/ws"
-    export COUCHLINK_INVITE_SIGNALING="ws://${PUBLIC_IP}:${PORT}/ws"
-    export COUCHLINK_TURN_URL="turn:${PUBLIC_IP}:3478"
-    echo "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP; host dials 127.0.0.1)"
-    if couchlink_try_upnp_online; then
-      echo "==> UPnP OK — ports should be reachable at ${PUBLIC_IP}"
-      export COUCHLINK_SKIP_UPNP=1
+    if couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
+      COUCHLINK_USING_MESH=1
+      # WSL: friends hit Windows mesh IP (Tailscale 100.x / WG) — need portproxy → WSL.
+      if [[ "$PLATFORM" == "wsl" && "${COUCHLINK_SKIP_UPNP_PREP:-}" != "1" ]]; then
+        echo "==> WSL mesh: Windows firewall + portproxy for ${COUCHLINK_MESH_IP:-mesh}"
+        bash "$ROOT/scripts/enable-upnp.sh" --skip-map >/dev/null 2>&1 \
+          || echo "==> portproxy prep skipped/failed — if join fails, run ./scripts/enable-upnp.sh --skip-map"
+      fi
     else
-      couchlink_apply_online_fallback "$PUBLIC_IP" || true
+      PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
+      if [[ -z "$PUBLIC_IP" ]]; then
+        PUBLIC_IP="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+      fi
+      if [[ -z "$PUBLIC_IP" ]]; then
+        echo "online mode needs a public IP (curl ifconfig.me failed) or an up mesh." >&2
+        echo "Set COUCHLINK_PUBLIC_IP, or: ./scripts/setup-tailscale.sh / ./scripts/setup-wireguard.sh" >&2
+        exit 1
+      fi
+      export COUCHLINK_PUBLIC_IP="$PUBLIC_IP"
+      # Host must dial signaling on loopback/LAN — WSL/NAT often cannot hairpin
+      # back to the public IP. Friends still get the public invite URL below.
+      export COUCHLINK_SIGNALING="ws://127.0.0.1:${PORT}/ws"
+      export COUCHLINK_INVITE_SIGNALING="ws://${PUBLIC_IP}:${PORT}/ws"
+      export COUCHLINK_TURN_URL="turn:${PUBLIC_IP}:3478"
+      echo "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP; host dials 127.0.0.1)"
+      if couchlink_try_upnp_online; then
+        echo "==> UPnP OK — ports should be reachable at ${PUBLIC_IP}"
+        export COUCHLINK_SKIP_UPNP=1
+      else
+        couchlink_apply_online_fallback "$PUBLIC_IP" || true
+      fi
     fi
   fi
 elif [[ "$ROLE" == "client" ]]; then
-  # Client reachability: remote joins need the host's TURN (UDP+TCP expanded in-process).
-  # WSL auto-discovers the Windows LAN IP for ICE host candidates inside couchlink-client.
-  # If COUCHLINK_JOIN_URL is unset, couchlink-client prompts in the terminal (or a GUI dialog).
+  # Tailscale is installed at ./install.sh time; just start and paste the URL.
   if [[ "$MODE" == "online" ]]; then
     if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
       echo "==> online client — join URL set (TURN from invite)"
     elif [[ -n "${COUCHLINK_TURN_URL:-}" && -n "${COUCHLINK_TURN_USER:-}" && -n "${COUCHLINK_TURN_PASS:-}" ]]; then
       echo "==> online client — TURN credentials from env"
     else
-      echo "==> online client — will prompt for the host join URL (needed for TURN/NAT)"
+      echo "==> online client — paste the host join URL when prompted"
     fi
   else
-    echo "==> local client — will prompt for join URL if credentials are missing"
+    echo "==> local client — paste join URL if credentials are missing"
   fi
 fi
 
@@ -238,10 +267,13 @@ if [[ "$ROLE" == "host" ]]; then
   ./scripts/start-signaling.sh &
   PIDS+=($!)
   sleep 1
+  # Mesh on native Linux/macOS: skip TURN. WSL mesh: keep TURN (UDP via portproxy).
   if [[ "$MODE" == "online" ]]; then
-    ./scripts/start-turn.sh &
-    PIDS+=($!)
-    sleep 1
+    if [[ "$COUCHLINK_USING_MESH" != "1" || "${COUCHLINK_MESH_NEED_TURN:-0}" == "1" ]]; then
+      ./scripts/start-turn.sh &
+      PIDS+=($!)
+      sleep 1
+    fi
   fi
   ./scripts/start-host.sh &
   PIDS+=($!)

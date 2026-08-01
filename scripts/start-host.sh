@@ -4,22 +4,35 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/lib-platform.sh"
 export PATH="$(couchlink_tool_path "${HOME:-}")${PATH:+:$PATH}"
-# Preserve reachability overrides exported by run.sh (--local / --online).
+# Preserve reachability overrides exported by run.sh (--local / --online / mesh).
 _KEEP_MODE="${COUCHLINK_MODE:-}"
 _KEEP_SIGNALING="${COUCHLINK_SIGNALING:-}"
 _KEEP_INVITE_SIGNALING="${COUCHLINK_INVITE_SIGNALING:-}"
 _KEEP_PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
 _KEEP_TURN_URL="${COUCHLINK_TURN_URL:-}"
+_KEEP_TURN_EXTERNAL_IP="${COUCHLINK_TURN_EXTERNAL_IP:-}"
+_KEEP_MESH="${COUCHLINK_MESH:-}"
+_KEEP_MESH_IP="${COUCHLINK_MESH_IP:-}"
+_KEEP_MESH_NEED_TURN="${COUCHLINK_MESH_NEED_TURN:-}"
+_KEEP_ICE_IPS="${COUCHLINK_ICE_IPS:-}"
 # shellcheck disable=SC1091
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
 [[ -n "$_KEEP_MODE" ]] && COUCHLINK_MODE="$_KEEP_MODE"
 [[ -n "$_KEEP_SIGNALING" ]] && COUCHLINK_SIGNALING="$_KEEP_SIGNALING"
 [[ -n "$_KEEP_INVITE_SIGNALING" ]] && COUCHLINK_INVITE_SIGNALING="$_KEEP_INVITE_SIGNALING"
 [[ -n "$_KEEP_PUBLIC_IP" ]] && COUCHLINK_PUBLIC_IP="$_KEEP_PUBLIC_IP"
-# Empty TURN URL in local mode is intentional — restore even when blanked via unset.
+[[ -n "$_KEEP_MESH" ]] && COUCHLINK_MESH="$_KEEP_MESH"
+[[ -n "$_KEEP_MESH_IP" ]] && COUCHLINK_MESH_IP="$_KEEP_MESH_IP"
+[[ -n "$_KEEP_MESH_NEED_TURN" ]] && COUCHLINK_MESH_NEED_TURN="$_KEEP_MESH_NEED_TURN"
+[[ -n "$_KEEP_ICE_IPS" ]] && COUCHLINK_ICE_IPS="$_KEEP_ICE_IPS"
+[[ -n "$_KEEP_TURN_EXTERNAL_IP" ]] && COUCHLINK_TURN_EXTERNAL_IP="$_KEEP_TURN_EXTERNAL_IP"
+# Empty TURN in local mode is intentional. Mesh on native Linux skips TURN;
+# WSL mesh keeps TURN on the mesh IP (COUCHLINK_MESH_NEED_TURN=1).
 if [[ "$_KEEP_MODE" == "local" ]]; then
   unset COUCHLINK_TURN_URL || true
   unset COUCHLINK_INVITE_SIGNALING || true
+elif [[ -n "${COUCHLINK_MESH:-}" && "${COUCHLINK_MESH_NEED_TURN:-0}" != "1" ]]; then
+  unset COUCHLINK_TURN_URL || true
 elif [[ -n "$_KEEP_TURN_URL" ]]; then
   COUCHLINK_TURN_URL="$_KEEP_TURN_URL"
 fi

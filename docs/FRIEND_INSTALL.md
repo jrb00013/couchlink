@@ -1,22 +1,36 @@
 # Couchlink Player — for friends (download & install)
 
-You only need this if the host sent you a **join link** and you want the **native app** instead of a browser.
+## From source
 
-## Download
+```bash
+./install.sh              # player + Tailscale
+./install.sh --run        # start client — paste the host join URL
+./install.sh --online     # same, online mode
+```
+
+Host (gaming PC):
+
+```bash
+./install.sh --host --online
+```
+
+Sign into Tailscale on the **same tailnet** as the host when they send a mesh (`http://100.x…`) link. LAN / Cloudflare links still work either way.
+
+## Packaged download
 
 Get the installer for your OS from the host, or from **GitHub → Releases** on the couchlink repo (tag `v0.1.1` or newer):
 
 | OS | File | What to do |
 |----|------|------------|
-| **Windows** | `CouchlinkPlayer-Setup-0.1.1.exe` | Double-click → Next → paste join link (optional) → Finish → open **Couchlink Player** from Start Menu |
-| **macOS** | `CouchlinkPlayer-mac.dmg` | Open DMG → drag **Couchlink Player** to **Applications** → first open: right-click → **Open** (unsigned app) |
-| **Linux** | `CouchlinkPlayer-x86_64.AppImage` | `chmod +x` → double-click, **or** install `couchlink-player_*_amd64.deb` with `sudo dpkg -i …` |
+| **Windows** | `CouchlinkPlayer-Setup-0.1.1.exe` | Double-click → Next → paste join link (optional) → Finish → open **Couchlink Player** |
+| **macOS** | `CouchlinkPlayer-mac.dmg` | Open DMG → drag **Couchlink Player** to **Applications** → first open: right-click → **Open** |
+| **Linux** | `CouchlinkPlayer-x86_64.AppImage` | `chmod +x` → double-click, **or** `sudo dpkg -i couchlink-player_*_amd64.deb` |
 
-No Rust, no terminal, no git.
+No Rust required for packaged installs. For Tailscale mesh links (`http://100.x…`), install [Tailscale](https://tailscale.com/download) and join the host’s tailnet first.
 
 ## Join link
 
-The host sends one long URL (Discord, text, etc.). During Windows install you can paste it on the **Invite link** step. Otherwise put it in the config file:
+The host sends one long URL. Paste it when the player prompts, or during Windows install on the **Invite link** step. Or put it in the config file:
 
 ```ini
 join_url=PASTE_THE_FULL_URL_HERE
@@ -36,4 +50,4 @@ Settings → Apps → **Couchlink Player** → Uninstall.
 
 ---
 
-Host setup: [PLAY_TOGETHER.md](PLAY_TOGETHER.md)
+Host setup: [PLAY_TOGETHER.md](PLAY_TOGETHER.md) · Mesh: [MESH.md](MESH.md)

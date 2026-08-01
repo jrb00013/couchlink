@@ -52,7 +52,7 @@ procedure InitializeWizard;
 begin
   JoinUrlPage := CreateInputQueryPage(wpSelectDir,
     'Invite link', 'Paste the join link from your friend (host)',
-    'You can leave this blank and edit the config file later. The host sends a long URL with ?s= and ?p= in it.');
+    'You can leave this blank and paste later in Couchlink Player. Tailscale links look like http://100.x… — install Tailscale and join the host''s tailnet first.');
   JoinUrlPage.Add('Join URL (optional):', False);
 end;
 

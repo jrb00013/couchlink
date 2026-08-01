@@ -4,7 +4,9 @@ One host runs the game. One friend joins from **anywhere** with the browser or t
 
 > **WSL + Windows games (PCSX2/RPCS3):** `./install.sh` and host start **auto-build** `couchlink-win-capture.exe` via Windows cargo. Host start opens the **Windows capture picker** so you choose which window/monitor to stream (or set `COUCHLINK_CAPTURE_SOURCE=desktop` / `COUCHLINK_CAPTURE_WINDOW=PCSX2`). WSL listens on TCP **9876**; Windows connects outbound via localhost forwarding.
 
-Internet play uses **STUN + your host’s TURN relay** (started automatically with `./scripts/run.sh host`) and **UPnP** when your router supports it.
+Internet play prefers a **Tailscale / WireGuard mesh** when one is up ([MESH.md](MESH.md)).
+Otherwise it uses **STUN + your host’s TURN relay** (started with `./scripts/run.sh host --online`)
+and **UPnP** when your router supports it (Cloudflare / IPv6 fallbacks if not).
 
 ---
 
@@ -31,27 +33,27 @@ source .env.couchlink
 ```
 
 `--local` (default) prints a LAN join URL and skips UPnP/TURN.  
-`--online` fetches your public IP, starts TURN, and opens ports via UPnP (on WSL/Windows it auto-runs `./scripts/enable-upnp.sh` — Private network + discovery + NATUPnP; one UAC, then Task Scheduler with no prompt).
+`--online` prefers **Tailscale / WireGuard** if already up (mesh join URL, no TURN). Else it fetches your public IP, starts TURN, and opens ports via UPnP (on WSL/Windows it auto-runs `./scripts/enable-upnp.sh` — Private network + discovery + NATUPnP; one UAC, then Task Scheduler with no prompt). Mesh setup: `./scripts/setup-tailscale.sh` / `./scripts/setup-wireguard.sh`.
 
 This starts, in one terminal:
 
 - Signaling + web UI on **`:8443`**
-- **TURN** on **`:3478`** (online only)
+- **TURN** on **`:3478`** (public `--online`, and **WSL mesh** — skipped on native Linux/macOS mesh)
 - **couchlink-host** (capture + encode + virtual DualSense for player 2)
 
 Watch the log for:
 
 ```text
-friend join URL: http://…/?s=…&p=…&auto=1&ws=ws://…&turn=turn:…&turnu=…&turnp=…
+friend join URL: http://…/?s=…&p=…&auto=1&ws=ws://…
 ```
 
-Copy that **entire URL** (or QR) and send it to your friend (Discord, Signal, etc.). That link already includes session, PIN, signaling WebSocket, and TURN credentials (when online).
+Mesh URLs use `100.x` / `10.66.0.1` and may omit `turn=` on native Linux. Public online URLs include TURN creds. Copy the **entire URL** (or QR) to your friend.
 
 ### 3. Make yourself reachable from the internet (`--online`)
 
 The join URL must use addresses your friend can reach—not `127.0.0.1`.
 
-`./scripts/run.sh host --online` prepares Windows automatically on WSL (Private network + discovery + firewall + WSL portproxy for IPv4/IPv6 + NATUPnP). If the router has UPnP off, it prefers **cloudflared HTTPS** (browser WebCodecs) + **IPv6 TURN**, and only falls back to **bore signaling** (never bore TURN — that starves video). One UAC the first time, then Task Scheduler with no prompt.
+`./scripts/run.sh host --online` first uses a **PRIME mesh** if Tailscale (`100.x`) or WireGuard is up — see [MESH.md](MESH.md). Otherwise it prepares Windows automatically on WSL (Private network + discovery + firewall + WSL portproxy for IPv4/IPv6 + NATUPnP). If the router has UPnP off, it prefers **cloudflared HTTPS** (browser WebCodecs) + **IPv6 TURN**, and only falls back to **bore signaling** (never bore TURN — that starves video). One UAC the first time, then Task Scheduler with no prompt.
 
 2. **Public IP:** Detected via `ifconfig.me`. If that fails or you’re on CGNAT, set in `.env.couchlink` before starting:
    - `COUCHLINK_PUBLIC_IP=your.public.ip`

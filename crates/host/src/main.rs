@@ -56,14 +56,23 @@ async fn main() -> Result<()> {
         (Some(url), Some(user), Some(pass)) => Some(invite::TurnInfo { url, user, pass }),
         _ => None,
     };
+    let mesh = std::env::var("COUCHLINK_MESH")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     let join = invite::player_invite_url(
         &public_http,
         &args.session_id,
         &args.pin,
         invite_ws,
         turn,
+        mesh.as_deref(),
     );
     info!("friend join URL: {join}");
+    if mesh.as_deref() == Some("tailscale") {
+        info!(
+            "Tailscale paste-link — friend: ./install.sh --online (paste this URL)"
+        );
+    }
     if join.contains("://127.") || join.contains("://localhost") {
         info!("join URL is loopback — browser WebCodecs (lowest latency) is available");
     } else if join.starts_with("http://") {

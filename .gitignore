@@ -1,6 +1,7 @@
 /target/
 .tools/
 .local-libs/
+.tools/
 **/node_modules/
 infra/certs/*.pem
 infra/wireguard/keys/

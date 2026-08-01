@@ -1,4 +1,5 @@
-# Sourced by run.sh — outbound reachability when router UPnP is unavailable.
+# Sourced by run.sh — outbound reachability when router UPnP is unavailable
+# AND no Tailscale/WireGuard mesh is up (mesh is tried first in run.sh).
 # Prefer: HTTPS (cloudflared) signaling + IPv6 TURN. Bore is signaling-only last resort.
 # Never put TURN on bore — TCP tunnels break UDP relays and starve video (~7 fps).
 
