@@ -157,24 +157,19 @@ couchlink_apply_mesh_invite() {
   export COUCHLINK_INVITE_SIGNALING="ws://${mesh_ip}:${port}/ws"
   export COUCHLINK_MESH="$kind"
   export COUCHLINK_MESH_IP="$mesh_ip"
-  # Prefer mesh IP for ICE host/NAT 1:1 so friends don't pin WSL private addresses.
-  if [[ -n "${COUCHLINK_ICE_IPS:-}" ]]; then
-    case ",${COUCHLINK_ICE_IPS}," in
-      *",${mesh_ip},"*) ;;
-      *) export COUCHLINK_ICE_IPS="${mesh_ip},${COUCHLINK_ICE_IPS}" ;;
-    esac
-  else
-    export COUCHLINK_ICE_IPS="$mesh_ip"
-  fi
 
   if [[ "$platform" == "wsl" ]]; then
-    # Ephemeral WebRTC UDP is not portproxied — keep TURN on the mesh IP.
+    # Ephemeral WebRTC UDP is not portproxied — TURN on the mesh IP carries media.
+    # Do NOT stuff mesh_ip into COUCHLINK_ICE_IPS alongside the WSL LAN IP: webrtc-ice
+    # allows only one sole IPv4 NAT mapping and used to crash the host on player join.
     export COUCHLINK_TURN_URL="turn:${mesh_ip}:3478"
     export COUCHLINK_TURN_EXTERNAL_IP="$mesh_ip"
     export COUCHLINK_MESH_NEED_TURN=1
     echo "==> PRIME mesh ($kind) — join via http://${mesh_ip}:${port}/"
-    echo "    WSL: TURN also on ${mesh_ip}:3478 (UDP via Windows portproxy)"
+    echo "    WSL: TURN on ${mesh_ip}:3478 (UDP via Windows portproxy); ICE keeps existing ICE_IPS"
   else
+    # Native: mesh iface is local — advertise it as the sole host candidate IP.
+    export COUCHLINK_ICE_IPS="$mesh_ip"
     unset COUCHLINK_TURN_URL || true
     unset COUCHLINK_TURN_EXTERNAL_IP || true
     export COUCHLINK_MESH_NEED_TURN=0

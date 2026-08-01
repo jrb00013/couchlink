@@ -24,17 +24,21 @@ couchlink_try_mesh_online 8443 "$PLATFORM" || fail "try_mesh_online with overrid
 [[ "${COUCHLINK_MESH_IP}" == "10.66.0.1" ]] || fail "MESH_IP"
 [[ "${COUCHLINK_INVITE_SIGNALING}" == "ws://10.66.0.1:8443/ws" ]] || fail "INVITE_SIGNALING=$COUCHLINK_INVITE_SIGNALING"
 [[ "${COUCHLINK_SIGNALING}" == "ws://127.0.0.1:8443/ws" ]] || fail "SIGNALING"
-[[ "${COUCHLINK_ICE_IPS}" == *"10.66.0.1"* ]] || fail "ICE_IPS=$COUCHLINK_ICE_IPS"
 
 if [[ "$PLATFORM" == "wsl" ]]; then
   [[ "${COUCHLINK_MESH_NEED_TURN}" == "1" ]] || fail "WSL should need TURN"
   [[ "${COUCHLINK_TURN_URL}" == "turn:10.66.0.1:3478" ]] || fail "TURN_URL=$COUCHLINK_TURN_URL"
   [[ "${COUCHLINK_TURN_EXTERNAL_IP}" == "10.66.0.1" ]] || fail "TURN_EXTERNAL_IP"
-  pass "WSL mesh sets TURN on mesh IP"
+  # Must NOT inject mesh IP into ICE_IPS (dual sole IPv4 crashes webrtc-ice).
+  case ",${COUCHLINK_ICE_IPS:-}," in
+    *,10.66.0.1,*) fail "WSL must not set mesh IP in ICE_IPS (was ${COUCHLINK_ICE_IPS})" ;;
+  esac
+  pass "WSL mesh sets TURN on mesh IP without dual ICE NAT"
 else
   [[ "${COUCHLINK_MESH_NEED_TURN}" == "0" ]] || fail "native mesh should skip TURN"
   [[ -z "${COUCHLINK_TURN_URL:-}" ]] || fail "native mesh should unset TURN"
-  pass "native mesh clears TURN"
+  [[ "${COUCHLINK_ICE_IPS}" == "10.66.0.1" ]] || fail "native ICE_IPS=$COUCHLINK_ICE_IPS"
+  pass "native mesh clears TURN and sets sole ICE IP"
 fi
 
 # --- skip mesh ---
