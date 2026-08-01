@@ -3,18 +3,18 @@
 ## From source
 
 ```bash
-./install.sh              # player only — no Tailscale required
-./install.sh --run        # LAN: paste the host’s LAN join URL
-./install.sh --online     # remote: paste whatever URL the host sent
+./install.sh              # player + Tailscale
+./install.sh --run        # start client — paste the host join URL
+./install.sh --online     # same, online mode
 ```
 
 Host (gaming PC):
 
 ```bash
-./install.sh --host --online   # may print http://100.x… if Tailscale is up
+./install.sh --host --online
 ```
 
-**Tailscale is only needed** when the join URL is a Tailscale address (`http://100.x…` / `mesh=tailscale`). Same Wi‑Fi and Cloudflare/public links work without it.
+Sign into Tailscale on the **same tailnet** as the host when they send a mesh (`http://100.x…`) link. LAN / Cloudflare links still work either way.
 
 ## Packaged download
 

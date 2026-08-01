@@ -19,7 +19,7 @@ usage: $0 [--check|--ensure]
 
   After both machines are on the same tailnet:
     host:   ./install.sh --host --online     # prints http://100.x… join URL
-    friend: ./install.sh --online            # paste that URL (Tailscale only for 100.x links)
+    friend: ./install.sh --online            # Tailscale already from install; paste URL
 EOF
 }
 

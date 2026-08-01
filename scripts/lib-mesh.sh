@@ -179,12 +179,12 @@ couchlink_apply_mesh_invite() {
   case "$kind" in
     tailscale)
       echo "    Friend: ./install.sh && ./install.sh --online  → paste this join URL"
-      echo "            (needs Tailscale on the same tailnet — only for this 100.x link)"
+      echo "            (Tailscale already installed by install.sh — same tailnet as host)"
       echo "    Host can share the machine in Tailscale admin if friend uses another account"
       ;;
     wireguard)
       echo "    friend imports infra/wireguard/wg0-player.conf then brings WireGuard up"
-      echo "    (or use Tailscale paste-link: ./install.sh --host --online)"
+      echo "    (prefer Tailscale: ./install.sh --host --online + friend ./install.sh)"
       ;;
   esac
   return 0

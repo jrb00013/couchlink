@@ -25,17 +25,16 @@ for arg in "$@"; do
 usage: ./install.sh [--host] [--run|--online|--local] [--mesh|--no-mesh]
 
   Default (friend / player):
-    ./install.sh              build the player — paste whatever join URL the host sent
-    ./install.sh --run        then start client --local (LAN / same Wi‑Fi)
-    ./install.sh --online     then start client --online (paste host link; TURN/mesh as needed)
+    ./install.sh              build player + Tailscale
+    ./install.sh --run        then start client --local (paste host join URL)
+    ./install.sh --online     then start client --online (paste host join URL)
 
   Host (gaming PC):
     ./install.sh --host                 build host stack + mesh tooling
-    ./install.sh --host --online        then host --online (Tailscale if up, else public)
+    ./install.sh --host --online        then host --online
     ./install.sh --host --local|--run   then host --local
 
-  --mesh / --no-mesh   host only: Tailscale + WireGuard tooling (default on for --host)
-                       Friends only need Tailscale when the join URL is http://100.x…
+  --mesh / --no-mesh   Tailscale (and WireGuard on --host); default on
 EOF
       exit 0
       ;;
@@ -277,54 +276,60 @@ if [[ ! -f .env.couchlink ]]; then
   fi
 fi
 
-# Mesh tooling is for the host. Friends only need Tailscale when the join URL is
-# a Tailscale address (http://100.x… / mesh=tailscale) — not for LAN or Cloudflare.
-if [[ "$INSTALL_ROLE" == "host" && "${COUCHLINK_INSTALL_MESH:-1}" == "1" ]]; then
-  echo "==> mesh tooling (Tailscale + WireGuard)"
-  case "$PLATFORM" in
-    linux|wsl)
-      if command -v apt-get >/dev/null; then
-        as_root apt-get install -y -qq wireguard wireguard-tools 2>/dev/null \
-          || echo "warning: apt wireguard install failed — install wireguard-tools manually"
-      fi
-      ;;
-    macos)
-      BREW="$(couchlink_brew_bin || true)"
-      if [[ -n "${BREW:-}" ]]; then
-        run_as_user "$BREW" install wireguard-tools \
-          || echo "warning: brew wireguard-tools failed"
-        run_as_user "$BREW" install --cask tailscale \
-          || echo "warning: brew cask tailscale failed (install from https://tailscale.com/download)"
-      fi
-      ;;
-  esac
-  if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
-    run_as_user bash "$ROOT/scripts/setup-tailscale.sh" --ensure \
-      || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
+# Always install Tailscale (simple). Hosts also get WireGuard as mesh fallback.
+# Disable with --no-mesh or COUCHLINK_INSTALL_MESH=0.
+if [[ "${COUCHLINK_INSTALL_MESH:-1}" == "1" ]]; then
+  if [[ "$INSTALL_ROLE" == "client" ]]; then
+    echo "==> Tailscale (always — ready when the host sends a mesh join URL)"
+    if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/setup-tailscale.sh" --ensure \
+        || echo "warning: Tailscale not ready — install/sign-in from https://tailscale.com/download"
+    fi
+  else
+    echo "==> mesh tooling (Tailscale + WireGuard)"
+    case "$PLATFORM" in
+      linux|wsl)
+        if command -v apt-get >/dev/null; then
+          as_root apt-get install -y -qq wireguard wireguard-tools 2>/dev/null \
+            || echo "warning: apt wireguard install failed — install wireguard-tools manually"
+        fi
+        ;;
+      macos)
+        BREW="$(couchlink_brew_bin || true)"
+        if [[ -n "${BREW:-}" ]]; then
+          run_as_user "$BREW" install wireguard-tools \
+            || echo "warning: brew wireguard-tools failed"
+          run_as_user "$BREW" install --cask tailscale \
+            || echo "warning: brew cask tailscale failed (install from https://tailscale.com/download)"
+        fi
+        ;;
+    esac
+    if [[ -x "$ROOT/scripts/setup-tailscale.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/setup-tailscale.sh" --ensure \
+        || echo "warning: setup-tailscale.sh failed — see docs/MESH.md"
+    fi
+    if [[ -x "$ROOT/scripts/setup-wireguard.sh" ]]; then
+      run_as_user bash "$ROOT/scripts/setup-wireguard.sh" \
+        || echo "warning: setup-wireguard.sh failed — see docs/WIREGUARD.md"
+    fi
+    if [[ -x "$ROOT/scripts/enable-wireguard.sh" ]]; then
+      echo "==> bringing WireGuard tunnel up (fallback if Tailscale is down; UAC once on Windows/WSL)"
+      bash "$ROOT/scripts/enable-wireguard.sh" \
+        || echo "warning: enable-wireguard failed — import conf manually (docs/MESH.md)"
+    fi
   fi
-  if [[ -x "$ROOT/scripts/setup-wireguard.sh" ]]; then
-    run_as_user bash "$ROOT/scripts/setup-wireguard.sh" \
-      || echo "warning: setup-wireguard.sh failed — see docs/WIREGUARD.md"
-  fi
-  if [[ -x "$ROOT/scripts/enable-wireguard.sh" ]]; then
-    echo "==> bringing WireGuard tunnel up (fallback if Tailscale is down; UAC once on Windows/WSL)"
-    bash "$ROOT/scripts/enable-wireguard.sh" \
-      || echo "warning: enable-wireguard failed — import conf manually (docs/MESH.md)"
-  fi
-elif [[ "$INSTALL_ROLE" == "client" ]]; then
-  echo "==> friend install — no Tailscale required unless the host link is http://100.x…"
 fi
 
 echo ""
 echo "OK — install finished ($INSTALL_ROLE)"
 echo "  binaries: $REAL_HOME/.local/bin"
 if [[ "$INSTALL_ROLE" == "client" ]]; then
-  echo "  next:    ./install.sh --run        # LAN — paste host LAN join URL"
-  echo "           ./install.sh --online     # remote — paste whatever URL the host sent"
-  echo "  note:    Tailscale only if that URL is http://100.x… (same tailnet as host)"
+  echo "  next:    ./install.sh --run        # or: ./install.sh --online"
+  echo "           → paste the host join URL when prompted"
+  echo "  tip:     sign into Tailscale (same account / shared node as host) for mesh links"
 else
   echo "  next:    ./install.sh --host --online"
-  echo "  friend:  ./install.sh && ./install.sh --online   # paste your join URL"
+  echo "  friend:  ./install.sh && ./install.sh --online"
 fi
 echo ""
 
