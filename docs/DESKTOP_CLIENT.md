@@ -18,9 +18,10 @@ Legacy zip + `install-client.ps1` still works: `.\packaging\windows\build-releas
 
 ## Join config
 
-On every desktop launch the player **asks for the host join link** (pre-filled from
-the last session). Terminal / `./scripts/run.sh client` prompts in the terminal when
-credentials are missing — paste the URL, or press Enter and type session/PIN/TURN.
+On every desktop launch the player opens the video window. While **Waiting for
+stream…**, paste the host join link (or `session:pin`) into the on-screen field
+and press **Enter** (Ctrl/Cmd+V pastes). It reconnects to that session. Optional
+startup prompt / config still work for headless and automation:
 
 You can still pre-seed config (optional; still shown in the startup prompt):
 

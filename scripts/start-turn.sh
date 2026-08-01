@@ -84,6 +84,8 @@ if [[ -z "$PUBLIC_IP" ]]; then
   exit 1
 fi
 COUCHLINK_TURN_URL="${COUCHLINK_TURN_URL:-turn:$PUBLIC_IP:3478}"
+# Invite may use IPv6 or bore.pub while COUCHLINK_PUBLIC_IP stays the WAN IPv4.
+TURN_EXTERNAL_IP="${COUCHLINK_TURN_EXTERNAL_IP:-$PUBLIC_IP}"
 
 RUNTIME_CONF="$(mktemp /tmp/couchlink-turnserver.XXXXXX.conf)"
 trap 'rm -f "$RUNTIME_CONF"; upnp_close 3478 udp; upnp_close 3478 tcp' EXIT
@@ -91,7 +93,11 @@ sed \
   -e "s/COUCHLINK_TURN_USER/$COUCHLINK_TURN_USER/" \
   -e "s/COUCHLINK_TURN_PASS/$COUCHLINK_TURN_PASS/" \
   "$ROOT/infra/turn/turnserver.conf.example" > "$RUNTIME_CONF"
-echo "external-ip=$PUBLIC_IP" >> "$RUNTIME_CONF"
+echo "external-ip=$TURN_EXTERNAL_IP" >> "$RUNTIME_CONF"
+# Also publish WAN IPv4 when the invite uses a different external (IPv6/bore).
+if [[ "$TURN_EXTERNAL_IP" != "$PUBLIC_IP" && "$PUBLIC_IP" != "bore.pub" ]]; then
+  echo "external-ip=$PUBLIC_IP" >> "$RUNTIME_CONF"
+fi
 
 # Best-effort only — Windows prep / manual forward if the router blocks UPnP.
 if [[ "${COUCHLINK_SKIP_UPNP:-}" != "1" ]]; then
@@ -99,6 +105,6 @@ if [[ "${COUCHLINK_SKIP_UPNP:-}" != "1" ]]; then
   upnp_open 3478 tcp "turn" || true
 fi
 
-echo "==> starting local TURN relay on :3478 (user=$COUCHLINK_TURN_USER external-ip=$PUBLIC_IP)"
+echo "==> starting local TURN relay on :3478 (user=$COUCHLINK_TURN_USER external-ip=$TURN_EXTERNAL_IP)"
 # -n keeps coturn in the foreground so run.sh can track the PID.
 exec turnserver -n -c "$RUNTIME_CONF"

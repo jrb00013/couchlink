@@ -8,6 +8,7 @@ import {
   canUseWebCodecs,
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
+import { ControllerViz, useLivePads } from "./ControllerViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import "./App.css";
@@ -26,28 +27,6 @@ function secureContextHint(): string | null {
   if (typeof window === "undefined") return null;
   if (window.isSecureContext) return null;
   return "Open via http://127.0.0.1 (or https) for WebCodecs near-zero latency — LAN http falls back to RTP (~7ms JB).";
-}
-
-type ConnectedPad = {
-  index: number;
-  id: string;
-  label: string;
-};
-
-/** Strip vendor/product noise from Gamepad.id for a readable label. */
-function cleanPadLabel(id: string): string {
-  const cut = id.indexOf(" (");
-  return (cut > 0 ? id.slice(0, cut) : id).trim() || id;
-}
-
-function readConnectedPads(): ConnectedPad[] {
-  const pads = navigator.getGamepads?.() ?? [];
-  const out: ConnectedPad[] = [];
-  for (const p of pads) {
-    if (!p) continue;
-    out.push({ index: p.index, id: p.id, label: cleanPadLabel(p.id) });
-  }
-  return out;
 }
 
 function readInvite() {
@@ -76,7 +55,6 @@ export default function App() {
   const [streamMeta, setStreamMeta] = useState("—");
   const [captureHint, setCaptureHint] = useState<string | null>(null);
   const [padMeta, setPadMeta] = useState("press a button on your DualSense / pad");
-  const [pads, setPads] = useState<ConnectedPad[]>([]);
   const [fullscreen, setFullscreen] = useState(false);
   const [presentMode, setPresentMode] = useState<"webcodecs" | "canvas" | "video" | "—">("—");
   const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
@@ -346,23 +324,7 @@ export default function App() {
   }, [invite.auto, invite.sessionId, invite.pin, signalingUrl]);
 
   const connected = state === "connected" || state === "negotiating";
-
-  useEffect(() => {
-    if (!connected) {
-      setPads([]);
-      return;
-    }
-    const refresh = () => setPads(readConnectedPads());
-    refresh();
-    window.addEventListener("gamepadconnected", refresh);
-    window.addEventListener("gamepaddisconnected", refresh);
-    const timer = window.setInterval(refresh, 1000);
-    return () => {
-      window.removeEventListener("gamepadconnected", refresh);
-      window.removeEventListener("gamepaddisconnected", refresh);
-      window.clearInterval(timer);
-    };
-  }, [connected]);
+  const livePads = useLivePads(true);
 
   return (
     <div className={`shell ${fullscreen ? "is-fullscreen" : ""}`}>
@@ -459,37 +421,30 @@ export default function App() {
           )}
         </div>
 
-        {connected && (
+        {livePads.length > 0 && (
           <section className="pads" aria-live="polite">
             <div className="pads-head">
               <span className="pads-count">
-                {pads.length === 0
-                  ? "No controllers"
-                  : `${pads.length} controller${pads.length === 1 ? "" : "s"}`}
+                {livePads.length} controller{livePads.length === 1 ? "" : "s"}
               </span>
-              {pads.length > 0 && (
-                <span className="pads-hint">first pad is sent to the host</span>
-              )}
+              <span className="pads-hint">first pad is sent to the host</span>
             </div>
-            {pads.length === 0 ? (
-              <p className="pads-empty">
-                Pair a pad, then press any button so the browser unlocks it.
-              </p>
-            ) : (
-              <ul className="pads-list">
-                {pads.map((pad, i) => (
-                  <li
-                    key={`${pad.index}-${pad.id}`}
-                    className={`pads-item${i === 0 ? " is-active" : ""}`}
-                    title={pad.id}
-                  >
-                    <span className="pads-slot">P{pad.index + 1}</span>
-                    <span className="pads-name">{pad.label}</span>
-                    {i === 0 && <span className="pads-active">active</span>}
-                  </li>
-                ))}
-              </ul>
-            )}
+            <div className="pads-viz">
+              {livePads.map((pad, i) => (
+                <ControllerViz
+                  key={`${pad.index}-${pad.id}`}
+                  pad={pad}
+                  active={i === 0}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+        {connected && livePads.length === 0 && (
+          <section className="pads" aria-live="polite">
+            <p className="pads-empty">
+              Pair a pad, then press any button so the browser unlocks it.
+            </p>
           </section>
         )}
       </div>

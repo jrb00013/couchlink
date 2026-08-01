@@ -41,6 +41,35 @@ pub fn parse_join_url(raw: &str) -> Result<ParsedInvite> {
     })
 }
 
+/// Waiting-screen field: full join URL **or** `session:pin` / `session/pin`.
+pub fn parse_join_input(raw: &str) -> Result<ParsedInvite> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("paste a join URL, or session:pin");
+    }
+    let looks_like_url = trimmed.contains("://")
+        || trimmed.contains('?')
+        || trimmed.starts_with("http")
+        || trimmed.starts_with("ws");
+    if looks_like_url {
+        return parse_join_url(trimmed);
+    }
+    let (session_id, pin) = trimmed
+        .split_once(':')
+        .or_else(|| trimmed.split_once('/'))
+        .map(|(s, p)| (s.trim(), p.trim()))
+        .filter(|(s, p)| !s.is_empty() && !p.is_empty())
+        .context("expected join URL or session:pin")?;
+    Ok(ParsedInvite {
+        signaling: "ws://127.0.0.1:8443/ws".into(),
+        session_id: session_id.to_string(),
+        pin: pin.to_string(),
+        turn_url: None,
+        turn_user: None,
+        turn_pass: None,
+    })
+}
+
 fn query(url: &Url, keys: &[&str]) -> Option<String> {
     for (k, v) in url.query_pairs() {
         if keys.iter().any(|key| *key == k) {
@@ -79,5 +108,18 @@ mod tests {
     fn infers_ws_from_page_origin() {
         let p = parse_join_url("https://game.example.com/?s=a&p=1").unwrap();
         assert_eq!(p.signaling, "wss://game.example.com:443/ws");
+    }
+
+    #[test]
+    fn parse_input_accepts_url_or_session_pin() {
+        let u = parse_join_input(
+            "http://host:8443/?s=abc&p=123&ws=ws://host:8443/ws",
+        )
+        .unwrap();
+        assert_eq!(u.session_id, "abc");
+        let sp = parse_join_input("friends-night:482193").unwrap();
+        assert_eq!(sp.session_id, "friends-night");
+        assert_eq!(sp.pin, "482193");
+        assert!(parse_join_input("only-session").is_err());
     }
 }

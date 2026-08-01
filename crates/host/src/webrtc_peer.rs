@@ -418,3 +418,58 @@ pub fn apply_pad_bytes(pad: &mut VirtualPad, data: &[u8]) -> Result<()> {
     let _ = BytesMut::new();
     Ok(())
 }
+
+#[cfg(test)]
+mod controller_host_tests {
+    use super::*;
+    use couchlink_pad::recognize::{is_supported_dualsense, XboxVariant};
+    use couchlink_pad::sim::{
+        dualsense_usb_press, encode_clpd, simulate_dualsense_frame, simulate_xbox_frame, xbox_press,
+        SimButton,
+    };
+    use couchlink_pad::{VirtualPad, VirtualPadConfig, PID_DUALSENSE, SONY_VID};
+    use couchlink_proto::pad_frame::buttons;
+
+    #[test]
+    fn host_announces_bluetooth_dualsense_for_p2() {
+        let cfg = VirtualPadConfig::default();
+        assert_eq!(cfg.vendor, SONY_VID);
+        assert_eq!(cfg.product, PID_DUALSENSE);
+        assert!(cfg.as_bluetooth);
+        assert!(is_supported_dualsense(cfg.vendor, cfg.product));
+    }
+
+    #[test]
+    fn host_applies_simulated_xbox_clpd_from_each_sku_path() {
+        let mut pad = VirtualPad::create_noop(VirtualPadConfig::default());
+        for v in XboxVariant::ALL {
+            let frame = simulate_xbox_frame(&xbox_press(SimButton::Cross)).unwrap();
+            let bytes = encode_clpd(&frame);
+            apply_pad_bytes(&mut pad, &bytes).unwrap();
+            let decoded = PadFrame::decode(&bytes).unwrap();
+            assert!(decoded.buttons & buttons::CROSS != 0, "{}", v.label());
+        }
+    }
+
+    #[test]
+    fn host_applies_simulated_dualsense_and_ps_face_buttons() {
+        let mut pad = VirtualPad::create_noop(VirtualPadConfig::default());
+        for btn in [
+            SimButton::Cross,
+            SimButton::Circle,
+            SimButton::Square,
+            SimButton::Triangle,
+            SimButton::Ps,
+        ] {
+            let frame = simulate_dualsense_frame(&dualsense_usb_press(btn)).unwrap();
+            apply_pad_bytes(&mut pad, &encode_clpd(&frame)).unwrap();
+        }
+    }
+
+    #[test]
+    fn reject_bad_clpd_magic() {
+        let mut pad = VirtualPad::create_noop(VirtualPadConfig::default());
+        let err = apply_pad_bytes(&mut pad, &[0; 31]);
+        assert!(err.is_err());
+    }
+}

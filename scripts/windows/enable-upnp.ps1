@@ -1,14 +1,19 @@
 #Requires -RunAsAdministrator
-# Prepare Windows so real router UPnP can work, then try mapping Couchlink ports.
-# Registers CouchlinkElevatedUpnp so later --online runs need no UAC (schtasks /Run).
+# Prepare Windows for couchlink --online:
+#   Private profile, discovery, UPnP services, NATUPnP maps,
+#   firewall allow for 8443/3478, and WSL portproxy (IPv4+IPv6 → WSL).
+# Registers CouchlinkElevatedUpnp so later --online runs need no UAC.
 #
 # Exit: 0 = IGD OK / maps applied (or -SkipMap prep done)
-#       2 = Windows prepared but router IGD still missing
+#       2 = Windows prepared (portproxy/firewall OK) but router IGD still missing
 #       1 = hard failure
 param(
     [switch]$SkipMap,
     [string]$LanIp = "",
-    [string]$RunDir = ""
+    [string]$WslIp = "",
+    [string]$RunDir = "",
+    [int]$SignalingPort = 8443,
+    [int]$TurnPort = 3478
 )
 
 $ErrorActionPreference = "Continue"
@@ -16,6 +21,7 @@ $RunDir = if ($RunDir) { $RunDir } else { Join-Path $env:LOCALAPPDATA "couchlink
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 $Marker = Join-Path $RunDir "enable-upnp.exit"
 $LogFile = Join-Path $RunDir "enable-upnp.log"
+$Ipv6File = Join-Path $RunDir "public-ipv6.txt"
 $ScriptSelf = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 
 function Log([string]$m, [string]$color = "White") {
@@ -53,6 +59,71 @@ function Register-CouchlinkElevatedUpnp {
 function Finish([int]$code) {
     Set-Content -Path $Marker -Value $code -Encoding ASCII
     exit $code
+}
+
+function Get-WslConnectIp {
+    if ($WslIp -and $WslIp.Trim()) { return $WslIp.Trim() }
+    try {
+        $out = & wsl.exe -e sh -c "ip -4 -o addr show eth0 2>/dev/null | awk '{print `$4}' | cut -d/ -f1 | head -1" 2>$null
+        $ip = ("$out").Trim()
+        if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { return $ip }
+    } catch {}
+    try {
+        $out = & wsl.exe -e sh -c "hostname -I | awk '{print `$1}'" 2>$null
+        $ip = ("$out").Trim()
+        if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { return $ip }
+    } catch {}
+    return $null
+}
+
+function Ensure-Fw([string]$name, [string]$proto, [int]$port) {
+    if (-not (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName $name -Direction Inbound -Protocol $proto `
+            -LocalPort $port -Action Allow -Profile Any | Out-Null
+        Ok "firewall allow $name ($proto/$port)"
+    } else {
+        Ok "firewall exists $name"
+    }
+}
+
+function Set-PortProxy([string]$listenFamily, [string]$listenAddr, [int]$listenPort, [string]$connectAddr, [int]$connectPort) {
+    $del = "interface portproxy delete $listenFamily listenaddress=$listenAddr listenport=$listenPort"
+    $add = "interface portproxy add $listenFamily listenaddress=$listenAddr listenport=$listenPort connectaddress=$connectAddr connectport=$connectPort"
+    cmd.exe /c "netsh $del" 2>$null | Out-Null
+    $r = cmd.exe /c "netsh $add" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Warn "portproxy $listenFamily :$listenPort failed: $r"
+        return $false
+    }
+    Ok "portproxy $listenFamily $listenAddr`:$listenPort → $connectAddr`:$connectPort"
+    return $true
+}
+
+function Write-PublicIpv6 {
+    Remove-Item -Force $Ipv6File -ErrorAction SilentlyContinue
+    $candidates = @(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.AddressState -eq 'Preferred' -and
+            $_.InterfaceAlias -notmatch 'WSL|vEthernet|Loopback|Bluetooth|Default Switch' -and
+            $_.IPAddress -match '^[23]' -and
+            $_.IPAddress -notmatch '^fd' -and
+            $_.IPAddress -notmatch '^fe80'
+        })
+    if (-not $candidates) { return }
+    # Prefer DHCP / stable over temporary privacy addresses.
+    $best = $candidates |
+        Sort-Object @{
+            Expression = {
+                if ($_.PrefixOrigin -eq 'Dhcp') { 0 }
+                elseif ($_.SuffixOrigin -eq 'Link') { 1 }
+                else { 2 }
+            }
+        } |
+        Select-Object -First 1
+    if ($best) {
+        Set-Content -Path $Ipv6File -Value $best.IPAddress -Encoding ASCII
+        Ok ("public IPv6 for invite: {0}" -f $best.IPAddress)
+    }
 }
 
 Set-Content -Path $LogFile -Value ("Couchlink enable-upnp " + (Get-Date -Format o)) -Encoding utf8
@@ -110,7 +181,24 @@ foreach ($svcName in @("SSDPSRV", "upnphost")) {
     }
 }
 
-Start-Sleep -Seconds 2
+Step "Couchlink: firewall + WSL portproxy (no router needed for LAN/IPv6 path)"
+Ensure-Fw "couchlink-signaling-$SignalingPort" "TCP" $SignalingPort
+Ensure-Fw "couchlink-turn-$TurnPort-tcp" "TCP" $TurnPort
+Ensure-Fw "couchlink-turn-$TurnPort-udp" "UDP" $TurnPort
+
+$connectIp = Get-WslConnectIp
+if ($connectIp) {
+    Set-PortProxy "v4tov4" "0.0.0.0" $SignalingPort $connectIp $SignalingPort | Out-Null
+    Set-PortProxy "v4tov4" "0.0.0.0" $TurnPort $connectIp $TurnPort | Out-Null
+    Set-PortProxy "v6tov4" "::" $SignalingPort $connectIp $SignalingPort | Out-Null
+    Set-PortProxy "v6tov4" "::" $TurnPort $connectIp $TurnPort | Out-Null
+} else {
+    Warn "WSL IP not found — skipped portproxy (friends may not reach WSL listeners)"
+}
+
+Write-PublicIpv6
+
+Start-Sleep -Seconds 1
 
 if (-not $LanIp) {
     $LanIp = (Get-NetIPAddress -AddressFamily IPv4 |
@@ -123,15 +211,15 @@ try {
     $maps = $nat.StaticPortMappingCollection
     if ($null -eq $maps) {
         Warn "Still no UPnP IGD (StaticPortMappingCollection is null)"
-        Log "Windows prepared; enable UPnP/IGD on the gateway (often http://192.168.1.1)." "Yellow"
-        Log "Friends may need manual port-forward TCP 8443 + UDP/TCP 3478 until then." "DarkGray"
+        Log "Portproxy/firewall ready. Router UPnP off — IPv6 invite or tunnel fallback covers friends." "Yellow"
         if ($SkipMap) { Finish 0 }
         Finish 2
     }
     Ok ("UPnP IGD visible (existing maps: {0})" -f $maps.Count)
 } catch {
     Warn ("NATUPnP COM: " + $_.Exception.Message)
-    Finish 1
+    # Portproxy still applied — not a hard fail for --online.
+    Finish 2
 }
 
 if ($SkipMap -or -not $LanIp) {
@@ -151,9 +239,9 @@ function Add-Map([int]$Port, [string]$Proto, [string]$Name) {
     }
 }
 
-$ok8443 = Add-Map 8443 "TCP" "couchlink-signaling"
-Add-Map 3478 "TCP" "couchlink-turn-tcp" | Out-Null
-Add-Map 3478 "UDP" "couchlink-turn-udp" | Out-Null
+$ok8443 = Add-Map $SignalingPort "TCP" "couchlink-signaling"
+Add-Map $TurnPort "TCP" "couchlink-turn-tcp" | Out-Null
+Add-Map $TurnPort "UDP" "couchlink-turn-udp" | Out-Null
 
 if ($ok8443) { Finish 0 }
-Finish 1
+Finish 2
