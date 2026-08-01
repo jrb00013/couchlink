@@ -1,7 +1,9 @@
 mod decode;
+#[cfg_attr(not(target_os = "linux"), path = "dualsense_reader_stub.rs")]
 mod dualsense_reader;
 mod feedback_apply;
 mod keyboard_input;
+mod xbox_reader;
 mod config_file;
 mod invite;
 mod prompt;
@@ -280,11 +282,20 @@ async fn async_main(
     } else {
         None
     };
-    if dualsense.is_none() && args.send_pad {
+    let mut xbox = if args.send_pad {
+        xbox_reader::XboxReader::open_first().ok()
+    } else {
+        None
+    };
+    if dualsense.is_some() {
+        info!("DualSense controller connected");
+    } else if xbox.is_some() {
+        info!("Xbox controller connected");
+    } else if args.send_pad {
         if keyboard.is_some() {
-            info!("no DualSense found — keyboard input is still available in windowed mode");
+            info!("no DualSense/Xbox controller found — keyboard input is still available in windowed mode");
         } else {
-            warn!("no DualSense found and no keyboard available (headless mode) — no pad input will be sent");
+            warn!("no DualSense/Xbox controller found and no keyboard available (headless mode) — no pad input will be sent");
         }
     }
 
@@ -330,19 +341,27 @@ async fn async_main(
             }
             _ = pad_interval.tick() => {
                 seq = seq.wrapping_add(1);
-                // DualSense takes priority for this tick when it produces a frame.
-                // Otherwise, only send a keyboard-derived frame while a key is
-                // actually held, plus one extra frame on the falling edge (last
-                // key just released) so the host doesn't keep a stale input
+                // DualSense takes priority for this tick when it produces a frame,
+                // then Xbox. Otherwise, only send a keyboard-derived frame while a
+                // key is actually held, plus one extra frame on the falling edge
+                // (last key just released) so the host doesn't keep a stale input
                 // held forever. Without this gate, `read_frame()` returning
                 // `Ok(None)` on WouldBlock (the common case at 250Hz) would
                 // fall through to a neutral keyboard frame every other tick
-                // and stomp whatever the DualSense was holding.
+                // and stomp whatever the pad was holding.
                 let ds_frame = match dualsense.as_mut() {
                     Some(r) => r.read_frame().ok().flatten(),
                     None => None,
                 };
-                let frame = match ds_frame {
+                let xb_frame = if ds_frame.is_none() {
+                    match xbox.as_mut() {
+                        Some(r) => r.read_frame().ok().flatten(),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let frame = match ds_frame.or(xb_frame) {
                     Some(f) => Some(f),
                     None => keyboard.as_ref().and_then(|(kp, _)| {
                         let kp = kp.lock().unwrap();

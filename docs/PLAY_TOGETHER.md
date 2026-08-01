@@ -84,7 +84,7 @@ Pick **browser** (zero install) or **desktop player** (native app).
    - **Linux / WSL:** AppImage, or `./scripts/run.sh client --online` (prompts in the terminal).
    - **macOS:** open **Couchlink Player.app** (prompts for join URL on startup).
 2. Paste the **full** join URL when asked (desktop always prompts; terminal prompts if credentials are missing).
-3. Plug in **DualSense**, or use **keyboard** (WASD, arrows, Space/Shift/Ctrl/E, etc.).
+3. Plug in **DualSense** or an **Xbox controller** (One/Series, USB or Bluetooth), or use **keyboard** (WASD, arrows, Space/Shift/Ctrl/E, etc.).
 
 Clients expand TURN to UDP **and** TCP automatically — required for WSL nested NAT and many carrier networks. WSL clients also auto-advertise the Windows LAN IP as an ICE host candidate for same-LAN peers.
 
