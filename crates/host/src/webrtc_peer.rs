@@ -87,6 +87,9 @@ pub struct WebRtcHost {
     video_w: AtomicU32,
     video_h: AtomicU32,
     pub pad_tx: mpsc::UnboundedSender<PadFrame>,
+    /// Pad DataChannel for host→player feedback (rumble / adaptive triggers).
+    #[allow(dead_code)] // retained for `send_feedback` / future FF adapters
+    pad_dc: Arc<RTCDataChannel>,
     offer_epoch: Arc<AtomicU64>,
     /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
     keyframe_wanted: Arc<AtomicBool>,
@@ -236,7 +239,7 @@ impl WebRtcHost {
                 }),
             )
             .await?;
-        setup_pad_channel(pad_dc, pad_tx_dc, pad_device_dc).await;
+        setup_pad_channel(Arc::clone(&pad_dc), pad_tx_dc, pad_device_dc).await;
 
         // Video: unordered, but allow a short retransmit window so fragmented
         // IDRs (often >64 KiB) are not permanently lost on a single drop.
@@ -263,11 +266,21 @@ impl WebRtcHost {
                 video_w: AtomicU32::new(0),
                 video_h: AtomicU32::new(0),
                 pad_tx,
+                pad_dc,
                 offer_epoch,
                 keyframe_wanted,
             },
             pad_rx,
         ))
+    }
+
+    /// Send haptic / lightbar / adaptive-trigger feedback to the player's DualSense.
+    #[allow(dead_code)] // public API for emulator adapters / VHID companions
+    pub async fn send_feedback(&self, fb: &PadFeedback) -> Result<()> {
+        let text = couchlink_pad::feedback::encode_feedback_json(fb)
+            .context("encode PadFeedback JSON")?;
+        self.pad_dc.send_text(text).await?;
+        Ok(())
     }
 
     /// Dimensions stamped into CLVD headers (from stream preset / capture).

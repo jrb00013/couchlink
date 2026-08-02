@@ -24,6 +24,12 @@ mod stub {
         pub fn set_rumble(&mut self, _large: u8, _small: u8) -> Result<()> {
             Ok(())
         }
+        pub fn write_output(&mut self, _report: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        pub fn apply_feedback(&mut self, _fb: &couchlink_proto::PadFeedback) -> Result<()> {
+            Ok(())
+        }
     }
 }
 
@@ -36,10 +42,11 @@ pub use linux_impl::DualSenseReader;
 #[cfg(target_os = "linux")]
 mod linux_impl {
 use anyhow::{bail, Context, Result};
+use couchlink_pad::feedback::build_usb_output_report;
 use couchlink_pad::parse_ds4_input_report;
 use couchlink_pad::parse_input_report;
 use couchlink_pad::recognize::{is_dualshock4, is_supported_dualsense};
-use couchlink_proto::PadFrame;
+use couchlink_proto::{PadFeedback, PadFrame};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
@@ -108,12 +115,7 @@ impl DualSenseReader {
     pub fn set_rumble(&mut self, large: u8, small: u8) -> Result<()> {
         match self.family {
             SonyFamily::DualSense => {
-                let mut buf = [0u8; 48];
-                buf[0] = 0x02;
-                buf[1] = 0xFF;
-                buf[3] = small;
-                buf[4] = large;
-                let _ = self.file.write(&buf);
+                self.apply_feedback(&PadFeedback::Rumble { large, small })
             }
             SonyFamily::DualShock4 => {
                 let mut buf = [0u8; 32];
@@ -121,10 +123,39 @@ impl DualSenseReader {
                 buf[1] = 0xFF;
                 buf[4] = small;
                 buf[5] = large;
-                let _ = self.file.write(&buf);
+                match self.file.write_all(&buf) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+                    Err(e) => Err(e).with_context(|| format!("write rumble {}", self.path.display())),
+                }
             }
         }
-        Ok(())
+    }
+
+    /// Write a DualSense USB output report (or any HID output) to hidraw.
+    pub fn write_output(&mut self, report: &[u8]) -> Result<()> {
+        if report.is_empty() {
+            return Ok(());
+        }
+        match self.file.write_all(report) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("write output {}", self.path.display())),
+        }
+    }
+
+    pub fn apply_feedback(&mut self, fb: &PadFeedback) -> Result<()> {
+        match self.family {
+            SonyFamily::DualSense => {
+                let report = build_usb_output_report(fb);
+                self.write_output(&report)
+            }
+            SonyFamily::DualShock4 => match fb {
+                PadFeedback::Rumble { large, small } => self.set_rumble(*large, *small),
+                PadFeedback::RawOutput { report } => self.write_output(report),
+                _ => Ok(()), // lightbar / adaptive triggers: DualSense-only
+            },
+        }
     }
 }
 
