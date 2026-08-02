@@ -42,10 +42,9 @@ couchlink_helper_ping() {
   "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script_w" -Op ping >/dev/null 2>&1
 }
 
-# online_prep via helper. Prints status line. Exit: 0, 2, or other.
-# If the installed enable-upnp.ps1 still has #Requires -RunAsAdministrator
-# (rejects LocalSystem), fall back to firewall_unblock + portproxy probe so
-# --online still works without another UAC.
+# online_prep via helper. Exit: 0, 2, or other.
+# Prefer a quiet path that works with the currently installed service even when
+# Program Files still has enable-upnp.ps1 with #Requires -RunAsAdministrator.
 couchlink_helper_online_prep() {
   local root="${1:?}"
   shift
@@ -57,6 +56,17 @@ couchlink_helper_online_prep() {
     esac
     shift || true
   done
+
+  # Always refresh firewall rules via the working helper op (no UAC).
+  set +e
+  couchlink_helper_firewall_unblock "$root" >/dev/null 2>&1
+  set -e
+
+  # Mesh / skip-map: firewall + existing WSL portproxy is enough.
+  if [[ "$skip_map" == "1" ]] && couchlink_helper_portproxy_ok; then
+    return 0
+  fi
+
   local ps script_w args ec
   ps="$(couchlink_helper_ps_launch)"
   [[ -n "$ps" ]] || return 1
@@ -69,28 +79,24 @@ couchlink_helper_online_prep() {
     args+=(-WslIp "$wsl_ip")
   fi
   set +e
-  "$ps" "${args[@]}"
+  "$ps" "${args[@]}" >/dev/null
   ec=$?
   set -e
   if [[ "$ec" -eq 0 || "$ec" -eq 2 ]]; then
     return "$ec"
   fi
 
-  echo "==> helper online_prep exit $ec — fallback: firewall via helper + portproxy check" >&2
-  set +e
-  couchlink_helper_firewall_unblock "$root" >/dev/null
-  set -e
+  # Installed script may still reject LocalSystem (#Requires); portproxy may already exist.
   if couchlink_helper_portproxy_ok; then
     if [[ "$skip_map" == "1" ]]; then
       return 0
     fi
-    # Windows prep OK; UPnP map unknown / skipped by fallback
     return 2
   fi
   return "$ec"
 }
 
-# True if Windows already has couchlink portproxy for 8443 (and ideally 3478).
+# True if Windows already has couchlink portproxy for 8443.
 couchlink_helper_portproxy_ok() {
   local out
   out="$(netsh.exe interface portproxy show all 2>/dev/null | tr -d '\r' || true)"
