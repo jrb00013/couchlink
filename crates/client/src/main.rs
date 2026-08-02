@@ -385,6 +385,7 @@ async fn async_main(
         }
     }
 
+    let mut feedback_rx = player.take_feedback_rx().await;
     let mut pad_interval = tokio::time::interval(std::time::Duration::from_millis(4)); // ~250 Hz
     let mut seq: u32 = 0;
     let mut keyboard_was_active = false;
@@ -423,6 +424,18 @@ async fn async_main(
             frame = video_frames.recv() => {
                 if let (Some(frame), Some(out)) = (frame, &video_frame_out) {
                     let _ = out.send(frame);
+                }
+            }
+            fb = async {
+                match feedback_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(fb) = fb {
+                    if let Err(e) = feedback_apply::apply_feedback(dualsense.as_mut(), &fb) {
+                        warn!("apply pad feedback: {e}");
+                    }
                 }
             }
             _ = pad_interval.tick() => {

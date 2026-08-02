@@ -24,6 +24,12 @@ mod stub {
         pub fn set_rumble(&mut self, _large: u8, _small: u8) -> Result<()> {
             Ok(())
         }
+        pub fn write_output(&mut self, _report: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        pub fn apply_feedback(&mut self, _fb: &couchlink_proto::PadFeedback) -> Result<()> {
+            Ok(())
+        }
     }
 }
 
@@ -36,9 +42,10 @@ pub use linux_impl::DualSenseReader;
 #[cfg(target_os = "linux")]
 mod linux_impl {
 use anyhow::{bail, Context, Result};
+use couchlink_pad::feedback::build_usb_output_report;
 use couchlink_pad::parse_input_report;
 use couchlink_pad::recognize::is_supported_dualsense;
-use couchlink_proto::PadFrame;
+use couchlink_proto::{PadFeedback, PadFrame};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
@@ -90,13 +97,23 @@ impl DualSenseReader {
 
     /// Best-effort USB output rumble (report 0x02) when connected over USB hidraw.
     pub fn set_rumble(&mut self, large: u8, small: u8) -> Result<()> {
-        let mut buf = [0u8; 48];
-        buf[0] = 0x02;
-        buf[1] = 0xFF;
-        buf[3] = small;
-        buf[4] = large;
-        let _ = self.file.write(&buf);
+        self.apply_feedback(&PadFeedback::Rumble { large, small })
+    }
+
+    /// Write a DualSense USB output report (or any HID output) to hidraw.
+    pub fn write_output(&mut self, report: &[u8]) -> Result<()> {
+        if report.is_empty() {
+            return Ok(());
+        }
+        self.file
+            .write_all(report)
+            .with_context(|| format!("write output {}", self.path.display()))?;
         Ok(())
+    }
+
+    pub fn apply_feedback(&mut self, fb: &PadFeedback) -> Result<()> {
+        let report = build_usb_output_report(fb);
+        self.write_output(&report)
     }
 }
 

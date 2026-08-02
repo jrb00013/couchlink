@@ -43,13 +43,28 @@ pub struct PadFrame {
     pub touch_y: u16,
 }
 
-/// Host → player haptic / lightbar feedback (JSON on same channel, type tag).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Host → player haptic / lightbar / adaptive-trigger feedback (JSON on same channel).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PadFeedback {
     Rumble { large: u8, small: u8 },
     Lightbar { r: u8, g: u8, b: u8 },
     PlayerLed { mask: u8 },
+    /// DualSense adaptive trigger effect blocks (USB output offsets 11 / 22).
+    AdaptiveTriggers {
+        left_mode: u8,
+        /// Up to 10 effect parameters (padded/truncated to 10 on pack).
+        #[serde(default)]
+        left_params: Vec<u8>,
+        right_mode: u8,
+        #[serde(default)]
+        right_params: Vec<u8>,
+    },
+    /// Full DualSense USB output report (report id `0x02` + common payload).
+    RawOutput {
+        /// Raw HID bytes including report id.
+        report: Vec<u8>,
+    },
 }
 
 // Button bits — match common DS layouts (dualsensekit / hid-playstation style).
