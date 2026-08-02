@@ -17,8 +17,8 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Congestion / idle | WebRTC GCC + tile motion detector |
 | Path | **PRIME mesh** — **Headscale** (default, no Tailscale Inc account), else Tailscale / WireGuard; else public STUN + local TURN; on WSL `--online` also firewall + WSL portproxy via **Couchlink Helper**; then HTTPS (cloudflared) + IPv6 TURN if UPnP is off |
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
-| Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |
-| Host injection | Linux `uinput` DualSense identity, bus = Bluetooth |
+| Local pad capture | Browser Gamepad API, or Linux hidraw (DualSense / DS4 / Xbox) |
+| Host injection | Linux `uinput` DualSense BT; Windows DualSense VHID → ViGEm DS4 → Xbox 360 |
 | Invite | Host prints join URL + QR (`mesh=headscale&hs=&tskey=` when on Headscale) |
 
 ## Install
@@ -81,9 +81,10 @@ see `crates/client/src/keyboard_input.rs` for the full mapping).
 
 **Desktop installers:** [FRIEND_INSTALL.md](docs/FRIEND_INSTALL.md) · [NO_COMPUTER_UX.md](docs/NO_COMPUTER_UX.md) · [DESKTOP_CLIENT.md](docs/DESKTOP_CLIENT.md) · [PLAY_TOGETHER.md](docs/PLAY_TOGETHER.md)
 
-Host role needs Linux `uinput` for the virtual DualSense — run full co-play
-from Linux or WSL. macOS auto-detects and can run **client**, signaling, and a
-**video-only host** (no pad injection).
+Host role needs a virtual pad: Linux/`uinput` (DualSense), or native **Windows** with
+[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) (and optional DualSense VHID
+companion). Override with `COUCHLINK_VIRTUAL_PAD=auto|dualsense|ds4|xbox360|noop`.
+macOS auto-detects and can run **client**, signaling, and a **video-only host** (no pad injection).
 
 <details>
 <summary>Individual scripts (if you want separate terminals/logs)</summary>

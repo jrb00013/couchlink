@@ -1,5 +1,5 @@
-//! Read local DualSense via Linux hidraw — dualsensekit enumeration methodology
-//! without linking libudev/hidapi (works in constrained build environments).
+//! Read local DualSense / DualShock 4 via Linux hidraw — dualsensekit enumeration
+//! methodology without linking libudev/hidapi (works in constrained build environments).
 //!
 //! hidraw is Linux-only. On other platforms the reader compiles to a stub that
 //! reports no pad, so the viewer still builds and runs there with keyboard input;
@@ -16,7 +16,7 @@ mod stub {
 
     impl DualSenseReader {
         pub fn open_first() -> Result<Self> {
-            bail!("DualSense over hidraw is Linux-only; use keyboard input on this platform")
+            bail!("Sony pad over hidraw is Linux-only; use keyboard input on this platform")
         }
         pub fn read_frame(&mut self) -> Result<Option<PadFrame>> {
             Ok(None)
@@ -36,8 +36,9 @@ pub use linux_impl::DualSenseReader;
 #[cfg(target_os = "linux")]
 mod linux_impl {
 use anyhow::{bail, Context, Result};
+use couchlink_pad::parse_ds4_input_report;
 use couchlink_pad::parse_input_report;
-use couchlink_pad::recognize::is_supported_dualsense;
+use couchlink_pad::recognize::{is_dualshock4, is_supported_dualsense};
 use couchlink_proto::PadFrame;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -46,15 +47,22 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
 
+enum SonyFamily {
+    DualSense,
+    DualShock4,
+}
+
 pub struct DualSenseReader {
     file: File,
     seq: u32,
     path: PathBuf,
+    family: SonyFamily,
 }
 
 impl DualSenseReader {
     pub fn open_first() -> Result<Self> {
-        let path = find_dualsense_hidraw()?.context("no DualSense hidraw node found")?;
+        let (path, family) =
+            find_sony_hidraw()?.context("no DualSense/DualShock 4 hidraw node found")?;
         let file = File::options()
             .read(true)
             .write(true)
@@ -62,11 +70,16 @@ impl DualSenseReader {
             .with_context(|| format!("open {}", path.display()))?;
         // Non-blocking reads so the WebRTC loop stays responsive.
         set_nonblocking(file.as_raw_fd())?;
-        info!("opened DualSense at {}", path.display());
+        let label = match family {
+            SonyFamily::DualSense => "DualSense",
+            SonyFamily::DualShock4 => "DualShock 4",
+        };
+        info!("opened {label} at {}", path.display());
         Ok(Self {
             file,
             seq: 0,
             path,
+            family,
         })
     }
 
@@ -75,9 +88,12 @@ impl DualSenseReader {
         match self.file.read(&mut buf) {
             Ok(0) => Ok(None),
             Ok(n) => {
-                let mut frame = match parse_input_report(&buf[..n]) {
-                    Some(f) => f,
-                    None => return Ok(None),
+                let frame = match self.family {
+                    SonyFamily::DualSense => parse_input_report(&buf[..n]),
+                    SonyFamily::DualShock4 => parse_ds4_input_report(&buf[..n]),
+                };
+                let Some(mut frame) = frame else {
+                    return Ok(None);
                 };
                 self.seq = self.seq.wrapping_add(1);
                 frame.seq = self.seq;
@@ -88,19 +104,31 @@ impl DualSenseReader {
         }
     }
 
-    /// Best-effort USB output rumble (report 0x02) when connected over USB hidraw.
+    /// Best-effort USB output rumble when connected over USB hidraw.
     pub fn set_rumble(&mut self, large: u8, small: u8) -> Result<()> {
-        let mut buf = [0u8; 48];
-        buf[0] = 0x02;
-        buf[1] = 0xFF;
-        buf[3] = small;
-        buf[4] = large;
-        let _ = self.file.write(&buf);
+        match self.family {
+            SonyFamily::DualSense => {
+                let mut buf = [0u8; 48];
+                buf[0] = 0x02;
+                buf[1] = 0xFF;
+                buf[3] = small;
+                buf[4] = large;
+                let _ = self.file.write(&buf);
+            }
+            SonyFamily::DualShock4 => {
+                let mut buf = [0u8; 32];
+                buf[0] = 0x05;
+                buf[1] = 0xFF;
+                buf[4] = small;
+                buf[5] = large;
+                let _ = self.file.write(&buf);
+            }
+        }
         Ok(())
     }
 }
 
-fn find_dualsense_hidraw() -> Result<Option<PathBuf>> {
+fn find_sony_hidraw() -> Result<Option<(PathBuf, SonyFamily)>> {
     let Ok(entries) = fs::read_dir("/sys/class/hidraw") else {
         bail!("no /sys/class/hidraw — is this Linux?");
     };
@@ -123,15 +151,19 @@ fn find_dualsense_hidraw() -> Result<Option<PathBuf>> {
         }
         let vid = u16::from_str_radix(parts[1], 16).unwrap_or(0);
         let pid = u16::from_str_radix(parts[2], 16).unwrap_or(0);
-        if !is_supported_dualsense(vid, pid) {
+        let family = if is_supported_dualsense(vid, pid) {
+            SonyFamily::DualSense
+        } else if is_dualshock4(vid, pid) {
+            SonyFamily::DualShock4
+        } else {
             continue;
-        }
+        };
         let node = PathBuf::from(format!("/dev/{name}"));
         // Prefer USB bus (0003) over Bluetooth (0005) like dualsensekit.
         if parts[0].eq_ignore_ascii_case("0003") {
-            usb.push(node);
+            usb.push((node, family));
         } else {
-            bt.push(node);
+            bt.push((node, family));
         }
     }
     Ok(usb.into_iter().chain(bt).next())
@@ -167,11 +199,12 @@ mod client_dualsense_recognition_tests {
     }
 
     #[test]
-    fn client_rejects_ps4_dualshock4_on_hidraw_path() {
+    fn client_accepts_ps4_dualshock4_on_hidraw_path() {
         for &pid in DUALSHOCK4_PIDS {
             assert!(is_dualshock4(SONY_VID, pid));
             assert!(!is_supported_dualsense(SONY_VID, pid));
             assert_eq!(classify(SONY_VID, pid), ControllerFamily::DualShock4);
+            assert!(couchlink_pad::recognize::is_native_supported(SONY_VID, pid));
         }
     }
 

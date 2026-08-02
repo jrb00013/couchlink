@@ -2,8 +2,7 @@
 //! hidraw readers use when deciding an Xbox or DualSense is "ours".
 //!
 //! Kept pure (no filesystem) so unit tests can prove every supported Xbox
-//! variant and DualSense / DualSense Edge product is accepted, and that
-//! lookalikes (e.g. DualShock 4 on native hidraw) are rejected.
+//! variant and DualSense / DualSense Edge / DualShock 4 product is accepted.
 
 use crate::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
 use crate::xbox::{
@@ -12,8 +11,7 @@ use crate::xbox::{
 };
 use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 
-/// DualShock 4 (PS4) product IDs — recognized by the browser Gamepad API path,
-/// but **not** by the native Linux hidraw DualSense reader (different HID layout).
+/// DualShock 4 (PS4) — recognized for native hidraw + web Standard Gamepad.
 pub const PID_DUALSHOCK4_V1: u16 = 0x05C4;
 pub const PID_DUALSHOCK4_V2: u16 = 0x09CC;
 pub const PID_DUALSHOCK4_DONGLE: u16 = 0x0BA0;
@@ -25,7 +23,7 @@ pub const DUALSHOCK4_PIDS: &[u16] = &[PID_DUALSHOCK4_V1, PID_DUALSHOCK4_V2, PID_
 pub enum ControllerFamily {
     Xbox,
     DualSense,
-    /// PS4 DualShock 4 — web Standard Gamepad only; native hidraw does not parse it.
+    /// PS4 DualShock 4 — native hidraw + web.
     DualShock4,
     Unknown,
 }
@@ -86,9 +84,9 @@ pub fn is_dualshock4(vid: u16, pid: u16) -> bool {
     vid == SONY_VID && DUALSHOCK4_PIDS.contains(&pid)
 }
 
-/// Native hidraw capture accept list (Xbox + DualSense / Edge only).
+/// Native hidraw capture accept list (Xbox + DualSense / Edge + DualShock 4).
 pub fn is_native_supported(vid: u16, pid: u16) -> bool {
-    is_supported_xbox(vid, pid) || is_supported_dualsense(vid, pid)
+    is_supported_xbox(vid, pid) || is_supported_dualsense(vid, pid) || is_dualshock4(vid, pid)
 }
 
 pub fn xbox_variant(pid: u16) -> Option<XboxVariant> {
@@ -168,11 +166,12 @@ mod tests {
     }
 
     #[test]
-    fn dualshock4_classified_but_not_native() {
+    fn dualshock4_is_native() {
         for &pid in DUALSHOCK4_PIDS {
             assert_eq!(classify(SONY_VID, pid), ControllerFamily::DualShock4);
-            assert!(!is_native_supported(SONY_VID, pid));
+            assert!(is_native_supported(SONY_VID, pid));
             assert!(!is_supported_dualsense(SONY_VID, pid));
+            assert!(is_dualshock4(SONY_VID, pid));
         }
     }
 

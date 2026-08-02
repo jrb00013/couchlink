@@ -57,10 +57,9 @@ mod tests {
     }
 
     #[test]
-    fn ps4_dualshock4_not_native_hidraw_but_labeled() {
-        // Documents the product boundary: PS4 DualShock 4 is web/Gamepad only.
+    fn ps4_dualshock4_native_hidraw_and_labeled() {
         for &pid in DUALSHOCK4_PIDS {
-            assert!(!is_native_supported(SONY_VID, pid));
+            assert!(is_native_supported(SONY_VID, pid));
             assert_eq!(classify(SONY_VID, pid), ControllerFamily::DualShock4);
             assert_eq!(product_label(SONY_VID, pid), Some("DualShock 4"));
         }
@@ -68,6 +67,14 @@ mod tests {
             classify(SONY_VID, PID_DUALSHOCK4_V2),
             ControllerFamily::DualShock4
         );
+        let mut raw = [0u8; 32];
+        raw[0] = 0x01;
+        raw[5] = 0x20; // Cross
+        let f = crate::parse_ds4_input_report(&raw).unwrap();
+        assert!(f.buttons & buttons::CROSS != 0);
+        let encoded = encode_clpd(&f);
+        let back = decode_clpd(&encoded).unwrap();
+        assert_eq!(back.buttons & buttons::CROSS, buttons::CROSS);
     }
 
     // ── Client: simulated Xbox input ───────────────────────────────────────
