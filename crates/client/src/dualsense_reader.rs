@@ -105,10 +105,11 @@ impl DualSenseReader {
         if report.is_empty() {
             return Ok(());
         }
-        self.file
-            .write_all(report)
-            .with_context(|| format!("write output {}", self.path.display()))?;
-        Ok(())
+        match self.file.write_all(report) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("write output {}", self.path.display())),
+        }
     }
 
     pub fn apply_feedback(&mut self, fb: &PadFeedback) -> Result<()> {

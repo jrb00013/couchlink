@@ -1,5 +1,4 @@
 mod decode;
-#[cfg_attr(not(target_os = "linux"), path = "dualsense_reader_stub.rs")]
 mod dualsense_reader;
 mod feedback_apply;
 mod keyboard_input;
@@ -432,9 +431,15 @@ async fn async_main(
                     None => std::future::pending().await,
                 }
             } => {
-                if let Some(fb) = fb {
-                    if let Err(e) = feedback_apply::apply_feedback(dualsense.as_mut(), &fb) {
-                        warn!("apply pad feedback: {e}");
+                match fb {
+                    Some(fb) => {
+                        if let Err(e) = feedback_apply::apply_feedback(dualsense.as_mut(), &fb) {
+                            warn!("apply pad feedback: {e}");
+                        }
+                    }
+                    None => {
+                        // All senders dropped (pad DC closed) — stop polling or we busy-loop.
+                        feedback_rx = None;
                     }
                 }
             }

@@ -29,4 +29,16 @@ mod tests {
         };
         apply_feedback(None, &fb).unwrap();
     }
+
+    #[test]
+    fn closed_feedback_sender_recv_is_disconnected() {
+        // Contract for the client select! loop: after senders drop, try_recv is
+        // Disconnected — the loop must set feedback_rx = None to avoid busy-spin.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PadFeedback>();
+        drop(tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
 }
