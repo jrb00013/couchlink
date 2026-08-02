@@ -26,7 +26,12 @@ enum Commands {
     /// Windows service entry (used by SCM).
     Service,
     /// Register + start the Windows service (requires elevation).
-    Install,
+    /// Copies exe + scripts into Program Files\Couchlink\Helper.
+    Install {
+        /// Directory containing enable-upnp.ps1 / unblock-firewall.ps1
+        #[arg(long)]
+        script_dir: Option<PathBuf>,
+    },
     /// Stop + delete the Windows service (requires elevation).
     Uninstall,
 }
@@ -66,13 +71,14 @@ fn main() -> Result<()> {
                 anyhow::bail!("couchlink-helper service is Windows-only");
             }
         }
-        Commands::Install => {
+        Commands::Install { script_dir } => {
             #[cfg(windows)]
             {
-                couchlink_windows_helper::service::install_service()
+                couchlink_windows_helper::service::install_service(script_dir.as_deref())
             }
             #[cfg(not(windows))]
             {
+                let _ = script_dir;
                 anyhow::bail!("couchlink-helper install is Windows-only");
             }
         }
@@ -94,5 +100,7 @@ fn default_script_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Couchlink\Helper"))
+        .unwrap_or_else(|| {
+            PathBuf::from(couchlink_windows_helper::service::INSTALL_DIR)
+        })
 }

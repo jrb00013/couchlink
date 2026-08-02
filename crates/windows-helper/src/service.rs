@@ -1,11 +1,12 @@
 //! Windows service registration and service main.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
@@ -18,7 +19,10 @@ use crate::pipe_server;
 
 pub const SERVICE_NAME: &str = "CouchlinkHelper";
 pub const SERVICE_DISPLAY: &str = "Couchlink Helper";
+pub const INSTALL_DIR: &str = r"C:\Program Files\Couchlink\Helper";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+
+const SCRIPT_NAMES: &[&str] = &["enable-upnp.ps1", "unblock-firewall.ps1", "call-helper.ps1"];
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -84,7 +88,6 @@ fn run_service() -> Result<()> {
         })
         .ok();
 
-    // Pipe loop does not exit cleanly; process stop ends the service.
     let _ = pipe_thread;
     Ok(())
 }
@@ -93,15 +96,40 @@ fn script_dir_from_exe() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Couchlink\Helper"))
+        .unwrap_or_else(|| PathBuf::from(INSTALL_DIR))
 }
 
-pub fn install_service() -> Result<()> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)
-            .context("OpenSCManager")?;
+/// Copy helper exe + PowerShell scripts into Program Files, then register the service.
+pub fn install_service(script_source: Option<&Path>) -> Result<()> {
+    let install_dir = PathBuf::from(INSTALL_DIR);
+    fs::create_dir_all(&install_dir)
+        .with_context(|| format!("create {}", install_dir.display()))?;
 
-    let exe = std::env::current_exe().context("current_exe")?;
+    let src_exe = std::env::current_exe().context("current_exe")?;
+    let dest_exe = install_dir.join("couchlink-helper.exe");
+    fs::copy(&src_exe, &dest_exe)
+        .with_context(|| format!("copy {} → {}", src_exe.display(), dest_exe.display()))?;
+    println!("OK staged {}", dest_exe.display());
+
+    let script_src = resolve_script_source(script_source, &src_exe)?;
+    for name in SCRIPT_NAMES {
+        let from = script_src.join(name);
+        if !from.is_file() {
+            bail!("missing required script {} (looked in {})", name, script_src.display());
+        }
+        let to = install_dir.join(name);
+        fs::copy(&from, &to).with_context(|| format!("copy {}", name))?;
+        println!("OK staged {}", to.display());
+    }
+
+    // Replace any previous registration (may have pointed at a WSL path).
+    let _ = uninstall_service_quiet();
+
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .context("OpenSCManager")?;
 
     let info = ServiceInfo {
         name: OsString::from(SERVICE_NAME),
@@ -109,43 +137,69 @@ pub fn install_service() -> Result<()> {
         service_type: SERVICE_TYPE,
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
-        executable_path: exe,
+        executable_path: dest_exe.clone(),
         launch_arguments: vec![OsString::from("service")],
         dependencies: vec![],
         account_name: None, // LocalSystem
         account_password: None,
     };
 
-    match manager.create_service(&info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG) {
-        Ok(svc) => {
-            let _ = svc.start::<OsString>(&[]);
-            println!("OK installed and started service {SERVICE_NAME}");
-        }
-        Err(e) => {
-            // Already exists — try start.
-            let svc = manager
-                .open_service(SERVICE_NAME, ServiceAccess::START)
-                .with_context(|| format!("create failed ({e}); open existing"))?;
-            let _ = svc.start::<OsString>(&[]);
-            println!("OK service {SERVICE_NAME} already present; start requested");
-        }
-    }
+    let svc = manager
+        .create_service(&info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)
+        .context("create_service")?;
+    svc.start::<OsString>(&[])
+        .context("start service")?;
+    println!("OK installed and started service {SERVICE_NAME}");
+    println!("    binaries: {}", install_dir.display());
     Ok(())
 }
 
-pub fn uninstall_service() -> Result<()> {
+fn resolve_script_source(explicit: Option<&Path>, src_exe: &Path) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        if p.is_dir() {
+            return Ok(p.to_path_buf());
+        }
+        bail!("--script-dir is not a directory: {}", p.display());
+    }
+    // Next to the running exe (dev build / Inno layout).
+    if let Some(parent) = src_exe.parent() {
+        if parent.join("enable-upnp.ps1").is_file() {
+            return Ok(parent.to_path_buf());
+        }
+        // cargo target\release → repo\scripts\windows
+        let candidate = parent
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("windows");
+        if let Ok(c) = fs::canonicalize(&candidate) {
+            if c.join("enable-upnp.ps1").is_file() {
+                return Ok(c);
+            }
+        }
+    }
+    // Already installed.
+    let installed = PathBuf::from(INSTALL_DIR);
+    if installed.join("enable-upnp.ps1").is_file() {
+        return Ok(installed);
+    }
+    bail!(
+        "could not find enable-upnp.ps1; pass --script-dir path\\to\\scripts\\windows"
+    );
+}
+
+fn uninstall_service_quiet() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("OpenSCManager")?;
-    let service = manager
-        .open_service(
-            SERVICE_NAME,
-            ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
-        )
-        .context("open service")?;
-
+    let service = match manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
     let _ = service.stop();
-    // Wait briefly for stop.
-    for _ in 0..20 {
+    for _ in 0..25 {
         if let Ok(st) = service.query_status() {
             if st.current_state == ServiceState::Stopped {
                 break;
@@ -153,7 +207,14 @@ pub fn uninstall_service() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    service.delete().context("delete service")?;
+    let _ = service.delete();
+    // SCM needs a beat after delete before recreate.
+    std::thread::sleep(Duration::from_millis(500));
+    Ok(())
+}
+
+pub fn uninstall_service() -> Result<()> {
+    uninstall_service_quiet()?;
     println!("OK uninstalled service {SERVICE_NAME}");
     Ok(())
 }

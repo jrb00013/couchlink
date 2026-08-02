@@ -88,8 +88,8 @@ couchlink_helper_firewall_unblock() {
 couchlink_helper_install_hint() {
   cat >&2 <<'EOF'
 ==> Couchlink Helper service not available (needed for Windows firewall/portproxy without UAC).
-    Install once: packaging/windows/build-helper-installer.ps1 → CouchlinkHelper-Setup.exe
-    Or elevated: couchlink-helper.exe install
+    Install once: ./scripts/install-windows-helper.sh  (UAC once)
+    Or: packaging/windows/build-helper-installer.ps1 → CouchlinkHelper-Setup.exe
     Dev escape hatch: COUCHLINK_ALLOW_UAC=1 (old interactive elevation)
 EOF
 }

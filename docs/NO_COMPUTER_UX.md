@@ -21,11 +21,17 @@ Build:
 # → build\windows\CouchlinkHelper-Setup-0.1.1.exe
 ```
 
+From WSL (one UAC):
+
+```bash
+./scripts/install-windows-helper.sh
+```
+
 Dev without Inno (elevated PowerShell once):
 
 ```powershell
 cargo build --release -p couchlink-windows-helper
-.\target\release\couchlink-helper.exe install
+.\target\release\couchlink-helper.exe install --script-dir .\scripts\windows
 ```
 
 Escape hatch for developers: `COUCHLINK_ALLOW_UAC=1` restores the old interactive elevation path.
