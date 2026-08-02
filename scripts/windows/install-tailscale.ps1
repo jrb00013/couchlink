@@ -44,9 +44,7 @@ Write-Log "Couchlink: install Tailscale for Windows"
 $existing = Find-TailscaleExe
 if ($existing) {
     Write-Log "already installed: $existing"
-    if (-not $SkipLaunch) {
-        Start-Process "tailscale://" -ErrorAction SilentlyContinue
-    }
+    # Do not Start-Process "tailscale://" — empty deeplink pops "Invalid deep link" on Windows.
     Finish 0
 }
 
@@ -87,10 +85,7 @@ if ($msi -and (Test-Path -LiteralPath $msi)) {
     $existing = Find-TailscaleExe
     if ($existing) {
         Write-Log "installed via MSI: $existing"
-        if (-not $SkipLaunch) {
-            Start-Process "tailscale://" -ErrorAction SilentlyContinue
-            Start-Process -FilePath $existing -ArgumentList @("up") -ErrorAction SilentlyContinue
-        }
+        # No tailscale:// deeplink (Invalid deep link). Headscale path uses --login-server.
         Finish 0
     }
 }
@@ -120,9 +115,6 @@ if ($null -ne $winget) {
     $existing = Find-TailscaleExe
     if ($existing) {
         Write-Log "installed via winget: $existing"
-        if (-not $SkipLaunch) {
-            Start-Process "tailscale://" -ErrorAction SilentlyContinue
-        }
         Finish 0
     }
 }

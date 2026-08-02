@@ -71,15 +71,15 @@ if ($NeedsTs) {
         if ($cand) { $tsCmd = Get-Item $cand }
     }
     if (-not $tsCmd) {
-        Write-Host "Tailscale not found — opening download page. Install, sign in (same account / shared node), then open Couchlink Player."
-        Start-Process "https://tailscale.com/download/windows"
+        Write-Host "Mesh client not found — Headscale joins install it via ./install.sh (no Tailscale Inc login)."
+        Write-Host "Optional Tailscale Inc cloud: https://tailscale.com/download/windows"
     } else {
         $ip = & $tsCmd.Source ip -4 2>$null
         if (-not $ip) {
-            Write-Host "Tailscale installed but not signed in — open the Tailscale app, then Couchlink Player."
-            Start-Process "tailscale://" -ErrorAction SilentlyContinue
+            Write-Host "Mesh client installed — paste the host join URL (Headscale hs=/tskey= auto-joins)."
+            Write-Host "Do not open tailscale:// (shows Invalid deep link). Optional cloud: open the Tailscale app manually."
         } else {
-            Write-Host "Tailscale ready ($ip). Open Couchlink Player and paste/confirm the join link."
+            Write-Host "Mesh ready ($ip). Open Couchlink Player and paste/confirm the join link."
         }
     }
 }
