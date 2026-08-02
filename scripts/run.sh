@@ -95,12 +95,13 @@ PORT="${PORT:-8443}"
 COUCHLINK_USING_MESH=0
 
 # On --online (WSL/Windows): Private profile + discovery + firewall + WSL
-# portproxy + NATUPnP maps. Uses saved task CouchlinkElevatedUpnp after first UAC.
+# portproxy + NATUPnP maps. Prefer Couchlink Helper service (no UAC); else
+# Scheduled Task; else COUCHLINK_ALLOW_UAC=1.
 couchlink_try_upnp_online() {
   [[ "${COUCHLINK_SKIP_UPNP_PREP:-}" == "1" ]] && return 0
   local ok=0
   if [[ "$PLATFORM" == "wsl" || "$PLATFORM" == "windows" ]] && command -v powershell.exe >/dev/null 2>&1; then
-    echo "==> --online: Windows prep (firewall + WSL portproxy + UPnP)"
+    echo "==> --online: Windows prep (Helper / task / firewall + portproxy + UPnP)"
     set +e
     bash "$ROOT/scripts/enable-upnp.sh"
     local ec=$?
