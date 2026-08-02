@@ -15,12 +15,11 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 | Session / PIN / ICE | Rohomieo-style WebSocket signaling |
 | Video | WebRTC + OpenH264, presets up to **1080p60**, scaled capture |
 | Congestion / idle | WebRTC GCC + tile motion detector |
-| Path | **PRIME mesh** — Tailscale / WireGuard when up; else public STUN + local TURN; on WSL `--online` also firewall + WSL portproxy; then HTTPS (cloudflared) + IPv6 TURN if UPnP is off (bore = signaling-only last resort) |
-
+| Path | **PRIME mesh** — **Headscale** (default, no Tailscale Inc account), else Tailscale / WireGuard; else public STUN + local TURN; on WSL `--online` also firewall + WSL portproxy via **Couchlink Helper**; then HTTPS (cloudflared) + IPv6 TURN if UPnP is off |
 | Pad wire format | Custom binary **`CLPD`** on DataChannel `pad` (~rAF / 250 Hz native) |
 | Local pad capture | Browser Gamepad API, or Linux hidraw (dualsensekit layouts) |
 | Host injection | Linux `uinput` DualSense identity, bus = Bluetooth |
-| Invite | Host prints join URL + QR (Rohomieo-style) |
+| Invite | Host prints join URL + QR (`mesh=headscale&hs=&tskey=` when on Headscale) |
 
 ## Install
 
@@ -28,14 +27,23 @@ browser (or native client), gets an **HD low-latency** stream of your game, and 
 git clone https://github.com/jrb00013/couchlink.git
 cd couchlink
 
-# Friend (default): player + Tailscale — paste the host join URL
+# Friend (default): player deps — paste the host join URL (Headscale auto-joins from the link)
 ./install.sh
 ./install.sh --online
 
-# Host (gaming PC): full stack + mesh
+# Host (gaming PC): full stack + Headscale mesh
 ./install.sh --host --online
 source .env.couchlink
 ```
+
+**WSL / Windows host (one-time):** install **Couchlink Helper** so later `--online` runs need **no UAC**:
+
+```bash
+./scripts/install-windows-helper.sh
+# or: packaging/windows/build-helper-installer.ps1 → CouchlinkHelper-Setup.exe
+```
+
+See [NO_COMPUTER_UX.md](docs/NO_COMPUTER_UX.md) · [HEADSCALE.md](docs/HEADSCALE.md).
 
 ## Run
 
@@ -45,16 +53,17 @@ and tears everything down together on Ctrl-C. Detects Linux / WSL / macOS.
 
 ```bash
 ./scripts/run.sh host --local    # same Wi‑Fi (default) — LAN join URL, no UPnP/TURN
-./scripts/run.sh host --online   # internet — Tailscale/WireGuard if up, else TURN + UPnP / Cloudflare
-# Mesh (PRIME): ./scripts/setup-tailscale.sh  or  ./scripts/setup-wireguard.sh  — see docs/MESH.md
-# On WSL: --online auto-runs Windows UPnP prep (one UAC, then no prompt)
-# prints the friend's join URL + QR (session, PIN, and TURN creds baked in when online)
+./scripts/run.sh host --online   # internet — Headscale/Tailscale/WireGuard if up, else TURN + UPnP / Cloudflare
+# Mesh: Headscale is PRIME (./scripts/enable-headscale.sh). Optional: Tailscale cloud / WireGuard — docs/MESH.md
+# WSL: install Couchlink Helper once, then --online does firewall/portproxy with no UAC
+# prints the friend's join URL + QR (session, PIN, hs/tskey, and TURN creds when needed)
 ```
 
-Friend — open the printed URL. On a **mesh**, they must be on the same Tailscale
-tailnet or have WireGuard up. Otherwise, for public `--online`, no VPN needed if
-UPnP (or manual port forward of **8443/tcp** + **3478/udp+tcp**) works. Press a
-button on their DualSense, then Join. Or, for a native client instead of the browser:
+Friend — open the printed URL. On **Headscale**, `./install.sh --online` + paste the link
+auto-joins (no Tailscale Inc login). On Tailscale cloud / WireGuard, they must be on the
+same mesh. Otherwise, for public `--online`, no VPN needed if UPnP (or manual port forward
+of **8443/tcp** + **3478/udp+tcp**) works. Press a button on their DualSense, then Join.
+Or, for a native client instead of the browser:
 
 ```bash
 ./scripts/run.sh client --online   # Linux / WSL / macOS (needs host join URL / TURN)
@@ -64,6 +73,7 @@ button on their DualSense, then Join. Or, for a native client instead of the bro
 
 For `--online` as a client, the app prompts for the host’s join URL if unset
 (or set `COUCHLINK_JOIN_URL` in `.env.couchlink`). WSL auto-handles ICE host IPs.
+Optional: `./install.sh --online --unblock-firewall`.
 
 The client opens a window showing the host's stream. Plug in a DualSense, or
 just use the keyboard (WASD + arrows + Space/Shift/Ctrl/E/Q/R/1/2/Enter/Tab —
@@ -94,8 +104,11 @@ Bind Player 2 in RPCS3/PCSX2 to **DualSense Wireless Controller**.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Protocol](docs/PROTOCOL.md)
 - [Getting started](docs/GETTING_STARTED.md)
-- [Mesh (Tailscale + WireGuard)](docs/MESH.md) — **PRIME** path for `--online`
+- [Playing together](docs/PLAY_TOGETHER.md)
+- [Headscale mesh](docs/HEADSCALE.md) — **PRIME** path (no Tailscale Inc account)
+- [Mesh overview](docs/MESH.md) — Headscale / Tailscale / WireGuard
 - [WireGuard](docs/WIREGUARD.md)
+- [No-computer UX](docs/NO_COMPUTER_UX.md) — installers + Couchlink Helper
 - [Latency](docs/LATENCY.md)
 - [Emulators](docs/EMULATORS.md)
 
