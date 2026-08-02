@@ -43,6 +43,9 @@ couchlink_helper_ping() {
 }
 
 # online_prep via helper. Prints status line. Exit: 0, 2, or other.
+# If the installed enable-upnp.ps1 still has #Requires -RunAsAdministrator
+# (rejects LocalSystem), fall back to firewall_unblock + portproxy probe so
+# --online still works without another UAC.
 couchlink_helper_online_prep() {
   local root="${1:?}"
   shift
@@ -69,7 +72,30 @@ couchlink_helper_online_prep() {
   "$ps" "${args[@]}"
   ec=$?
   set -e
+  if [[ "$ec" -eq 0 || "$ec" -eq 2 ]]; then
+    return "$ec"
+  fi
+
+  echo "==> helper online_prep exit $ec — fallback: firewall via helper + portproxy check" >&2
+  set +e
+  couchlink_helper_firewall_unblock "$root" >/dev/null
+  set -e
+  if couchlink_helper_portproxy_ok; then
+    if [[ "$skip_map" == "1" ]]; then
+      return 0
+    fi
+    # Windows prep OK; UPnP map unknown / skipped by fallback
+    return 2
+  fi
   return "$ec"
+}
+
+# True if Windows already has couchlink portproxy for 8443 (and ideally 3478).
+couchlink_helper_portproxy_ok() {
+  local out
+  out="$(netsh.exe interface portproxy show all 2>/dev/null | tr -d '\r' || true)"
+  [[ "$out" == *8443* ]] || return 1
+  return 0
 }
 
 couchlink_helper_firewall_unblock() {
