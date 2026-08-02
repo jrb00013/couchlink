@@ -196,23 +196,13 @@ bring_up_tailscale() {
     return 0
   fi
 
-  echo "==> Tailscale needs sign-in (same account / shared node as the host)"
+  echo "==> Tailscale Inc cloud needs sign-in (optional fallback only)"
+  echo "    Prefer Headscale: ./install.sh --host --online  (no Tailscale Inc account)"
   if [[ "$bin" == *.exe ]] || [[ "$PLATFORM" == "wsl" ]]; then
-    echo "    Open the Tailscale app on Windows → Log in"
-    echo "    Host can share this PC: Tailscale admin → Machines → Share"
-    if command -v powershell.exe >/dev/null 2>&1; then
-      powershell.exe -NoProfile -Command \
-        "Start-Process 'tailscale://'; Start-Process 'https://login.tailscale.com/admin/machines'" \
-        >/dev/null 2>&1 || true
-      # Also kick CLI up (opens browser login when needed).
-      if [[ -n "$bin" && -f "$bin" ]]; then
-        powershell.exe -NoProfile -Command \
-          "Start-Process -FilePath '$(wslpath -w "$bin" 2>/dev/null || echo "$bin")' -ArgumentList 'up'" \
-          >/dev/null 2>&1 || true
-      fi
-    fi
+    echo "    Optional cloud: open the Windows Tailscale app → Log in"
+    echo "    (we do not open tailscale:// — that shows 'Invalid deep link' after sleep)"
   else
-    echo "    Running: sudo $bin up   (browser login)"
+    echo "    Optional cloud: sudo $bin up   (browser login)"
     if [[ -t 0 && -t 1 ]]; then
       sudo "$bin" up || "$bin" up || true
     else
