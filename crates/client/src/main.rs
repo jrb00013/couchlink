@@ -1,5 +1,4 @@
 mod decode;
-#[cfg_attr(not(target_os = "linux"), path = "dualsense_reader_stub.rs")]
 mod dualsense_reader;
 mod feedback_apply;
 mod keyboard_input;

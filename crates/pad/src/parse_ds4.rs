@@ -23,7 +23,9 @@ pub fn parse_ds4_input_report(raw: &[u8]) -> Option<PadFrame> {
         _ if raw.len() >= 10 => raw,
         _ => return None,
     };
-    if body.len() < 10 {
+    if body.len() < 6 {
+        // Need sticks + buttons_l/buttons_h. Analog triggers / PS byte are optional
+        // (Linux hid-playstation BT minimal DS4 is report-id + 9 payload bytes).
         return None;
     }
 
@@ -123,5 +125,21 @@ mod tests {
         // body[4] is raw[5]
         let f = parse_ds4_input_report(&raw).unwrap();
         assert!(f.buttons & buttons::CROSS != 0);
+    }
+
+    #[test]
+    fn ds4_minimal_ten_byte_report_parses() {
+        // id (1) + 9 payload bytes — sticks/buttons present, no analog triggers.
+        let mut raw = [0u8; 10];
+        raw[0] = DS4_USB;
+        raw[1] = 128;
+        raw[2] = 128;
+        raw[3] = 128;
+        raw[4] = 128;
+        raw[5] = 0x20; // Cross
+        let f = parse_ds4_input_report(&raw).unwrap();
+        assert!(f.buttons & buttons::CROSS != 0);
+        assert_eq!(f.l2, 0);
+        assert_eq!(f.r2, 0);
     }
 }

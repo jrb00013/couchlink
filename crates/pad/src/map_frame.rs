@@ -112,4 +112,27 @@ mod tests {
     fn stick_center_is_zero() {
         assert_eq!(stick_u8_to_i16(128), 0);
     }
+
+    #[test]
+    fn dualsense_report_roundtrips_through_parser() {
+        let mut f = PadFrame::neutral();
+        f.buttons = buttons::CROSS | buttons::L1 | buttons::DPAD_UP;
+        f.lx = 10;
+        f.ly = 20;
+        f.rx = 30;
+        f.ry = 40;
+        f.l2 = 50;
+        f.r2 = 60;
+        let report = pad_frame_to_dualsense_usb_report(&f);
+        let back = crate::parse_input_report(&report).unwrap();
+        assert_eq!(back.buttons & buttons::CROSS, buttons::CROSS);
+        assert_eq!(back.buttons & buttons::L1, buttons::L1);
+        assert_eq!(back.buttons & buttons::DPAD_UP, buttons::DPAD_UP);
+        assert_eq!(back.lx, 10);
+        assert_eq!(back.ly, 20);
+        assert_eq!(back.rx, 30);
+        assert_eq!(back.ry, 40);
+        assert_eq!(back.l2, 50);
+        assert_eq!(back.r2, 60);
+    }
 }
