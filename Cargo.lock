@@ -919,6 +919,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "couchlink-ds-vhid"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "couchlink-pad",
+ "couchlink-proto",
+ "tracing",
+ "tracing-subscriber",
+ "vigem-client",
+]
+
+[[package]]
 name = "couchlink-host"
 version = "0.1.1"
 dependencies = [

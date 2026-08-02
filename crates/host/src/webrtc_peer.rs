@@ -88,7 +88,6 @@ pub struct WebRtcHost {
     video_h: AtomicU32,
     pub pad_tx: mpsc::UnboundedSender<PadFrame>,
     /// Pad DataChannel for host→player feedback (rumble / adaptive triggers).
-    #[allow(dead_code)] // retained for `send_feedback` / future FF adapters
     pad_dc: Arc<RTCDataChannel>,
     offer_epoch: Arc<AtomicU64>,
     /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
@@ -275,7 +274,6 @@ impl WebRtcHost {
     }
 
     /// Send haptic / lightbar / adaptive-trigger feedback to the player's DualSense.
-    #[allow(dead_code)] // public API for emulator adapters / VHID companions
     pub async fn send_feedback(&self, fb: &PadFeedback) -> Result<()> {
         let text = couchlink_pad::feedback::encode_feedback_json(fb)
             .context("encode PadFeedback JSON")?;

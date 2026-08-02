@@ -11,7 +11,7 @@ mod webrtc_peer;
 use anyhow::Result;
 use clap::Parser;
 use config::HostArgs;
-use couchlink_proto::SignalMessage;
+use couchlink_proto::{PadFeedback, SignalMessage};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,6 +139,28 @@ async fn main() -> Result<()> {
     host.set_video_size(preset.width, preset.height);
     let mut attached_player_epoch: u64 = 0;
 
+    // Forward game HID output (from DualSense VHID companion) to the friend's pad.
+    let (pad_feedback_tx, mut pad_feedback_rx) = tokio::sync::mpsc::unbounded_channel::<PadFeedback>();
+    {
+        let pad_poll = Arc::clone(&pad);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(8));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let outs = {
+                    let mut guard = pad_poll.lock().await;
+                    guard.poll_feedback().unwrap_or_default()
+                };
+                for fb in outs {
+                    if pad_feedback_tx.send(fb).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     // Open capture before the first player so Windows win-capture can connect immediately.
     // Blocking accept is fine here — we are still in startup, before the select loop.
     let windows_spec = effective_windows_capture(&args);
@@ -230,6 +252,13 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = heartbeat.tick() => {
                 let _ = signal_out.send(SignalMessage::Heartbeat);
+            }
+            fb = pad_feedback_rx.recv() => {
+                if let Some(fb) = fb {
+                    if let Err(e) = host.send_feedback(&fb).await {
+                        warn!("pad feedback send: {e}");
+                    }
+                }
             }
             msg = signaling.inbound.recv() => {
                 match msg {

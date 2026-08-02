@@ -11,6 +11,8 @@ pub mod parse_ds4;
 pub mod parse_xbox;
 pub mod recognize;
 pub mod sim;
+pub mod vhid_client;
+pub mod vhid_proto;
 pub mod virtual_pad;
 pub mod xbox;
 

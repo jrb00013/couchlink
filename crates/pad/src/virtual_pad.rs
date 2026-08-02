@@ -1,13 +1,15 @@
 //! Virtual DualSense presented as a **Bluetooth** gamepad on the host.
 //!
-//! - **Linux:** `uinput` with `BUS_BLUETOOTH`, Sony VID/PID.
-//! - **Windows:** DualSense VHID pipe (custom `054c:0ce6`) when available, else
-//!   ViGEm DualShock 4 / Xbox 360 (requires ViGEmBus).
+//! - **Linux / WSL:** Prefer DualSense VHID companion over TCP (Windows emulators),
+//!   else local `uinput` DualSense.
+//! - **Windows:** DualSense VHID companion (pipe/TCP), else ViGEm DualShock 4 / Xbox 360.
 
 use anyhow::Result;
+#[cfg(any(target_os = "linux", all(not(target_os = "linux"), not(windows))))]
+use anyhow::bail;
 #[cfg(target_os = "linux")]
-use anyhow::{bail, Context};
-use couchlink_proto::PadFrame;
+use anyhow::Context;
+use couchlink_proto::{PadFeedback, PadFrame};
 #[cfg(target_os = "linux")]
 use couchlink_proto::pad_frame::buttons;
 use tracing::info;
@@ -16,8 +18,7 @@ use crate::dualsense::{PID_DUALSENSE, PRODUCT_NAME, SONY_VID};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtualPadBackend {
-    /// Prefer DualSense VHID, then ViGEm DS4, then Xbox 360 (Windows).
-    /// Linux always uses uinput DualSense.
+    /// Prefer DualSense VHID companion, then platform fallbacks (uinput / ViGEm).
     Auto,
     DualSense,
     Ds4,
@@ -67,7 +68,7 @@ impl Default for VirtualPadConfig {
 
 pub struct VirtualPad {
     #[cfg(target_os = "linux")]
-    inner: linux::LinuxUInput,
+    inner: linux::Inner,
     #[cfg(windows)]
     inner: windows_inner::Inner,
     #[cfg(all(not(target_os = "linux"), not(windows)))]
@@ -81,18 +82,7 @@ impl VirtualPad {
             if matches!(cfg.backend, VirtualPadBackend::Noop) {
                 return Ok(Self::create_noop(cfg));
             }
-            let inner = linux::LinuxUInput::create(&cfg)?;
-            info!(
-                "virtual pad ready: '{}' vid={:04x} pid={:04x} bus={}",
-                cfg.name,
-                cfg.vendor,
-                cfg.product,
-                if cfg.as_bluetooth {
-                    "bluetooth"
-                } else {
-                    "usb"
-                }
-            );
+            let inner = linux::Inner::create(&cfg)?;
             Ok(Self { inner })
         }
         #[cfg(windows)]
@@ -103,7 +93,7 @@ impl VirtualPad {
         #[cfg(all(not(target_os = "linux"), not(windows)))]
         {
             let _ = cfg;
-            bail!("virtual pad injection is Linux (uinput) or Windows (VHID/ViGEm) only")
+            bail!("virtual pad injection is Linux (uinput/VHID) or Windows (VHID/ViGEm) only")
         }
     }
 
@@ -114,7 +104,7 @@ impl VirtualPad {
         #[cfg(target_os = "linux")]
         {
             Self {
-                inner: linux::LinuxUInput::noop(),
+                inner: linux::Inner::Noop,
             }
         }
         #[cfg(windows)]
@@ -145,6 +135,22 @@ impl VirtualPad {
             Ok(())
         }
     }
+
+    /// Drain game HID output forwarded by the DualSense VHID companion (if any).
+    pub fn poll_feedback(&mut self) -> Result<Vec<PadFeedback>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.poll_feedback()
+        }
+        #[cfg(windows)]
+        {
+            self.inner.poll_feedback()
+        }
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
+        {
+            Ok(Vec::new())
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -171,16 +177,96 @@ mod windows_inner {
                 Self::Noop => Ok(()),
             }
         }
+
+        pub fn poll_feedback(&mut self) -> Result<Vec<PadFeedback>> {
+            match self {
+                Self::Live(p) => p.poll_feedback(),
+                Self::Noop => Ok(Vec::new()),
+            }
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use crate::vhid_client::{likely_wsl, VhidClient};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
+    use tracing::warn;
+
+    pub enum Inner {
+        Vhid(VhidClient),
+        UInput(LinuxUInput),
+        Noop,
+    }
+
+    impl Inner {
+        pub fn create(cfg: &VirtualPadConfig) -> Result<Self> {
+            let env_vhid = std::env::var("COUCHLINK_DS_VHID")
+                .map(|v| {
+                    let v = v.to_ascii_lowercase();
+                    v == "1" || v == "tcp" || v == "force" || v == "auto"
+                })
+                .unwrap_or(false);
+            let try_vhid = matches!(cfg.backend, VirtualPadBackend::DualSense)
+                || env_vhid
+                || (matches!(cfg.backend, VirtualPadBackend::Auto) && likely_wsl());
+
+            if try_vhid {
+                match VhidClient::connect() {
+                    Ok(c) => {
+                        info!("Linux/WSL virtual pad: DualSense VHID companion (TCP/pipe)");
+                        return Ok(Self::Vhid(c));
+                    }
+                    Err(e) if matches!(cfg.backend, VirtualPadBackend::DualSense) => {
+                        return Err(e).context("DualSense VHID companion required");
+                    }
+                    Err(e) => {
+                        warn!("VHID companion unavailable ({e:#}) — falling back to uinput");
+                    }
+                }
+            }
+
+            if matches!(cfg.backend, VirtualPadBackend::Ds4 | VirtualPadBackend::Xbox360) {
+                warn!(
+                    "backend {:?} is Windows-oriented — using Linux uinput DualSense",
+                    cfg.backend
+                );
+            }
+
+            let pad = LinuxUInput::create(cfg)?;
+            info!(
+                "virtual pad ready: '{}' vid={:04x} pid={:04x} bus={}",
+                cfg.name,
+                cfg.vendor,
+                cfg.product,
+                if cfg.as_bluetooth {
+                    "bluetooth"
+                } else {
+                    "usb"
+                }
+            );
+            Ok(Self::UInput(pad))
+        }
+
+        pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
+            match self {
+                Self::Vhid(c) => c.apply(frame),
+                Self::UInput(p) => p.apply(frame),
+                Self::Noop => Ok(()),
+            }
+        }
+
+        pub fn poll_feedback(&mut self) -> Result<Vec<PadFeedback>> {
+            match self {
+                Self::Vhid(c) => c.poll_feedback(),
+                Self::UInput(_) | Self::Noop => Ok(Vec::new()),
+            }
+        }
+    }
 
     const BUS_USB: u16 = 0x03;
     const BUS_BLUETOOTH: u16 = 0x05;
@@ -249,10 +335,6 @@ mod linux {
     }
 
     impl LinuxUInput {
-        pub fn noop() -> Self {
-            Self { file: None }
-        }
-
         pub fn create(cfg: &VirtualPadConfig) -> Result<Self> {
             let file = OpenOptions::new()
                 .read(true)
