@@ -25,7 +25,10 @@ OutputBaseFilename=CouchlinkHelper-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=couchlink.ico
+WizardImageFile=wizard-image.bmp
+WizardSmallImageFile=wizard-small.bmp
+UninstallDisplayIcon={app}\couchlink.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=force
@@ -35,12 +38,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "..\..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "couchlink.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\scripts\windows\enable-upnp.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\scripts\windows\unblock-firewall.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\scripts\windows\call-helper.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName} (docs)"; Filename: "{#MyAppURL}"
+Name: "{group}\{#MyAppName} (docs)"; Filename: "{#MyAppURL}"; IconFilename: "{app}\couchlink.ico"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "install"; StatusMsg: "Installing Couchlink Helper service…"; Flags: runhidden waituntilterminated
