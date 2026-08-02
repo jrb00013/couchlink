@@ -6,8 +6,29 @@
 |--------|-------------------|----------------------|
 | **Friend (player)** | `CouchlinkPlayer-Setup.exe` / `.dmg` / AppImage / browser | **Never.** Just paste join link / open URL. |
 | **You (host)** | Linux **Couchlink Host** `.deb` (or `install.sh` once) | **Once** at install — unlocks virtual DualSense. Then Apps → **Couchlink Host**. |
+| **You (host on WSL/Windows)** | **Couchlink Helper** `CouchlinkHelper-Setup.exe` once | **Once** (installer UAC) — firewall + WSL portproxy with no UAC on later `--online` runs. |
 
 `/dev/uinput` is a **kernel** device. No language (C/Rust) can open it without permission. The fix is packaging, not rewriting the pad code in C.
+
+## Windows Helper (WSL / Windows host)
+
+`CouchlinkHelper-Setup.exe` installs a LocalSystem service (`CouchlinkHelper`) that owns a local named pipe. `./scripts/run.sh host --online` asks that service to open firewall rules and WSL `portproxy` — **no UAC after install**.
+
+Build:
+
+```powershell
+.\packaging\windows\build-helper-installer.ps1
+# → build\windows\CouchlinkHelper-Setup-0.1.1.exe
+```
+
+Dev without Inno (elevated PowerShell once):
+
+```powershell
+cargo build --release -p couchlink-windows-helper
+.\target\release\couchlink-helper.exe install
+```
+
+Escape hatch for developers: `COUCHLINK_ALLOW_UAC=1` restores the old interactive elevation path.
 
 ## Native C helper (what we added)
 

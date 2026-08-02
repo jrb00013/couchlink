@@ -7,6 +7,7 @@ members = [
   "crates/signaling",
   "crates/host",
   "crates/client",
+  "crates/windows-helper",
 ]
 default-members = ["crates/signaling", "crates/host", "crates/client"]
 

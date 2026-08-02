@@ -33,7 +33,7 @@ source .env.couchlink
 ```
 
 `--local` (default) prints a LAN join URL and skips UPnP/TURN.  
-`--online` prefers **Tailscale / WireGuard** if already up (mesh join URL, no TURN). Else it fetches your public IP, starts TURN, and opens ports via UPnP (on WSL/Windows it auto-runs `./scripts/enable-upnp.sh` — Private network + discovery + NATUPnP; one UAC, then Task Scheduler with no prompt). Mesh setup: `./scripts/setup-tailscale.sh` / `./scripts/setup-wireguard.sh`.
+`--online` prefers **Headscale / Tailscale / WireGuard** if already up (mesh join URL). Else it fetches your public IP, starts TURN, and opens ports via UPnP. On WSL/Windows it runs `./scripts/enable-upnp.sh`, which prefers the **Couchlink Helper** service (install `CouchlinkHelper-Setup.exe` once — no UAC on later runs), then the legacy Scheduled Task, then optional `COUCHLINK_ALLOW_UAC=1`. Mesh setup: Headscale via `./scripts/enable-headscale.sh`, or `./scripts/setup-tailscale.sh` / `./scripts/setup-wireguard.sh`.
 
 This starts, in one terminal:
 
@@ -53,7 +53,7 @@ Mesh URLs use `100.x` / `10.66.0.1` and may omit `turn=` on native Linux. Public
 
 The join URL must use addresses your friend can reach—not `127.0.0.1`.
 
-`./scripts/run.sh host --online` first uses a **PRIME mesh** if Tailscale (`100.x`) or WireGuard is up — see [MESH.md](MESH.md). Otherwise it prepares Windows automatically on WSL (Private network + discovery + firewall + WSL portproxy for IPv4/IPv6 + NATUPnP). If the router has UPnP off, it prefers **cloudflared HTTPS** (browser WebCodecs) + **IPv6 TURN**, and only falls back to **bore signaling** (never bore TURN — that starves video). One UAC the first time, then Task Scheduler with no prompt.
+`./scripts/run.sh host --online` first uses a **PRIME mesh** if Headscale/Tailscale (`100.x`) or WireGuard is up — see [MESH.md](MESH.md). Otherwise it prepares Windows automatically on WSL (Private network + discovery + firewall + WSL portproxy for IPv4/IPv6 + NATUPnP). If the router has UPnP off, it prefers **cloudflared HTTPS** (browser WebCodecs) + **IPv6 TURN**, and only falls back to **bore signaling** (never bore TURN — that starves video). Install **Couchlink Helper** once so Windows prep needs no UAC; see [NO_COMPUTER_UX.md](NO_COMPUTER_UX.md).
 
 2. **Public IP:** Detected via `ifconfig.me`. If that fails or you’re on CGNAT, set in `.env.couchlink` before starting:
    - `COUCHLINK_PUBLIC_IP=your.public.ip`

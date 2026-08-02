@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Prepare Windows for couchlink --online (Private profile, discovery, firewall,
-# WSL portproxy IPv4+IPv6, NATUPnP maps). Prefer Task Scheduler
-# "CouchlinkElevatedUpnp" (no UAC after first approve).
+# WSL portproxy IPv4+IPv6, NATUPnP maps).
+#
+# Preference: Couchlink Helper service (no UAC) → Scheduled Task →
+# COUCHLINK_ALLOW_UAC=1 interactive elevation.
 #
 # Usage: ./scripts/enable-upnp.sh [--skip-map]
 # Exit: 0 = ready/mapped, 2 = Windows OK but router IGD still off, else error
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib-windows-helper.sh"
 
 SKIP_MAP=0
 for a in "$@"; do
@@ -45,6 +49,28 @@ rm -f "$MARKER"
 WSL_IP="$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
 WSL_IP="${WSL_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 
+ec=""
+
+# 1) Couchlink Helper service (no UAC)
+if couchlink_helper_ping "$ROOT"; then
+  echo "==> Windows online prep via Couchlink Helper (no UAC)"
+  set +e
+  if [[ "$SKIP_MAP" == "1" ]]; then
+    couchlink_helper_online_prep "$ROOT" --skip-map --wsl-ip "${WSL_IP:-}"
+  else
+    couchlink_helper_online_prep "$ROOT" --wsl-ip "${WSL_IP:-}"
+  fi
+  ec=$?
+  set -e
+  case "$ec" in
+    0) echo "==> Windows online prep OK (UPnP maps applied)" ;;
+    2) echo "==> Windows prepared (firewall/portproxy); router UPnP still off — using IPv6/tunnel fallback if needed" ;;
+    *) echo "==> helper online_prep exited $ec" >&2 ;;
+  esac
+  exit "$ec"
+fi
+
+# 2) Legacy Scheduled Task
 SCHTASKS="/mnt/c/Windows/System32/schtasks.exe"
 TASK_NAME="CouchlinkElevatedUpnp"
 used_task=0
@@ -68,18 +94,28 @@ if [[ -x "$SCHTASKS" ]] && "$SCHTASKS" /Query /TN "$TASK_NAME" &>/dev/null; then
     used_task=1
     ec="$(wait_marker || true)"
     if [[ -z "${ec:-}" ]]; then
-      echo "==> saved task did not finish — falling back to UAC" >&2
+      echo "==> saved task did not finish" >&2
       used_task=0
     fi
   else
-    echo "==> saved task failed to start — falling back to UAC" >&2
+    echo "==> saved task failed to start" >&2
   fi
 fi
 
-if [[ "$used_task" -eq 0 ]]; then
-  echo "==> elevating enable-upnp.ps1 (approve UAC once; later --online skips this)"
+if [[ "$used_task" -eq 1 ]]; then
+  ec="${ec:-1}"
+  case "$ec" in
+    0) echo "==> Windows online prep OK (UPnP maps applied)" ;;
+    2) echo "==> Windows prepared (firewall/portproxy); router UPnP still off — using IPv6/tunnel fallback if needed" ;;
+    *) echo "==> enable-upnp exited $ec" >&2 ;;
+  esac
+  exit "$ec"
+fi
+
+# 3) Optional interactive UAC (dev escape hatch)
+if [[ "${COUCHLINK_ALLOW_UAC:-0}" == "1" ]]; then
+  echo "==> elevating enable-upnp.ps1 (COUCHLINK_ALLOW_UAC=1)"
   set +e
-  # Keep ArgumentList simple — complex quoting breaks Start-Process under WSL.
   if [[ "$SKIP_MAP" == "1" ]]; then
     "$PS_WIN_LAUNCH" -NoProfile -Command \
       "\$p = Start-Process -FilePath '$PS_WIN_EXE' -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$script_w','-SkipMap','-WslIp','${WSL_IP:-}'); if (\$null -eq \$p) { exit 1 }; exit \$p.ExitCode"
@@ -92,12 +128,14 @@ if [[ "$used_task" -eq 0 ]]; then
   if [[ -f "$MARKER" ]]; then
     ec="$(tr -d '\r\n' <"$MARKER")"
   fi
+  ec="${ec:-1}"
+  case "$ec" in
+    0) echo "==> Windows online prep OK (UPnP maps applied)" ;;
+    2) echo "==> Windows prepared (firewall/portproxy); router UPnP still off — using IPv6/tunnel fallback if needed" ;;
+    *) echo "==> enable-upnp exited $ec" >&2 ;;
+  esac
+  exit "$ec"
 fi
 
-ec="${ec:-1}"
-case "$ec" in
-  0) echo "==> Windows online prep OK (UPnP maps applied)" ;;
-  2) echo "==> Windows prepared (firewall/portproxy); router UPnP still off — using IPv6/tunnel fallback if needed" ;;
-  *) echo "==> enable-upnp exited $ec" >&2 ;;
-esac
-exit "$ec"
+couchlink_helper_install_hint
+exit 1

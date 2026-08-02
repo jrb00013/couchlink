@@ -63,7 +63,7 @@ COUCHLINK_SKIP_HEADSCALE=1 ./install.sh --host --online
 ./install.sh --online
 # or step-by-step:
 ./scripts/setup-wireguard.sh
-./scripts/enable-wireguard.sh      # Windows UAC once, then Task Scheduler; Linux: wg-quick
+./scripts/enable-wireguard.sh      # prefers Helper/task; else UAC if COUCHLINK_ALLOW_UAC=1; Linux: wg-quick
 ./scripts/run.sh host --online     # auto-calls enable-wireguard when conf exists
 ```
 
@@ -91,6 +91,7 @@ Does **not** auto-login Tailscale or `wg-quick up`.
 
 ## WSL notes
 
+- **Couchlink Helper:** install `CouchlinkHelper-Setup.exe` once so firewall / WSL portproxy / UPnP prep need no UAC on `--online` (see [NO_COMPUTER_UX.md](NO_COMPUTER_UX.md)).  
 - **Tailscale:** prefer the **Windows** Tailscale app; `./scripts/setup-tailscale.sh --ensure` installs it from WSL via winget/MSI (UAC once). `run.sh` looks for `tailscale.exe`.  
 - **WireGuard:** prefer the **Windows** WireGuard app with `wg0-host.conf`. If the tunnel lives only on Windows while couchlink runs in WSL, set `COUCHLINK_WG_HOST_IP=10.66.0.1` (and ensure Windows can reach WSL `:8443`, or run signaling bound accordingly). Full WSL layout notes: [WIREGUARD.md](WIREGUARD.md).
 
