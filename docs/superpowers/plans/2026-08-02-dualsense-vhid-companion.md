@@ -19,9 +19,9 @@
 
 ## Tasks
 
-1. Protocol module + tests  
-2. Linux UHID DualSense (+ fallback uinput)  
-3. Extend Windows DualSenseVhid client (TCP + DSVO read)  
-4. `couchlink-ds-vhid` companion crate (Windows)  
-5. Host feedback pump  
-6. Docs + CI workspace member  
+1. Protocol module + tests ✅  
+2. Linux UHID DualSense (+ fallback uinput) ✅  
+3. Extend Windows DualSenseVhid client (TCP + DSVO read) ✅  
+4. `couchlink-ds-vhid` companion crate (Windows) ✅ — WinUHid Auto + ViGEm DS4/Xbox360  
+5. Host feedback pump ✅  
+6. Docs + CI workspace member ✅  
