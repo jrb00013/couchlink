@@ -151,7 +151,20 @@ pub fn install_service(script_source: Option<&Path>) -> Result<()> {
         .context("start service")?;
     println!("OK installed and started service {SERVICE_NAME}");
     println!("    binaries: {}", install_dir.display());
+    write_install_marker(0);
     Ok(())
+}
+
+fn write_install_marker(code: i32) {
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let dir = PathBuf::from(local).join("couchlink-run");
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(dir.join("helper-install.exit"), format!("{code}"));
+    }
+    // Also under Public in case elevated LOCALAPPDATA differs.
+    let public = PathBuf::from(r"C:\ProgramData\Couchlink\run");
+    let _ = fs::create_dir_all(&public);
+    let _ = fs::write(public.join("helper-install.exit"), format!("{code}"));
 }
 
 fn resolve_script_source(explicit: Option<&Path>, src_exe: &Path) -> Result<PathBuf> {

@@ -1,8 +1,9 @@
-#Requires -RunAsAdministrator
 # Prepare Windows for couchlink --online:
 #   Private profile, discovery, UPnP services, NATUPnP maps,
 #   firewall allow for 8443/3478, and WSL portproxy (IPv4+IPv6 → WSL).
 # Registers CouchlinkElevatedUpnp so later --online runs need no UAC.
+# Invoked by Couchlink Helper (LocalSystem) or elevated UAC/task — no #Requires
+# so LocalSystem is not rejected by PowerShell's RunAsAdministrator check.
 #
 # Exit: 0 = IGD OK / maps applied (or -SkipMap prep done)
 #       2 = Windows prepared (portproxy/firewall OK) but router IGD still missing

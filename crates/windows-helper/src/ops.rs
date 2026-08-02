@@ -56,30 +56,55 @@ fn run_online_prep(
         let marker = run_dir.join("enable-upnp.exit");
         let _ = std::fs::remove_file(&marker);
 
-        let mut args: Vec<String> = vec![
+        // Strip #Requires -RunAsAdministrator: LocalSystem is privileged but can fail that check.
+        let wrapper = run_dir.join("online_prep-wrap.ps1");
+        let wrap_body = format!(
+            r#"$ErrorActionPreference='Continue'
+$raw = Get-Content -LiteralPath '{script}' -Raw
+$raw = [regex]::Replace($raw, '(?m)^#Requires[^\r\n]*\r?\n?', '')
+$tmp = Join-Path $env:TEMP ('couchlink-online-prep-' + [guid]::NewGuid().ToString() + '.ps1')
+Set-Content -LiteralPath $tmp -Value $raw -Encoding UTF8
+$a = @('-RunDir','{run_dir}','-SignalingPort','{sig}','-TurnPort','{turn}')
+{skip}{wsl}& $tmp @a
+$code = $LASTEXITCODE
+Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+exit $code
+"#,
+            script = script.to_string_lossy().replace('\'', "''"),
+            run_dir = run_dir.to_string_lossy().replace('\'', "''"),
+            sig = signaling_port,
+            turn = turn_port,
+            skip = if skip_map {
+                "$a += '-SkipMap'\n".to_string()
+            } else {
+                String::new()
+            },
+            wsl = match wsl_ip {
+                Some(ip) if !ip.is_empty() => {
+                    format!("$a += @('-WslIp','{}')\n", ip.replace('\'', "''"))
+                }
+                _ => String::new(),
+            },
+        );
+        if let Err(e) = std::fs::write(&wrapper, wrap_body) {
+            return Response::err(Some("online_prep"), format!("write wrapper: {e}"));
+        }
+
+        let args: Vec<String> = vec![
             "-NoProfile".into(),
             "-ExecutionPolicy".into(),
             "Bypass".into(),
             "-File".into(),
-            script.to_string_lossy().into_owned(),
-            "-RunDir".into(),
-            run_dir.to_string_lossy().into_owned(),
-            "-SignalingPort".into(),
-            signaling_port.to_string(),
-            "-TurnPort".into(),
-            turn_port.to_string(),
+            wrapper.to_string_lossy().into_owned(),
         ];
-        if skip_map {
-            args.push("-SkipMap".into());
-        }
-        if let Some(ip) = wsl_ip {
-            if !ip.is_empty() {
-                args.push("-WslIp".into());
-                args.push(ip.to_string());
-            }
-        }
 
-        let status = match Command::new("powershell.exe").args(&args).status() {
+        let log_out = run_dir.join("online_prep-powershell.log");
+        let mut cmd = Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+        cmd.args(&args);
+        if let Ok(f) = std::fs::File::create(&log_out) {
+            cmd.stdout(f);
+        }
+        let status = match cmd.status() {
             Ok(s) => s,
             Err(e) => {
                 return Response::err(Some("online_prep"), format!("spawn powershell: {e}"));
@@ -110,7 +135,7 @@ fn run_firewall_unblock(script_dir: &Path) -> Response {
         let _ = std::fs::create_dir_all(&run_dir);
         // unblock-firewall.ps1 writes to LOCALAPPDATA; SYSTEM uses ProgramData run dir
         // via env override if we set LOCALAPPDATA — keep simple: read process exit.
-        let status = match Command::new("powershell.exe")
+        let status = match Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
