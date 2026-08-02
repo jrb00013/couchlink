@@ -20,10 +20,12 @@ Product: 0ce6
 
 On **WSL**, prefer the Windows DualSense VHID companion so native Windows emulators see P2:
 
-1. On Windows: install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases), then run `couchlink-ds-vhid.exe`
+1. On Windows: install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases), then run [`scripts/windows/run-ds-vhid.ps1`](../scripts/windows/run-ds-vhid.ps1) / `couchlink-ds-vhid.exe`
 2. In WSL: start `couchlink-host` — Auto uses TCP `127.0.0.1:39251` when under WSL
 
 Force with `COUCHLINK_DS_VHID=tcp` or `COUCHLINK_VIRTUAL_PAD=dualsense`.
+
+For **rumble passthrough** to the friend, run the companion with `--backend xbox360` (ViGEm rumble notifications → DSVO). Default `--backend ds4` is better for PS emulator binding but does not capture motor output yet.
 
 ## Windows host
 

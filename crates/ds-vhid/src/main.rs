@@ -1,17 +1,25 @@
 //! DualSense VHID companion for Windows.
 //!
-//! Listens on TCP `127.0.0.1:39251` so both native Windows and WSL couchlink-host
-//! processes can inject friend pad state into a virtual controller for
-//! RPCS3/PCSX2 (player 2).
-//!
-//! Backend today: ViGEm DualShock 4 (requires ViGEmBus). True `054c:0ce6`
-//! DualSense via WinUHid can plug in later behind the same DSVH/DSVO protocol.
-//!
-//! Host physical DualSense remains player 1 — this companion only creates P2.
+//! Serves TCP `:39251` and named pipe `\\.\pipe\couchlink-ds-vhid` so native
+//! Windows and WSL hosts can drive Player 2. Host physical DualSense = P1.
+
+#[cfg(windows)]
+mod backend;
+#[cfg(windows)]
+mod pipe_win;
+#[cfg(windows)]
+mod session;
 
 use anyhow::Result;
-use clap::Parser;
-use tracing::info;
+use clap::{Parser, ValueEnum};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BackendKind {
+    /// ViGEm DualShock 4 (best for PS emulators today).
+    Ds4,
+    /// ViGEm Xbox 360 with rumble notifications → DSVO feedback to friend.
+    Xbox360,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -19,12 +27,12 @@ use tracing::info;
     about = "DualSense VHID companion for couchlink (Windows)"
 )]
 struct Args {
-    /// TCP port for WSL / remote host connections (default 39251).
     #[arg(long, env = "COUCHLINK_DS_VHID_PORT", default_value_t = couchlink_pad::vhid_proto::VHID_TCP_PORT)]
     port: u16,
-    /// Bind address for TCP (default 127.0.0.1).
     #[arg(long, default_value = "127.0.0.1")]
     bind: String,
+    #[arg(long, env = "COUCHLINK_DS_VHID_BACKEND", value_enum, default_value_t = BackendKind::Ds4)]
+    backend: BackendKind,
 }
 
 fn main() -> Result<()> {
@@ -52,118 +60,70 @@ fn main() -> Result<()> {
 #[cfg(windows)]
 fn run_windows(args: Args) -> Result<()> {
     use anyhow::Context;
-    use couchlink_pad::vhid_proto::{decode_input, DSVH_MAGIC};
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
-    use tracing::warn;
-
-    let backend = Arc::new(Mutex::new(VigemBackend::create()?));
-    info!(
-        "DualSense VHID companion ready (ViGEm DS4 backend). TCP={}:{}",
-        args.bind, args.port
-    );
-    info!("Bind RPCS3/PCSX2 player 2 to the ViGEm DualShock 4 — host physical DualSense stays P1");
-
-    let bind = format!("{}:{}", args.bind, args.port);
-    let listener = TcpListener::bind(&bind).with_context(|| format!("bind {bind}"))?;
-    info!("listening TCP {bind} (native Windows + WSL host path)");
-    for conn in listener.incoming() {
-        match conn {
-            Ok(stream) => {
-                let backend = Arc::clone(&backend);
-                std::thread::spawn(move || {
-                    if let Err(e) = handle_tcp_client(stream, backend) {
-                        warn!("TCP client: {e:#}");
-                    }
-                });
-            }
-            Err(e) => warn!("TCP accept: {e}"),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-struct VigemBackend {
-    target: vigem_client::DualShock4Wired<vigem_client::Client>,
-}
-
-#[cfg(windows)]
-impl VigemBackend {
-    fn create() -> Result<Self> {
-        use anyhow::Context;
-        let client = vigem_client::Client::connect()
-            .context("ViGEmBus connect — install https://github.com/nefarius/ViGEmBus/releases")?;
-        let id = vigem_client::TargetId::DUALSHOCK4_WIRED;
-        let mut target = vigem_client::DualShock4Wired::new(client, id);
-        target.plugin().context("ViGEm DS4 plugin")?;
-        target.wait_ready().context("ViGEm DS4 wait_ready")?;
-        Ok(Self { target })
-    }
-
-    fn apply_ds_report(&mut self, report: &[u8; 64]) -> Result<()> {
-        use anyhow::Context;
-        let lx = report[1];
-        let ly = report[2];
-        let rx = report[3];
-        let ry = report[4];
-        let l2 = report[5];
-        let r2 = report[6];
-        let bl = report[8];
-        let bh = report[9];
-        let be = report[10];
-        let mut btn = (bl & 0x0F) as u16;
-        if btn > 8 {
-            btn = 8;
-        }
-        btn |= (bl & 0xF0) as u16;
-        btn |= (bh as u16) << 8;
-        let special = be & 0x03;
-        let ds4 = vigem_client::DS4Report {
-            thumb_lx: lx,
-            thumb_ly: ly,
-            thumb_rx: rx,
-            thumb_ry: ry,
-            buttons: btn,
-            special,
-            trigger_l: l2,
-            trigger_r: r2,
-        };
-        self.target.update(&ds4).context("ViGEm DS4 update")?;
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn handle_tcp_client(
-    stream: std::net::TcpStream,
-    backend: std::sync::Arc<std::sync::Mutex<VigemBackend>>,
-) -> Result<()> {
-    use anyhow::Context;
-    use couchlink_pad::vhid_proto::{decode_input, DSVH_MAGIC};
-    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::Arc;
     use tracing::{info, warn};
 
-    stream.set_nodelay(true)?;
-    info!("TCP client connected from {}", stream.peer_addr()?);
-    let mut stream = stream;
-    let mut buf = vec![0u8; 4 + 1 + 64];
-    loop {
-        if let Err(e) = stream.read_exact(&mut buf) {
-            warn!("client disconnected: {e}");
-            break;
+    let hub = session::OutputHub::new();
+    let backend = backend::create(args.backend, hub.clone())?;
+    info!(
+        "DualSense VHID companion ready (backend={:?}). TCP={}:{} pipe={}",
+        args.backend,
+        args.bind,
+        args.port,
+        couchlink_pad::vhid_proto::VHID_PIPE_NAME
+    );
+    info!("Emulator: P1 = host DualSense; P2 = this virtual pad");
+
+    let tcp_backend = Arc::clone(&backend);
+    let tcp_hub = hub.clone();
+    let bind = format!("{}:{}", args.bind, args.port);
+    std::thread::spawn(move || {
+        let listener = match TcpListener::bind(&bind) {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("TCP bind {bind} failed: {e}");
+                return;
+            }
+        };
+        info!("listening TCP {bind}");
+        for conn in listener.incoming() {
+            match conn {
+                Ok(stream) => {
+                    let backend = Arc::clone(&tcp_backend);
+                    let hub = tcp_hub.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = session::serve_tcp(stream, backend, hub) {
+                            warn!("TCP session: {e:#}");
+                        }
+                    });
+                }
+                Err(e) => warn!("TCP accept: {e}"),
+            }
         }
-        if &buf[0..4] != DSVH_MAGIC {
-            warn!("bad DSVH magic — dropping connection");
-            break;
-        }
-        let report = decode_input(&buf)?;
-        backend
-            .lock()
-            .unwrap()
-            .apply_ds_report(&report)
-            .context("apply report")?;
-    }
+    });
+
+    let pipe_backend = Arc::clone(&backend);
+    pipe_win::serve_pipe(pipe_backend, hub).context("named pipe server")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn proto_dsvo_roundtrip_for_rumble_path() {
+        use couchlink_pad::feedback::build_usb_output_report;
+        use couchlink_pad::vhid_proto::{decode_output, encode_output};
+        use couchlink_proto::PadFeedback;
+        let fb = PadFeedback::Rumble {
+            large: 200,
+            small: 40,
+        };
+        let report = build_usb_output_report(&fb);
+        let enc = encode_output(&report);
+        let back = decode_output(&enc).unwrap();
+        assert_eq!(back[0], 0x02);
+        assert_eq!(back[3], 40);
+        assert_eq!(back[4], 200);
+    }
 }
