@@ -9,13 +9,19 @@ mod backend;
 mod pipe_win;
 #[cfg(windows)]
 mod session;
+#[cfg(windows)]
+mod winuhid;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum BackendKind {
-    /// ViGEm DualShock 4 (best for PS emulators today).
+    /// Prefer WinUHid DualSense (`054c:0ce6`), else ViGEm DualShock 4.
+    Auto,
+    /// True DualSense via WinUHidDevs.dll (requires WinUHid driver MSI).
+    WinUhid,
+    /// ViGEm DualShock 4 (good for PS emulators; limited output capture).
     Ds4,
     /// ViGEm Xbox 360 with rumble notifications → DSVO feedback to friend.
     Xbox360,
@@ -31,7 +37,7 @@ struct Args {
     port: u16,
     #[arg(long, default_value = "127.0.0.1")]
     bind: String,
-    #[arg(long, env = "COUCHLINK_DS_VHID_BACKEND", value_enum, default_value_t = BackendKind::Ds4)]
+    #[arg(long, env = "COUCHLINK_DS_VHID_BACKEND", value_enum, default_value_t = BackendKind::Auto)]
     backend: BackendKind,
 }
 

@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use couchlink_pad::vhid_proto::DS_USB_INPUT_LEN;
+use tracing::info;
 
 use crate::session::OutputHub;
+use crate::winuhid;
 
 pub trait PadBackend: Send {
     fn apply_ds_report(&mut self, report: &[u8; DS_USB_INPUT_LEN]) -> Result<()>;
@@ -16,6 +18,21 @@ pub fn create(
     hub: OutputHub,
 ) -> Result<Arc<std::sync::Mutex<dyn PadBackend>>> {
     match kind {
+        crate::BackendKind::Auto => {
+            if winuhid::available() {
+                match winuhid::WinUhidDualSense::create(hub.clone()) {
+                    Ok(p) => {
+                        info!("backend=auto → WinUHid DualSense");
+                        return Ok(Arc::new(std::sync::Mutex::new(p)));
+                    }
+                    Err(e) => tracing::warn!("WinUHid create failed ({e:#}) — trying ViGEm DS4"),
+                }
+            }
+            Ok(Arc::new(std::sync::Mutex::new(VigemDs4::create()?)))
+        }
+        crate::BackendKind::WinUhid => {
+            Ok(Arc::new(std::sync::Mutex::new(winuhid::WinUhidDualSense::create(hub)?)))
+        }
         crate::BackendKind::Ds4 => Ok(Arc::new(std::sync::Mutex::new(VigemDs4::create()?))),
         crate::BackendKind::Xbox360 => {
             Ok(Arc::new(std::sync::Mutex::new(VigemXbox::create(hub)?)))

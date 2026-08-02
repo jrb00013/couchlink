@@ -1,8 +1,9 @@
 # Run DualSense VHID companion (Player 2 for RPCS3/PCSX2)
 # Requires ViGEmBus: https://github.com/nefarius/ViGEmBus/releases
+# Optional WinUHid (true DualSense): https://github.com/cgutman/WinUHid
 param(
-    [ValidateSet("ds4", "xbox360")]
-    [string]$Backend = "ds4"
+    [ValidateSet("auto", "winuhid", "ds4", "xbox360")]
+    [string]$Backend = "auto"
 )
 
 $ErrorActionPreference = "Stop"

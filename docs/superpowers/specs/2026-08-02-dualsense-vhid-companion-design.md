@@ -1,7 +1,7 @@
 # DualSense VHID companion + game output passthrough — Design
 
 **Date:** 2026-08-02  
-**Status:** Approved to implement (user: native Windows host + WSL; host DualSense = local P1)  
+**Status:** Implemented on `feat/dualsense-vhid-companion` (ViGEm + optional WinUHid; Linux UHID)  
 **Branch:** `feat/dualsense-vhid-companion`
 
 ## Roles (important)

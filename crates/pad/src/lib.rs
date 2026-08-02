@@ -1,5 +1,5 @@
 //! Pad stack: parse real DualSense / DualShock 4 / Xbox HID reports and inject
-//! a virtual DualSense (Linux uinput) or Windows DualSense VHID / ViGEm pad.
+//! a virtual DualSense (Linux uhid/uinput) or Windows DualSense VHID / ViGEm pad.
 //! Physical Xbox / DS4 / DualSense inputs normalize onto the same `PadFrame`.
 
 pub mod absinfo;
@@ -15,6 +15,9 @@ pub mod vhid_client;
 pub mod vhid_proto;
 pub mod virtual_pad;
 pub mod xbox;
+
+#[cfg(target_os = "linux")]
+pub mod linux_uhid;
 
 #[cfg(windows)]
 pub mod windows_pad;

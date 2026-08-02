@@ -13,33 +13,41 @@ The virtual device appears as:
 
 ```
 Name:    DualSense Wireless Controller
-Bus:     Bluetooth
+Bus:     Bluetooth / USB (uhid)
 Vendor:  054c
 Product: 0ce6
 ```
 
+Auto order: DualSense VHID companion (WSL → Windows) → `/dev/uhid` DualSense → `uinput` DualSense.
+
 On **WSL**, prefer the Windows DualSense VHID companion so native Windows emulators see P2:
 
-1. On Windows: install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases), then run [`scripts/windows/run-ds-vhid.ps1`](../scripts/windows/run-ds-vhid.ps1) / `couchlink-ds-vhid.exe`
+1. On Windows: install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases), optionally [WinUHid](https://github.com/cgutman/WinUHid) for true DualSense + adaptive triggers, then run [`scripts/windows/run-ds-vhid.ps1`](../scripts/windows/run-ds-vhid.ps1) / `couchlink-ds-vhid.exe`
 2. In WSL: start `couchlink-host` — Auto uses TCP `127.0.0.1:39251` when under WSL
 
 Force with `COUCHLINK_DS_VHID=tcp` or `COUCHLINK_VIRTUAL_PAD=dualsense`.
 
-For **rumble passthrough** to the friend, run the companion with `--backend xbox360` (ViGEm rumble notifications → DSVO). Default `--backend ds4` is better for PS emulator binding but does not capture motor output yet.
+Companion backends (`--backend` / `COUCHLINK_DS_VHID_BACKEND`):
+
+| Backend | Virtual P2 | Friend feedback |
+|---------|------------|-----------------|
+| `auto` (default) | WinUHid DualSense if DLL present, else ViGEm DS4 | AT/rumble/lightbar when WinUHid |
+| `winuhid` | True DualSense `054c:0ce6` | Full (rumble, lightbar, adaptive triggers) |
+| `ds4` | ViGEm DualShock 4 | Limited |
+| `xbox360` | ViGEm Xbox 360 | Rumble via ViGEm notifications → DSVO |
 
 ## Windows host
 
 1. Install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) once (admin).
-2. Run **`couchlink-ds-vhid`** (companion) so Auto can use DualSense VHID over TCP/pipe.
-3. Fallback order without companion: ViGEm DualShock 4 → Xbox 360.
+2. Optional: install [WinUHid](https://github.com/cgutman/WinUHid) so `WinUHidDevs.dll` is available for true DualSense P2.
+3. Run **`couchlink-ds-vhid`** (companion) so Auto can use DualSense VHID over TCP/pipe.
+4. Fallback order without companion: ViGEm DualShock 4 → Xbox 360.
 
-Set `COUCHLINK_VIRTUAL_PAD=ds4` or `xbox360` to force a backend. Bind the matching
+Set `COUCHLINK_VIRTUAL_PAD=ds4` or `xbox360` to force a host-side backend. Bind the matching
 device in the emulator (DS4 / Xbox 360 / DualSense).
 
 Game rumble / adaptive-trigger **output** is forwarded to the friend when the
-companion emits DSVO frames (WinUHid DualSense backend). ViGEm DS4 injects
-input today; full adaptive-trigger capture needs WinUHid.
-
+companion emits DSVO frames (`winuhid` or `xbox360` rumble).
 ## RPCS3
 
 1. Start `couchlink-ds-vhid` (Windows) and/or `couchlink-host` so the virtual pad exists.

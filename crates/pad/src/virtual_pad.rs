@@ -1,7 +1,7 @@
 //! Virtual DualSense presented as a **Bluetooth** gamepad on the host.
 //!
 //! - **Linux / WSL:** Prefer DualSense VHID companion over TCP (Windows emulators),
-//!   else local `uinput` DualSense.
+//!   else local `/dev/uhid` DualSense, else `uinput` DualSense.
 //! - **Windows:** DualSense VHID companion (pipe/TCP), else ViGEm DualShock 4 / Xbox 360.
 
 use anyhow::Result;
@@ -199,6 +199,7 @@ mod linux {
 
     pub enum Inner {
         Vhid(VhidClient),
+        Uhid(crate::linux_uhid::LinuxUhid),
         UInput(LinuxUInput),
         Noop,
     }
@@ -221,20 +222,44 @@ mod linux {
                         info!("Linux/WSL virtual pad: DualSense VHID companion (TCP/pipe)");
                         return Ok(Self::Vhid(c));
                     }
-                    Err(e) if matches!(cfg.backend, VirtualPadBackend::DualSense) => {
-                        return Err(e).context("DualSense VHID companion required");
+                    Err(e) if matches!(cfg.backend, VirtualPadBackend::DualSense) && likely_wsl() => {
+                        return Err(e).context("DualSense VHID companion required under WSL");
                     }
                     Err(e) => {
-                        warn!("VHID companion unavailable ({e:#}) — falling back to uinput");
+                        warn!("VHID companion unavailable ({e:#}) — trying local backends");
                     }
                 }
             }
 
             if matches!(cfg.backend, VirtualPadBackend::Ds4 | VirtualPadBackend::Xbox360) {
                 warn!(
-                    "backend {:?} is Windows-oriented — using Linux uinput DualSense",
+                    "backend {:?} is Windows-oriented — using Linux DualSense backends",
                     cfg.backend
                 );
+            }
+
+            // Prefer /dev/uhid so hid-playstation can forward OUTPUT → friend.
+            let try_uhid = matches!(
+                cfg.backend,
+                VirtualPadBackend::Auto | VirtualPadBackend::DualSense
+            ) && crate::linux_uhid::uhid_available();
+            if try_uhid {
+                let id = crate::linux_uhid::UhidIdentity {
+                    name: &cfg.name,
+                    vendor: cfg.vendor,
+                    product: cfg.product,
+                    version: cfg.version,
+                    as_bluetooth: cfg.as_bluetooth,
+                };
+                match crate::linux_uhid::LinuxUhid::create(&id) {
+                    Ok(p) => return Ok(Self::Uhid(p)),
+                    Err(e) if matches!(cfg.backend, VirtualPadBackend::DualSense) && !likely_wsl() => {
+                        warn!("UHID DualSense failed ({e:#}) — falling back to uinput");
+                    }
+                    Err(e) => {
+                        warn!("UHID DualSense unavailable ({e:#}) — falling back to uinput");
+                    }
+                }
             }
 
             let pad = LinuxUInput::create(cfg)?;
@@ -255,6 +280,7 @@ mod linux {
         pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
             match self {
                 Self::Vhid(c) => c.apply(frame),
+                Self::Uhid(p) => p.apply(frame),
                 Self::UInput(p) => p.apply(frame),
                 Self::Noop => Ok(()),
             }
@@ -263,6 +289,7 @@ mod linux {
         pub fn poll_feedback(&mut self) -> Result<Vec<PadFeedback>> {
             match self {
                 Self::Vhid(c) => c.poll_feedback(),
+                Self::Uhid(p) => p.poll_feedback(),
                 Self::UInput(_) | Self::Noop => Ok(Vec::new()),
             }
         }
