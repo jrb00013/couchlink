@@ -68,4 +68,14 @@ ARGS=(
 [[ -n "${COUCHLINK_ICE_IPS:-}" ]] && ARGS+=(--ice-ips "$COUCHLINK_ICE_IPS")
 [[ -n "${COUCHLINK_WINDOWS_CAPTURE:-}" ]] && ARGS+=(--windows-capture "$COUCHLINK_WINDOWS_CAPTURE")
 # Capture source is handled by ensure-win-capture / win-capture (picker|desktop|window).
+if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+  ARGS+=(--verbose)
+fi
+if [[ -z "${RUST_LOG:-}" ]]; then
+  if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+    export RUST_LOG="couchlink_host=info,webrtc=info"
+  else
+    export RUST_LOG="warn,couchlink_host=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
+  fi
+fi
 exec "$BIN" "${ARGS[@]}"

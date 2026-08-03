@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "couchlink_signaling=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "warn,couchlink_signaling=warn,tower_http=error".into()),
         )
         .init();
 

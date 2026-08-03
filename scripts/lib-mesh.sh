@@ -165,31 +165,37 @@ couchlink_apply_mesh_invite() {
     export COUCHLINK_TURN_URL="turn:${mesh_ip}:3478"
     export COUCHLINK_TURN_EXTERNAL_IP="$mesh_ip"
     export COUCHLINK_MESH_NEED_TURN=1
-    echo "==> PRIME mesh ($kind) — join via http://${mesh_ip}:${port}/"
-    echo "    WSL: TURN on ${mesh_ip}:3478 (UDP via Windows portproxy); ICE keeps existing ICE_IPS"
+    if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+      echo "==> PRIME mesh ($kind) — join via http://${mesh_ip}:${port}/"
+      echo "    WSL: TURN on ${mesh_ip}:3478 (UDP via Windows portproxy); ICE keeps existing ICE_IPS"
+    fi
   else
     # Native: mesh iface is local — advertise it as the sole host candidate IP.
     export COUCHLINK_ICE_IPS="$mesh_ip"
     unset COUCHLINK_TURN_URL || true
     unset COUCHLINK_TURN_EXTERNAL_IP || true
     export COUCHLINK_MESH_NEED_TURN=0
-    echo "==> PRIME mesh ($kind) — join via http://${mesh_ip}:${port}/ (no public Cloudflare)"
+    if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+      echo "==> PRIME mesh ($kind) — join via http://${mesh_ip}:${port}/ (no public Cloudflare)"
+    fi
   fi
 
-  case "$kind" in
-    headscale)
-      echo "    Friend: ./install.sh --online  → paste this join URL (auto-joins Headscale; no Tailscale Inc account)"
-      echo "    Optional: ./install.sh --online --unblock-firewall"
-      ;;
-    tailscale)
-      echo "    Friend: COUCHLINK_INSTALL_TAILSCALE_CLOUD=1 ./install.sh && ./install.sh --online"
-      echo "            (optional Tailscale Inc cloud fallback — not required for Headscale)"
-      ;;
-    wireguard)
-      echo "    friend imports infra/wireguard/wg0-player.conf then brings WireGuard up"
-      echo "    (prefer Headscale: ./install.sh --host --online + friend ./install.sh --online)"
-      ;;
-  esac
+  if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+    case "$kind" in
+      headscale)
+        echo "    Friend: ./install.sh --online  → paste this join URL (auto-joins Headscale; no Tailscale Inc account)"
+        echo "    Optional: ./install.sh --online --unblock-firewall"
+        ;;
+      tailscale)
+        echo "    Friend: COUCHLINK_INSTALL_TAILSCALE_CLOUD=1 ./install.sh && ./install.sh --online"
+        echo "            (optional Tailscale Inc cloud fallback — not required for Headscale)"
+        ;;
+      wireguard)
+        echo "    friend imports infra/wireguard/wg0-player.conf then brings WireGuard up"
+        echo "    (prefer Headscale: ./install.sh --host --online + friend ./install.sh --online)"
+        ;;
+    esac
+  fi
   return 0
 }
 
@@ -337,7 +343,9 @@ couchlink_try_mesh_online() {
     esac
   done
 
-  echo "==> no Headscale / Tailscale / WireGuard mesh up — falling back to UPnP / Cloudflare / IPv6"
+  if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+    echo "==> no Headscale / Tailscale / WireGuard mesh up — falling back to UPnP / Cloudflare / IPv6"
+  fi
   echo "    setup: ./scripts/enable-headscale.sh · ./scripts/setup-tailscale.sh · ./scripts/setup-wireguard.sh"
   echo "    docs:  docs/HEADSCALE.md · docs/MESH.md · docs/WIREGUARD.md"
   return 1

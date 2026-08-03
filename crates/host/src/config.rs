@@ -47,6 +47,9 @@ pub struct HostArgs {
     /// Windows desktop via `couchlink-win-capture` (WSL: use `auto` or `host:9876`).
     #[arg(long, env = "COUCHLINK_WINDOWS_CAPTURE")]
     pub windows_capture: Option<String>,
+    /// Chatty tracing + QR code. Default is quiet (join URL still printed).
+    #[arg(long, short = 'v', default_value_t = false)]
+    pub verbose: bool,
 }
 
 impl HostArgs {

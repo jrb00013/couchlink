@@ -26,19 +26,32 @@ const IDR_INTERVAL: Duration = Duration::from_secs(2);
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    let args = HostArgs::parse();
+    let verbose = args.verbose
+        || matches!(
+            std::env::var("COUCHLINK_VERBOSE").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+        );
+    let default_filter = if verbose {
+        "couchlink_host=info,webrtc=info"
+    } else {
+        "warn,couchlink_host=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "couchlink_host=info".into()),
+                .unwrap_or_else(|_| default_filter.into()),
         )
+        .with_target(verbose)
         .init();
 
-    let args = HostArgs::parse();
     let preset = args.stream_preset();
-    info!(
-        "couchlink host session={} preset={}x{}@{} bluetooth_pad={}",
-        args.session_id, preset.width, preset.height, preset.fps, args.bluetooth_pad
-    );
+    if verbose {
+        info!(
+            "couchlink host session={} preset={}x{}@{} bluetooth_pad={}",
+            args.session_id, preset.width, preset.height, preset.fps, args.bluetooth_pad
+        );
+    }
 
     // Friend opens this in a browser (same host as signaling static files).
     // Prefer invite_signaling when set so the host can dial 127.0.0.1 while the
@@ -81,27 +94,33 @@ async fn main() -> Result<()> {
         mesh.as_deref(),
         headscale,
     );
-    info!("friend join URL: {join}");
-    if mesh.as_deref() == Some("headscale") || (hs_url.is_some() && ts_key.is_some()) {
-        info!(
-            "Headscale paste-link — friend: ./install.sh --online (no Tailscale Inc account)"
-        );
-    } else if mesh.as_deref() == Some("tailscale") {
-        info!(
-            "Tailscale paste-link — friend: ./install.sh --online (paste this URL)"
-        );
-    }
-    if join.contains("://127.") || join.contains("://localhost") {
-        info!("join URL is loopback — browser WebCodecs (lowest latency) is available");
-    } else if join.starts_with("http://") {
-        info!(
-            "LAN http join — WebCodecs needs a secure context; prefer http://127.0.0.1:8443/?… \
-             (SSH tunnel / same machine) or https for near-zero latency; RTP fallback still works"
-        );
-    }
-    if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
-        let ste = qr.render::<char>().quiet_zone(false).module_dimensions(2, 1).build();
-        eprintln!("\nScan / open join link:\n{ste}\n{join}\n");
+    // Always surface the invite — this is what the friend needs.
+    println!("friend join URL:\n{join}");
+    if verbose {
+        info!("friend join URL: {join}");
+        if mesh.as_deref() == Some("headscale") || (hs_url.is_some() && ts_key.is_some()) {
+            info!(
+                "Headscale paste-link — friend: ./install.sh --online (no Tailscale Inc account)"
+            );
+        } else if mesh.as_deref() == Some("tailscale") {
+            info!(
+                "Tailscale paste-link — friend: ./install.sh --online (paste this URL)"
+            );
+        }
+        if join.contains("://127.") || join.contains("://localhost") {
+            info!("join URL is loopback — browser WebCodecs (lowest latency) is available");
+        } else if join.starts_with("http://") {
+            info!(
+                "LAN http join — WebCodecs needs a secure context; prefer http://127.0.0.1:8443/?… \
+                 (SSH tunnel / same machine) or https for near-zero latency; RTP fallback still works"
+            );
+        }
+        if let Ok(qr) = qrcode::QrCode::new(join.as_bytes()) {
+            let ste = qr.render::<char>().quiet_zone(false).module_dimensions(2, 1).build();
+            eprintln!("\nScan / open join link:\n{ste}\n{join}\n");
+        }
+    } else {
+        eprintln!("(QR + detailed logs: pass --verbose / COUCHLINK_VERBOSE=1)");
     }
 
     let pad = Arc::new(Mutex::new(webrtc_peer::create_virtual_pad(

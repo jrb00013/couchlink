@@ -64,7 +64,11 @@ build_ps1="$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
 start_ps1="$(wslpath -w "$ROOT/scripts/start-win-capture.ps1")"
 
 echo "==> ensuring Windows capture binary is built…"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1"
+if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1"
+else
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1" >/dev/null 2>&1
+fi
 
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
@@ -73,7 +77,9 @@ fi
 style=Minimized
 [[ "$source_mode" == "picker" ]] && style=Normal
 
-echo "==> starting Windows capture (source=$source_mode → $connect @ ${wire_w}x${wire_h} ${bitrate_kbps}kbps)"
+if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+  echo "==> starting Windows capture (source=$source_mode → $connect @ ${wire_w}x${wire_h} ${bitrate_kbps}kbps)"
+fi
 # Build ArgumentList in PowerShell so quoting stays correct.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
   \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
