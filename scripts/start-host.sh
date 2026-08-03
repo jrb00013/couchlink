@@ -46,6 +46,10 @@ fi
 # On WSL, bring up Windows DXGI capture before the host connects to it.
 "$ROOT/scripts/ensure-win-capture.sh"
 
+# Same deal for controller input: without the Windows companion the host has no
+# virtual pad and falls back to video-only. Never fatal — video still works.
+"$ROOT/scripts/ensure-ds-vhid.sh" || true
+
 # Release only: the BGRA→I420 conversion and scaler are per-pixel Rust loops, and
 # a debug build cannot keep up with 1080p60 — it shows up as seconds of video lag.
 BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/release/couchlink-host}"

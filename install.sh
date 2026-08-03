@@ -253,6 +253,32 @@ if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "wsl" ]]; then
   else
     echo "warning: powershell.exe missing — cannot build couchlink-win-capture.exe"
   fi
+
+  # Controller passthrough needs a Windows-side virtual pad: games run on
+  # Windows, and uinput only makes a device inside WSL that they cannot see.
+  echo "==> building DualSense VHID companion + ViGEmBus driver (controller input)"
+  if command -v powershell.exe >/dev/null 2>&1; then
+    if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+      "$(wslpath -w "$ROOT/scripts/build-win-ds-vhid.ps1")"; then
+      echo "warning: DualSense companion setup failed — host will stream video only"
+      echo "         retry: ./scripts/ensure-ds-vhid.sh"
+    fi
+  else
+    echo "warning: powershell.exe missing — cannot build couchlink-ds-vhid.exe"
+  fi
+fi
+
+if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "windows" ]]; then
+  # Native Windows (git-bash/MSYS): same companion, no wslpath translation.
+  echo "==> building DualSense VHID companion + ViGEmBus driver (controller input)"
+  if command -v powershell.exe >/dev/null 2>&1; then
+    if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+      "$(cygpath -w "$ROOT/scripts/build-win-ds-vhid.ps1" 2>/dev/null || echo "$ROOT/scripts/build-win-ds-vhid.ps1")"; then
+      echo "warning: DualSense companion setup failed — host will stream video only"
+    fi
+  else
+    echo "warning: powershell.exe missing — cannot build couchlink-ds-vhid.exe"
+  fi
 fi
 
 if [[ "$INSTALL_ROLE" == "host" ]]; then
