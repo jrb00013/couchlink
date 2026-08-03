@@ -203,7 +203,10 @@ if [[ "$ROLE" == "host" ]]; then
     couchlink_say "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
   else
     # PRIME: Headscale first (self-hosted; paste-link, no Tailscale Inc for friends).
-    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" && "${COUCHLINK_SKIP_HEADSCALE:-0}" != "1" ]]; then
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" == "1" ]]; then
+      unset COUCHLINK_MESH COUCHLINK_MESH_IP COUCHLINK_HS_URL COUCHLINK_TS_AUTHKEY \
+        COUCHLINK_MESH_NEED_TURN COUCHLINK_HS_SOCKET COUCHLINK_HS_LOCAL_LOGIN || true
+    elif [[ "${COUCHLINK_SKIP_HEADSCALE:-0}" != "1" ]]; then
       if [[ -z "${COUCHLINK_MESH_IP:-}" || "${COUCHLINK_MESH:-}" != "headscale" ]]; then
         couchlink_say "==> bringing up Headscale mesh (PRIME)…"
         if couchlink_run_quiet "$ROOT/.run/headscale-bringup.log" bash "$ROOT/scripts/enable-headscale.sh"; then
@@ -233,7 +236,7 @@ if [[ "$ROLE" == "host" ]]; then
         fi
       fi
     fi
-    if couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" ]] && couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
       COUCHLINK_USING_MESH=1
       # WSL: friends hit Windows mesh IP (Tailscale 100.x / WG) — need portproxy → WSL.
       if [[ "$PLATFORM" == "wsl" && "${COUCHLINK_SKIP_UPNP_PREP:-}" != "1" ]]; then

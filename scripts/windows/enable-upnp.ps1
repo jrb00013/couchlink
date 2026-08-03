@@ -191,8 +191,12 @@ $connectIp = Get-WslConnectIp
 if ($connectIp) {
     Set-PortProxy "v4tov4" "0.0.0.0" $SignalingPort $connectIp $SignalingPort | Out-Null
     Set-PortProxy "v4tov4" "0.0.0.0" $TurnPort $connectIp $TurnPort | Out-Null
+    # Headscale control + DERP STUN (friend mesh join) — firewall rules already exist.
+    Set-PortProxy "v4tov4" "0.0.0.0" 8080 $connectIp 8080 | Out-Null
+    Set-PortProxy "v4tov4" "0.0.0.0" 34790 $connectIp 34790 | Out-Null
     Set-PortProxy "v6tov4" "::" $SignalingPort $connectIp $SignalingPort | Out-Null
     Set-PortProxy "v6tov4" "::" $TurnPort $connectIp $TurnPort | Out-Null
+    Set-PortProxy "v6tov4" "::" 8080 $connectIp 8080 | Out-Null
 } else {
     Warn "WSL IP not found — skipped portproxy (friends may not reach WSL listeners)"
 }
