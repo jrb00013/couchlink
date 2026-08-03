@@ -109,6 +109,7 @@ Bind Player 2 in RPCS3/PCSX2 to **DualSense Wireless Controller**.
 - [Headscale mesh](docs/HEADSCALE.md) — **PRIME** path (no Tailscale Inc account)
 - [Mesh overview](docs/MESH.md) — Headscale / Tailscale / WireGuard
 - [WireGuard](docs/WIREGUARD.md)
+- [Spectrum network setup](docs/NETWORK_SPECTRUM.md) — port forwarding behind a locked-down ISP gateway
 - [No-computer UX](docs/NO_COMPUTER_UX.md) — installers + Couchlink Helper
 - [Latency](docs/LATENCY.md)
 - [Emulators](docs/EMULATORS.md)
