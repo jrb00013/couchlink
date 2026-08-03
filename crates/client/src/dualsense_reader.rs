@@ -144,6 +144,9 @@ impl DualSenseReader {
         }
     }
 
+    /// DualSense takes the full output-report path (rumble, lightbar, adaptive
+    /// triggers). DS4 carries rumble and pass-through raw reports; lightbar and
+    /// adaptive triggers are dropped rather than written as malformed reports.
     pub fn apply_feedback(&mut self, fb: &PadFeedback) -> Result<()> {
         match self.family {
             SonyFamily::DualSense => {
