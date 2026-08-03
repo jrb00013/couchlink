@@ -9,7 +9,7 @@
 - [x] Host invite URL + QR
 - [x] Capture scaled to stream preset
 - [ ] Native SDL/GPU video viewer window on client
-- [ ] Windows ViGEm / virtual DualSense path
+- [x] Windows ViGEm / DualSense VHID virtual pad path
 - [x] Adaptive triggers / DualSense output-report feedback path
 - [ ] Window-capture target (emulator HWND) instead of full display
 - [ ] Hardware encode (NVENC / VAAPI)

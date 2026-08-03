@@ -2,7 +2,7 @@
 name = "couchlink-pad"
 version.workspace = true
 edition.workspace = true
-description = "DualSense report parsing + virtual Bluetooth pad injection"
+description = "DualSense/Xbox/DS4 report parsing + virtual Bluetooth pad injection"
 
 [dependencies]
 couchlink-proto = { workspace = true }
@@ -14,3 +14,6 @@ serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["ioctl", "fs"] }
+
+[target.'cfg(windows)'.dependencies]
+vigem-client = { version = "0.1", features = ["unstable_ds4"] }

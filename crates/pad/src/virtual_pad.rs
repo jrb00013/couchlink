@@ -1,15 +1,45 @@
 //! Virtual DualSense presented as a **Bluetooth** gamepad on the host.
 //!
-//! Linux: `uinput` with `BUS_BLUETOOTH`, Sony VID/PID, and DualSense product name
-//! so PCSX2 / RPCS3 enumerate it like a real wireless pad (same idea dualsensekit
-//! uses when binding RPCS3 player slots to DualSense HID endpoints).
+//! - **Linux:** `uinput` with `BUS_BLUETOOTH`, Sony VID/PID.
+//! - **Windows:** DualSense VHID pipe (custom `054c:0ce6`) when available, else
+//!   ViGEm DualShock 4 / Xbox 360 (requires ViGEmBus).
 
-use anyhow::{bail, Context, Result};
-use couchlink_proto::pad_frame::buttons;
+use anyhow::Result;
+#[cfg(target_os = "linux")]
+use anyhow::{bail, Context};
 use couchlink_proto::PadFrame;
+#[cfg(target_os = "linux")]
+use couchlink_proto::pad_frame::buttons;
 use tracing::info;
 
 use crate::dualsense::{PID_DUALSENSE, PRODUCT_NAME, SONY_VID};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualPadBackend {
+    /// Prefer DualSense VHID, then ViGEm DS4, then Xbox 360 (Windows).
+    /// Linux always uses uinput DualSense.
+    Auto,
+    DualSense,
+    Ds4,
+    Xbox360,
+    Noop,
+}
+
+impl VirtualPadBackend {
+    pub fn from_env() -> Self {
+        match std::env::var("COUCHLINK_VIRTUAL_PAD")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "dualsense" | "ds" | "ds5" => Self::DualSense,
+            "ds4" | "dualshock4" | "ps4" => Self::Ds4,
+            "xbox" | "xbox360" | "x360" => Self::Xbox360,
+            "noop" | "none" | "off" => Self::Noop,
+            _ => Self::Auto,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct VirtualPadConfig {
@@ -19,6 +49,7 @@ pub struct VirtualPadConfig {
     pub version: u16,
     /// When true, set bus type to Bluetooth so udev/emulators treat it as wireless.
     pub as_bluetooth: bool,
+    pub backend: VirtualPadBackend,
 }
 
 impl Default for VirtualPadConfig {
@@ -29,6 +60,7 @@ impl Default for VirtualPadConfig {
             product: PID_DUALSENSE,
             version: 0x0111,
             as_bluetooth: true,
+            backend: VirtualPadBackend::from_env(),
         }
     }
 }
@@ -36,7 +68,9 @@ impl Default for VirtualPadConfig {
 pub struct VirtualPad {
     #[cfg(target_os = "linux")]
     inner: linux::LinuxUInput,
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    inner: windows_inner::Inner,
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
     _cfg: VirtualPadConfig,
 }
 
@@ -44,6 +78,9 @@ impl VirtualPad {
     pub fn create(cfg: VirtualPadConfig) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
+            if matches!(cfg.backend, VirtualPadBackend::Noop) {
+                return Ok(Self::create_noop(cfg));
+            }
             let inner = linux::LinuxUInput::create(&cfg)?;
             info!(
                 "virtual pad ready: '{}' vid={:04x} pid={:04x} bus={}",
@@ -58,27 +95,36 @@ impl VirtualPad {
             );
             Ok(Self { inner })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            let inner = windows_inner::Inner::create(&cfg)?;
+            Ok(Self { inner })
+        }
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         {
             let _ = cfg;
-            bail!("virtual Bluetooth pad injection is currently implemented for Linux uinput; Windows ViGEm path planned")
+            bail!("virtual pad injection is Linux (uinput) or Windows (VHID/ViGEm) only")
         }
     }
 
     /// Accept pad frames but do not inject. Used for video-only hosts and for
     /// controller tests that exercise the apply path without `/dev/uinput`.
     pub fn create_noop(cfg: VirtualPadConfig) -> Self {
-        info!(
-            "virtual pad noop — no uinput injection ('{}')",
-            cfg.name
-        );
+        info!("virtual pad noop — no injection ('{}')", cfg.name);
         #[cfg(target_os = "linux")]
         {
             Self {
                 inner: linux::LinuxUInput::noop(),
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            let _ = cfg;
+            Self {
+                inner: windows_inner::Inner::Noop,
+            }
+        }
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         {
             Self { _cfg: cfg }
         }
@@ -89,10 +135,41 @@ impl VirtualPad {
         {
             self.inner.apply(frame)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            self.inner.apply(frame)
+        }
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         {
             let _ = frame;
             Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows_inner {
+    use super::*;
+    use crate::windows_pad::WindowsPad;
+
+    pub enum Inner {
+        Live(WindowsPad),
+        Noop,
+    }
+
+    impl Inner {
+        pub fn create(cfg: &VirtualPadConfig) -> Result<Self> {
+            if matches!(cfg.backend, VirtualPadBackend::Noop) {
+                return Ok(Self::Noop);
+            }
+            Ok(Self::Live(WindowsPad::create(cfg)?))
+        }
+
+        pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
+            match self {
+                Self::Live(p) => p.apply(frame),
+                Self::Noop => Ok(()),
+            }
         }
     }
 }
@@ -105,7 +182,6 @@ mod linux {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
 
-    // linux/input-event-codes.h / uinput.h subset
     const BUS_USB: u16 = 0x03;
     const BUS_BLUETOOTH: u16 = 0x05;
     const EV_SYN: u16 = 0x00;
@@ -119,7 +195,6 @@ mod linux {
     const UI_DEV_CREATE: u64 = 0x00005501;
     const UI_DEV_DESTROY: u64 = 0x00005502;
 
-    // Buttons
     const BTN_SOUTH: u16 = 0x130;
     const BTN_EAST: u16 = 0x131;
     const BTN_NORTH: u16 = 0x133;
@@ -142,8 +217,8 @@ mod linux {
     const ABS_Y: u16 = 0x01;
     const ABS_RX: u16 = 0x03;
     const ABS_RY: u16 = 0x04;
-    const ABS_Z: u16 = 0x02; // L2
-    const ABS_RZ: u16 = 0x05; // R2
+    const ABS_Z: u16 = 0x02;
+    const ABS_RZ: u16 = 0x05;
 
     #[repr(C)]
     struct InputId {
@@ -170,7 +245,6 @@ mod linux {
     }
 
     pub struct LinuxUInput {
-        /// `None` = noop (tests / video-only); no `/dev/uinput` traffic.
         file: Option<std::fs::File>,
     }
 
@@ -183,7 +257,7 @@ mod linux {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
-                .custom_flags(libc_nonblock())
+                .custom_flags(0)
                 .open("/dev/uinput")
                 .context("open /dev/uinput (need uinput module + permissions)")?;
 
@@ -217,11 +291,7 @@ mod linux {
             setup.name[..n].copy_from_slice(&name_bytes[..n]);
 
             unsafe {
-                let ret = libc_ioctl(
-                    file.as_raw_fd(),
-                    UI_DEV_SETUP,
-                    &setup as *const _ as u64,
-                );
+                let ret = libc_ioctl(file.as_raw_fd(), UI_DEV_SETUP, &setup as *const _ as u64);
                 if ret < 0 {
                     bail!("UI_DEV_SETUP failed");
                 }
@@ -231,7 +301,6 @@ mod linux {
                 }
             }
 
-            // Give udev a moment to create /dev/input/event*
             std::thread::sleep(std::time::Duration::from_millis(100));
             Ok(Self { file: Some(file) })
         }
@@ -310,10 +379,6 @@ mod linux {
         }
     }
 
-    fn libc_nonblock() -> i32 {
-        0 // blocking is fine for injection
-    }
-
     unsafe fn ioctl_set(fd: i32, req: u64, val: u64) -> Result<()> {
         let ret = libc_ioctl(fd, req, val);
         if ret < 0 {
@@ -322,7 +387,6 @@ mod linux {
         Ok(())
     }
 
-    // Minimal ioctl without pulling full libc crate conflict — use nix
     unsafe fn libc_ioctl(fd: i32, req: u64, arg: u64) -> i32 {
         nix::libc::ioctl(fd, req as _, arg)
     }

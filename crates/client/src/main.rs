@@ -373,14 +373,14 @@ async fn async_main(
         None
     };
     if dualsense.is_some() {
-        info!("DualSense controller connected");
+        info!("DualSense/DualShock 4 controller connected");
     } else if xbox.is_some() {
         info!("Xbox controller connected");
     } else if args.send_pad {
         if keyboard.is_some() {
-            info!("no DualSense/Xbox controller found — keyboard input is still available in windowed mode");
+            info!("no DualSense/DS4/Xbox controller found — keyboard input is still available in windowed mode");
         } else {
-            warn!("no DualSense/Xbox controller found and no keyboard available (headless mode) — no pad input will be sent");
+            warn!("no DualSense/DS4/Xbox controller found and no keyboard available (headless mode) — no pad input will be sent");
         }
     }
 
