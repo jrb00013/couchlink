@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use couchlink_proto::{PadFrame, SignalMessage, PAD_CHANNEL};
+use couchlink_proto::{PadFeedback, PadFrame, SignalMessage, PAD_CHANNEL};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -59,6 +59,8 @@ use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndicat
 pub struct WebRtcPlayer {
     pub pc: Arc<RTCPeerConnection>,
     pub pad_dc: Arc<tokio::sync::Mutex<Option<Arc<RTCDataChannel>>>>,
+    /// Host → player pad feedback (rumble / adaptive triggers / raw output).
+    feedback_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<PadFeedback>>>,
 }
 
 impl WebRtcPlayer {
@@ -132,12 +134,29 @@ impl WebRtcPlayer {
             })
         }));
 
+        let (feedback_tx, feedback_rx) = mpsc::unbounded_channel::<PadFeedback>();
         let pad_slot = Arc::clone(&pad_dc);
         pc.on_data_channel(Box::new(move |dc| {
             let pad_slot = Arc::clone(&pad_slot);
+            let feedback_tx = feedback_tx.clone();
             Box::pin(async move {
                 if dc.label() == PAD_CHANNEL {
                     info!("pad channel attached");
+                    let fb_tx = feedback_tx.clone();
+                    dc.on_message(Box::new(move |msg| {
+                        let fb_tx = fb_tx.clone();
+                        Box::pin(async move {
+                            if !msg.is_string {
+                                return;
+                            }
+                            let Ok(text) = std::str::from_utf8(&msg.data) else {
+                                return;
+                            };
+                            if let Ok(fb) = serde_json::from_str::<PadFeedback>(text) {
+                                let _ = fb_tx.send(fb);
+                            }
+                        })
+                    }));
                     *pad_slot.lock().await = Some(dc);
                 }
             })
@@ -266,7 +285,14 @@ impl WebRtcPlayer {
             })
         }));
 
-        Ok((Self { pc, pad_dc }, frame_rx))
+        Ok((
+            Self {
+                pc,
+                pad_dc,
+                feedback_rx: tokio::sync::Mutex::new(Some(feedback_rx)),
+            },
+            frame_rx,
+        ))
     }
 
     pub async fn handle_offer(
@@ -309,5 +335,10 @@ impl WebRtcPlayer {
         frame.encode(&mut buf);
         dc.send(&bytes::Bytes::from(buf.to_vec())).await?;
         Ok(())
+    }
+
+    /// Drain one host→player feedback message if present (non-blocking after take).
+    pub async fn take_feedback_rx(&self) -> Option<mpsc::UnboundedReceiver<PadFeedback>> {
+        self.feedback_rx.lock().await.take()
     }
 }

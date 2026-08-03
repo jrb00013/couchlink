@@ -48,7 +48,12 @@ Button bits mirror DualSense face/shoulder/dpad layout used by dualsensekit pars
 {"type":"rumble","large":120,"small":40}
 {"type":"lightbar","r":0,"g":0,"b":255}
 {"type":"player_led","mask":1}
+{"type":"adaptive_triggers","left_mode":1,"left_params":[0,200],"right_mode":2,"right_params":[10,40,180]}
+{"type":"raw_output","report":[2,255,241,40,120]}
 ```
+
+`adaptive_triggers` packs DualSense USB output trigger blocks (right @ byte 11, left @ 22).
+`raw_output` forwards a full HID buffer (report id `0x02` first) for companion VHID passthrough.
 
 ## DualSense HID (client capture)
 
