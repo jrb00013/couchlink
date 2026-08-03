@@ -452,18 +452,15 @@ async fn setup_pad_channel(
 pub fn create_virtual_pad(as_bluetooth: bool) -> Result<VirtualPad> {
     let mut cfg = VirtualPadConfig::default();
     cfg.as_bluetooth = as_bluetooth;
-    #[cfg(target_os = "linux")]
-    {
-        VirtualPad::create(cfg)
-    }
-    #[cfg(windows)]
+    #[cfg(any(target_os = "linux", windows))]
     {
         match VirtualPad::create(cfg.clone()) {
             Ok(pad) => Ok(pad),
             Err(e) => {
                 tracing::warn!(
-                    "Windows virtual pad unavailable ({e:#}) — running video-only host \
-                     (install ViGEmBus and/or DualSense VHID)"
+                    "virtual pad unavailable ({e:#}) — running video-only host \
+                     (WSL: run couchlink-ds-vhid on Windows, or fix /dev/uinput perms; \
+                      Windows: install ViGEmBus / WinUHid)"
                 );
                 Ok(VirtualPad::create_noop(cfg))
             }
