@@ -12,7 +12,7 @@ use couchlink_pad::vhid_proto::DS_USB_INPUT_LEN;
 use couchlink_proto::PadFeedback;
 use tracing::{info, warn};
 use windows::core::s;
-use windows::Win32::Foundation::{BOOL, HMODULE, TRUE};
+use windows::Win32::Foundation::{BOOL, TRUE};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 use crate::session::OutputHub;
@@ -41,7 +41,7 @@ type FnInitReport = unsafe extern "C" fn(*mut u8);
 type FnReportInput = unsafe extern "C" fn(*mut Ps5Gamepad, *const u8) -> BOOL;
 
 struct Api {
-    _lib: HMODULE,
+    // Intentionally leaked for process lifetime — not freed on Drop.
     create: FnCreate,
     destroy: FnDestroy,
     init_report: FnInitReport,
@@ -77,8 +77,9 @@ fn load_api() -> Result<Api> {
         let report_input: FnReportInput = std::mem::transmute(
             GetProcAddress(lib, s!("WinUHidPS5ReportInput")).context("WinUHidPS5ReportInput")?,
         );
+        // Keep DLL loaded for process lifetime (function pointers stay valid).
+        std::mem::forget(lib);
         Ok(Api {
-            _lib: lib,
             create,
             destroy,
             init_report,
