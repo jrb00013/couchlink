@@ -22,16 +22,68 @@ pub struct VhidClient {
     rx_buf: Vec<u8>,
 }
 
+/// Candidate hosts for the companion, in priority order.
+///
+/// WSL matters here: the companion runs on Windows, and WSL2 has its own
+/// network namespace, so Windows' loopback is not ours. The Windows side is
+/// reachable at our default gateway instead.
+fn vhid_tcp_hosts() -> Vec<String> {
+    let mut hosts = Vec::new();
+    if let Ok(h) = std::env::var("COUCHLINK_DS_VHID_HOST") {
+        let h = h.trim().to_string();
+        if !h.is_empty() {
+            hosts.push(h);
+        }
+    }
+    hosts.push("127.0.0.1".to_string());
+    #[cfg(target_os = "linux")]
+    if let Some(gw) = default_gateway_v4() {
+        if !hosts.contains(&gw) {
+            hosts.push(gw);
+        }
+    }
+    hosts
+}
+
+/// Default IPv4 gateway from /proc/net/route — the Windows host under WSL2.
+#[cfg(target_os = "linux")]
+fn default_gateway_v4() -> Option<String> {
+    parse_default_gateway(&std::fs::read_to_string("/proc/net/route").ok()?)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_default_gateway(routes: &str) -> Option<String> {
+    for line in routes.lines().skip(1) {
+        let mut cols = line.split_whitespace();
+        let _iface = cols.next()?;
+        let dest = cols.next()?;
+        let gateway = cols.next()?;
+        if dest != "00000000" {
+            continue;
+        }
+        // Little-endian hex, e.g. "01D012AC" -> 172.18.208.1
+        let raw = u32::from_str_radix(gateway, 16).ok()?;
+        if raw == 0 {
+            continue;
+        }
+        let o = raw.to_le_bytes();
+        return Some(format!("{}.{}.{}.{}", o[0], o[1], o[2], o[3]));
+    }
+    None
+}
+
 trait VhidIo: Read + Write + Send {}
 impl<T: Read + Write + Send> VhidIo for T {}
 
 impl VhidClient {
-    /// Auto: TCP localhost (WSL + native), then Windows named pipe.
+    /// Auto: TCP localhost, then the Windows host from WSL, then named pipe.
     pub fn connect() -> Result<Self> {
-        match Self::connect_tcp("127.0.0.1", VHID_TCP_PORT) {
-            Ok(c) => return Ok(c),
-            Err(e) => {
-                tracing::debug!("VHID TCP unavailable: {e:#}");
+        for host in vhid_tcp_hosts() {
+            match Self::connect_tcp(&host, VHID_TCP_PORT) {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    tracing::debug!("VHID TCP {host} unavailable: {e:#}");
+                }
             }
         }
         #[cfg(windows)]
@@ -119,4 +171,38 @@ pub fn likely_wsl() -> bool {
     std::fs::read_to_string("/proc/version")
         .map(|v| v.to_ascii_lowercase().contains("microsoft"))
         .unwrap_or(false)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_wsl_default_gateway() {
+        // Real /proc/net/route from WSL2: gateway 01D012AC is 172.18.208.1.
+        let routes = "Iface\tDestination\tGateway\n\
+                      eth0\t00000000\t01D012AC\n\
+                      docker0\t000011AC\t00000000\n";
+        assert_eq!(
+            parse_default_gateway(routes).as_deref(),
+            Some("172.18.208.1")
+        );
+    }
+
+    #[test]
+    fn skips_non_default_and_gatewayless_routes() {
+        let routes = "Iface\tDestination\tGateway\n\
+                      docker0\t000011AC\t00000000\n\
+                      eth0\t00000000\t00000000\n";
+        assert_eq!(parse_default_gateway(routes), None);
+    }
+
+    #[test]
+    fn env_override_wins_and_localhost_always_tried() {
+        std::env::set_var("COUCHLINK_DS_VHID_HOST", "10.0.0.5");
+        let hosts = vhid_tcp_hosts();
+        std::env::remove_var("COUCHLINK_DS_VHID_HOST");
+        assert_eq!(hosts.first().map(String::as_str), Some("10.0.0.5"));
+        assert!(hosts.iter().any(|h| h == "127.0.0.1"));
+    }
 }
