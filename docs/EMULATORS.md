@@ -5,7 +5,28 @@
 | Pad | Role |
 |-----|------|
 | Physical DualSense / Xbox on the **host** | Player 1 — bind in RPCS3/PCSX2 directly (couchlink does not touch it) |
-| Couchlink **virtual** pad | Player 2 — remote friend's controller |
+| Couchlink **virtual** pad | Player 2 — remote friend's controller (bound automatically, see below) |
+
+## Automatic P2 binding
+
+`scripts/link-emulator-pad.sh` runs from `start-host.sh` and points RPCS3's
+Player 2 at the couchlink virtual pad. This exists because the failure it
+prevents is invisible: RPCS3 keeps whatever device was plugged in when its
+config was written — often a second DualSense that is long gone — so the
+friend connects, the pad datachannel opens, and every button is silently
+dropped with no error on either side.
+
+The default `xbox360` backend enumerates through XInput, while the host's own
+DualSense uses the SDL handler, so the two never collide.
+
+| Variable | Purpose |
+|----------|---------|
+| `COUCHLINK_RPCS3_CONFIG` | Path to `input_configs/global/Default.yml` |
+| `COUCHLINK_EMU_PLAYER` | Player slot to bind (default `2`) |
+| `COUCHLINK_EMU_HANDLER` / `COUCHLINK_EMU_DEVICE` | Override the detected pair |
+
+The original file is saved once as `Default.yml.couchlink.bak`, and the edit is
+idempotent and scoped to the chosen player — Player 1 is never modified.
 
 ## Linux host
 
