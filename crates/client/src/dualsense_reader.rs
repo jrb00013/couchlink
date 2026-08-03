@@ -113,7 +113,23 @@ impl DualSenseReader {
 
     /// Best-effort USB output rumble when connected over USB hidraw.
     pub fn set_rumble(&mut self, large: u8, small: u8) -> Result<()> {
-        self.apply_feedback(&PadFeedback::Rumble { large, small })
+        match self.family {
+            SonyFamily::DualSense => {
+                self.apply_feedback(&PadFeedback::Rumble { large, small })
+            }
+            SonyFamily::DualShock4 => {
+                let mut buf = [0u8; 32];
+                buf[0] = 0x05;
+                buf[1] = 0xFF;
+                buf[4] = small;
+                buf[5] = large;
+                match self.file.write_all(&buf) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+                    Err(e) => Err(e).with_context(|| format!("write rumble {}", self.path.display())),
+                }
+            }
+        }
     }
 
     /// Write a DualSense USB output report (or any HID output) to hidraw.
@@ -129,25 +145,19 @@ impl DualSenseReader {
     }
 
     /// DualSense takes the full output-report path (rumble, lightbar, adaptive
-    /// triggers). DS4 hidraw here only carries rumble, so richer feedback kinds
-    /// are dropped for it rather than written as a malformed report.
+    /// triggers). DS4 carries rumble and pass-through raw reports; lightbar and
+    /// adaptive triggers are dropped rather than written as malformed reports.
     pub fn apply_feedback(&mut self, fb: &PadFeedback) -> Result<()> {
         match self.family {
             SonyFamily::DualSense => {
                 let report = build_usb_output_report(fb);
                 self.write_output(&report)
             }
-            SonyFamily::DualShock4 => {
-                if let PadFeedback::Rumble { large, small } = *fb {
-                    let mut buf = [0u8; 32];
-                    buf[0] = 0x05;
-                    buf[1] = 0xFF;
-                    buf[4] = small;
-                    buf[5] = large;
-                    self.write_output(&buf)?;
-                }
-                Ok(())
-            }
+            SonyFamily::DualShock4 => match fb {
+                PadFeedback::Rumble { large, small } => self.set_rumble(*large, *small),
+                PadFeedback::RawOutput { report } => self.write_output(report),
+                _ => Ok(()), // lightbar / adaptive triggers: DualSense-only
+            },
         }
     }
 }

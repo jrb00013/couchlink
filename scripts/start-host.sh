@@ -46,6 +46,15 @@ fi
 # On WSL, bring up Windows DXGI capture before the host connects to it.
 "$ROOT/scripts/ensure-win-capture.sh"
 
+# Same deal for controller input: without the Windows companion the host has no
+# virtual pad and falls back to video-only. Never fatal — video still works.
+"$ROOT/scripts/ensure-ds-vhid.sh" || true
+
+# Bind the emulator's P2 slot to that virtual pad. RPCS3 keeps whatever device
+# was plugged in when its config was written, so a stale binding drops every
+# remote button without a single error anywhere.
+"$ROOT/scripts/link-emulator-pad.sh" || true
+
 # Release only: the BGRA→I420 conversion and scaler are per-pixel Rust loops, and
 # a debug build cannot keep up with 1080p60 — it shows up as seconds of video lag.
 BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/release/couchlink-host}"
@@ -68,4 +77,14 @@ ARGS=(
 [[ -n "${COUCHLINK_ICE_IPS:-}" ]] && ARGS+=(--ice-ips "$COUCHLINK_ICE_IPS")
 [[ -n "${COUCHLINK_WINDOWS_CAPTURE:-}" ]] && ARGS+=(--windows-capture "$COUCHLINK_WINDOWS_CAPTURE")
 # Capture source is handled by ensure-win-capture / win-capture (picker|desktop|window).
+if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+  ARGS+=(--verbose)
+fi
+if [[ -z "${RUST_LOG:-}" ]]; then
+  if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+    export RUST_LOG="couchlink_host=info,webrtc=info"
+  else
+    export RUST_LOG="warn,couchlink_host=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
+  fi
+fi
 exec "$BIN" "${ARGS[@]}"

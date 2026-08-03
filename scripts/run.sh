@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One command to run couchlink: ./scripts/run.sh [host|client] [--local|--online] [--unblock-firewall]
+# One command to run couchlink: ./scripts/run.sh [host|client] [--local|--online] [--verbose] [--unblock-firewall]
 # Auto-detects platform (Linux / WSL / macOS), starts signaling + TURN + host
 # (or just the client) as background child processes of this one script, and
 # tears them all down together on Ctrl-C. No separate terminals needed.
@@ -24,7 +24,7 @@ source "$ROOT/scripts/lib-mesh.sh"
 
 usage() {
   cat <<EOF
-usage: $0 [host|client] [--local|--online] [--unblock-firewall]
+usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall]
 
   host    start signaling + (optional TURN) + couchlink-host
   client  start couchlink-client (friend/player)
@@ -35,6 +35,9 @@ usage: $0 [host|client] [--local|--online] [--unblock-firewall]
             portproxy; then Cloudflare HTTPS + IPv6 / bore if the router blocks UPnP.
             Client: prompts for the host join URL if unset; auto-joins Headscale
             when the invite has hs= + tskey=.
+  --verbose
+            Chatty bring-up logs, QR code, TRACE-level-ish Rust logs (RUST_LOG).
+            Default is quiet — join URL is still printed.
   --unblock-firewall
             Client: open local OS firewall for mesh/TURN (Windows UAC once).
 
@@ -49,11 +52,13 @@ EOF
 ROLE="host"
 MODE="local"
 UNBLOCK_FIREWALL=0
+COUCHLINK_VERBOSE="${COUCHLINK_VERBOSE:-0}"
 for arg in "$@"; do
   case "$arg" in
     host|client) ROLE="$arg" ;;
     --local) MODE="local" ;;
     --online) MODE="online" ;;
+    --verbose|-v) COUCHLINK_VERBOSE=1 ;;
     --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -63,9 +68,15 @@ for arg in "$@"; do
       ;;
   esac
 done
+export COUCHLINK_VERBOSE
+
+# Quiet Rust crates unless the user opted in or already set RUST_LOG.
+if ! couchlink_verbose && [[ -z "${RUST_LOG:-}" ]]; then
+  export RUST_LOG="warn,couchlink_host=warn,couchlink_signaling=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
+fi
 
 PLATFORM="$(couchlink_detect_platform)"
-echo "==> platform: $PLATFORM · role: $ROLE · mode: $MODE"
+couchlink_say "==> platform: $PLATFORM · role: $ROLE · mode: $MODE$(couchlink_verbose && echo ' · verbose' || true)"
 
 # Put Homebrew / cargo on PATH for macOS (system bash often lacks them).
 export PATH="$(couchlink_tool_path "${HOME:-}")${PATH:+:$PATH}"
@@ -80,7 +91,7 @@ fi
 source .env.couchlink
 
 if [[ "$ROLE" == "host" && ( -z "${COUCHLINK_SESSION_ID:-}" || -z "${COUCHLINK_PIN:-}" ) ]]; then
-  echo "==> no session set — generating one"
+  couchlink_say "==> no session set — generating one"
   eval "$(./scripts/gen_session.sh)"
   {
     echo "COUCHLINK_SESSION_ID=$COUCHLINK_SESSION_ID"
@@ -101,9 +112,13 @@ couchlink_try_upnp_online() {
   [[ "${COUCHLINK_SKIP_UPNP_PREP:-}" == "1" ]] && return 0
   local ok=0
   if [[ "$PLATFORM" == "wsl" || "$PLATFORM" == "windows" ]] && command -v powershell.exe >/dev/null 2>&1; then
-    echo "==> --online: Windows prep (Helper / task / firewall + portproxy + UPnP)"
+    couchlink_vlog "==> --online: Windows prep (Helper / task / firewall + WSL portproxy + UPnP)"
     set +e
-    bash "$ROOT/scripts/enable-upnp.sh"
+    if couchlink_verbose; then
+      bash "$ROOT/scripts/enable-upnp.sh"
+    else
+      bash "$ROOT/scripts/enable-upnp.sh" >/dev/null 2>&1
+    fi
     local ec=$?
     set -e
     [[ "$ec" -eq 0 ]] && ok=1
@@ -112,7 +127,11 @@ couchlink_try_upnp_online() {
       local bridge_w
       bridge_w="$(wslpath -w "$ROOT/scripts/windows/open-ports-upnp.ps1" 2>/dev/null || true)"
       if [[ -n "${bridge_w:-}" ]]; then
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" && ok=1 || true
+        if couchlink_verbose; then
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" && ok=1 || true
+        else
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" >/dev/null 2>&1 && ok=1 || true
+        fi
       fi
     fi
   fi
@@ -138,7 +157,7 @@ couchlink_apply_online_fallback() {
     used_cf=1
     # Host still dials loopback; friends get https://*.trycloudflare.com
     export COUCHLINK_INVITE_SIGNALING="${COUCHLINK_CF_URL/https:/wss:}/ws"
-    echo "==> HTTPS invite via cloudflared (WebCodecs unlocked in browser)"
+    couchlink_say "==> HTTPS invite via cloudflared (WebCodecs unlocked in browser)"
   fi
 
   if [[ -n "$v6" ]]; then
@@ -149,7 +168,7 @@ couchlink_apply_online_fallback() {
     if [[ "$used_cf" != "1" ]]; then
       export COUCHLINK_INVITE_SIGNALING="ws://${v6br}:${PORT}/ws"
     fi
-    echo "==> TURN on public IPv6 ${v6} (no IPv4 port forward needed)"
+    couchlink_say "==> TURN on public IPv6 ${v6} (no IPv4 port forward needed)"
     return 0
   fi
 
@@ -158,19 +177,19 @@ couchlink_apply_online_fallback() {
   export COUCHLINK_TURN_EXTERNAL_IP="$public_ip"
 
   if [[ "$used_cf" == "1" ]]; then
-    echo "==> WARN: no public IPv6 — TURN still ${public_ip}:3478 (forward UDP/TCP 3478 if ICE fails)"
+    couchlink_say "==> WARN: no public IPv6 — TURN still ${public_ip}:3478 (forward UDP/TCP 3478 if ICE fails)"
     return 0
   fi
 
   if couchlink_start_bore_signaling "$ROOT" "$PORT"; then
     export COUCHLINK_INVITE_SIGNALING="ws://bore.pub:${COUCHLINK_BORE_SIG_PORT}/ws"
-    echo "==> bore signaling only; TURN remains ${public_ip}:3478"
-    echo "    browser WebCodecs needs https — prefer cloudflared; native client is fine on http"
+    couchlink_say "==> bore signaling only; TURN remains ${public_ip}:3478"
+    couchlink_vlog "    browser WebCodecs needs https — prefer cloudflared; native client is fine on http"
     return 0
   fi
 
-  echo "==> UPnP incomplete — keeping IPv4 invite ${public_ip} (may need manual forward)"
-  echo "    forward TCP ${PORT} + UDP/TCP 3478 to this PC, or re-run ./scripts/enable-upnp.sh"
+  couchlink_say "==> UPnP incomplete — keeping IPv4 invite ${public_ip} (may need manual forward)"
+  couchlink_vlog "    forward TCP ${PORT} + UDP/TCP 3478 to this PC, or re-run ./scripts/enable-upnp.sh"
   return 1
 }
 
@@ -181,21 +200,25 @@ if [[ "$ROLE" == "host" ]]; then
     export COUCHLINK_SIGNALING="ws://${LAN_IP}:${PORT}/ws"
     # Don't advertise a public TURN relay on a LAN session.
     unset COUCHLINK_TURN_URL || true
-    echo "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
+    couchlink_say "==> local mode — join URL will use LAN IP ${LAN_IP} (no UPnP / TURN)"
   else
     # PRIME: Headscale first (self-hosted; paste-link, no Tailscale Inc for friends).
-    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" && "${COUCHLINK_SKIP_HEADSCALE:-0}" != "1" ]]; then
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" == "1" ]]; then
+      unset COUCHLINK_MESH COUCHLINK_MESH_IP COUCHLINK_HS_URL COUCHLINK_TS_AUTHKEY \
+        COUCHLINK_MESH_NEED_TURN COUCHLINK_HS_SOCKET COUCHLINK_HS_LOCAL_LOGIN || true
+    elif [[ "${COUCHLINK_SKIP_HEADSCALE:-0}" != "1" ]]; then
       if [[ -z "${COUCHLINK_MESH_IP:-}" || "${COUCHLINK_MESH:-}" != "headscale" ]]; then
-        echo "==> bringing up Headscale mesh (PRIME)…"
-        if bash "$ROOT/scripts/enable-headscale.sh"; then
+        couchlink_say "==> bringing up Headscale mesh (PRIME)…"
+        if couchlink_run_quiet "$ROOT/.run/headscale-bringup.log" bash "$ROOT/scripts/enable-headscale.sh"; then
           # shellcheck disable=SC1091
           source "$ROOT/infra/headscale/data/mesh.env"
           # Keep Headscale's cloudflared tunnel alive with this run.
           if [[ -n "${COUCHLINK_TUNNEL_PIDS[*]:-}" ]]; then
             :
           fi
+          couchlink_say "==> Headscale ready (mesh ${COUCHLINK_MESH_IP:-?})"
         else
-          echo "==> Headscale bring-up skipped/failed — trying Tailscale / WireGuard / public"
+          couchlink_say "==> Headscale bring-up skipped/failed — trying Tailscale / WireGuard / public"
         fi
       fi
     fi
@@ -206,20 +229,24 @@ if [[ "$ROLE" == "host" ]]; then
           :
         elif [[ "${COUCHLINK_AUTO_WIREGUARD:-1}" != "0" ]]; then
           if [[ -f "$ROOT/infra/wireguard/wg0-host.conf" ]] || [[ "${COUCHLINK_ENSURE_WIREGUARD:-0}" == "1" ]]; then
-            echo "==> no Headscale/Tailscale mesh — ensuring WireGuard tunnel"
+            couchlink_vlog "==> no Headscale/Tailscale mesh — ensuring WireGuard tunnel"
             bash "$ROOT/scripts/enable-wireguard.sh" || \
-              echo "==> WireGuard bring-up failed — will try public fallback"
+              couchlink_say "==> WireGuard bring-up failed — will try public fallback"
           fi
         fi
       fi
     fi
-    if couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
+    if [[ "${COUCHLINK_SKIP_MESH:-0}" != "1" ]] && couchlink_try_mesh_online "$PORT" "$PLATFORM"; then
       COUCHLINK_USING_MESH=1
       # WSL: friends hit Windows mesh IP (Tailscale 100.x / WG) — need portproxy → WSL.
       if [[ "$PLATFORM" == "wsl" && "${COUCHLINK_SKIP_UPNP_PREP:-}" != "1" ]]; then
-        echo "==> WSL mesh: Windows firewall + portproxy for ${COUCHLINK_MESH_IP:-mesh}"
-        bash "$ROOT/scripts/enable-upnp.sh" --skip-map >/dev/null 2>&1 \
-          || echo "==> portproxy prep skipped/failed — if join fails, run ./scripts/enable-upnp.sh --skip-map"
+        couchlink_vlog "==> WSL mesh: Windows firewall + portproxy for ${COUCHLINK_MESH_IP:-mesh}"
+        if couchlink_verbose; then
+          bash "$ROOT/scripts/enable-upnp.sh" --skip-map >/dev/null 2>&1 \
+            || couchlink_say "==> portproxy prep skipped/failed — if join fails, run ./scripts/enable-upnp.sh --skip-map"
+        else
+          bash "$ROOT/scripts/enable-upnp.sh" --skip-map >/dev/null 2>&1 || true
+        fi
       fi
     else
       PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
@@ -237,9 +264,9 @@ if [[ "$ROLE" == "host" ]]; then
       export COUCHLINK_SIGNALING="ws://127.0.0.1:${PORT}/ws"
       export COUCHLINK_INVITE_SIGNALING="ws://${PUBLIC_IP}:${PORT}/ws"
       export COUCHLINK_TURN_URL="turn:${PUBLIC_IP}:3478"
-      echo "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP; host dials 127.0.0.1)"
+      couchlink_say "==> online mode — public IP ${PUBLIC_IP} (TURN + UPnP; host dials 127.0.0.1)"
       if couchlink_try_upnp_online; then
-        echo "==> UPnP OK — ports should be reachable at ${PUBLIC_IP}"
+        couchlink_vlog "==> UPnP OK — ports should be reachable at ${PUBLIC_IP}"
         export COUCHLINK_SKIP_UPNP=1
       else
         couchlink_apply_online_fallback "$PUBLIC_IP" || true
@@ -249,7 +276,7 @@ if [[ "$ROLE" == "host" ]]; then
 elif [[ "$ROLE" == "client" ]]; then
   if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
     bash "$ROOT/scripts/unblock-firewall.sh" || \
-      echo "==> unblock-firewall failed (continuing)"
+      couchlink_say "==> unblock-firewall failed (continuing)"
   fi
   if [[ "$MODE" == "online" ]]; then
     # Prompt early so Headscale auto-join can run before the UI starts.
@@ -263,7 +290,7 @@ elif [[ "$ROLE" == "client" ]]; then
       fi
     fi
     if couchlink_try_client_headscale_join "$ROOT"; then
-      echo "==> Headscale join OK — starting player"
+      couchlink_say "==> Headscale join OK — starting player"
     else
       # Opt-in only: Tailscale Inc cloud. Default stays quiet (no Windows popup).
       if [[ "${COUCHLINK_ENSURE_TAILSCALE_CLOUD:-0}" == "1" ]]; then
@@ -271,20 +298,20 @@ elif [[ "$ROLE" == "client" ]]; then
       fi
     fi
     if [[ -n "${COUCHLINK_JOIN_URL:-}" ]]; then
-      echo "==> online client — join URL set (TURN / mesh from invite)"
+      couchlink_vlog "==> online client — join URL set (TURN / mesh from invite)"
     elif [[ -n "${COUCHLINK_TURN_URL:-}" && -n "${COUCHLINK_TURN_USER:-}" && -n "${COUCHLINK_TURN_PASS:-}" ]]; then
-      echo "==> online client — TURN credentials from env"
+      couchlink_vlog "==> online client — TURN credentials from env"
     else
-      echo "==> online client — paste the host join URL when prompted"
+      couchlink_say "==> online client — paste the host join URL when prompted"
     fi
   else
-    echo "==> local client — paste join URL if credentials are missing"
+    couchlink_vlog "==> local client — paste join URL if credentials are missing"
   fi
 fi
 
 PIDS=()
 cleanup() {
-  echo "==> shutting down"
+  couchlink_say "==> shutting down"
   for pid in "${PIDS[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done

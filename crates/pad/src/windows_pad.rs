@@ -1,17 +1,16 @@
-//! Windows virtual pad: DualSense VHID pipe (preferred) + ViGEm DS4 / Xbox 360 fallbacks.
-
-use std::io::Write;
+//! Windows virtual pad: DualSense VHID companion (preferred) + ViGEm DS4 / Xbox 360 fallbacks.
 
 use anyhow::{bail, Context, Result};
 use couchlink_proto::pad_frame::buttons;
-use couchlink_proto::PadFrame;
+use couchlink_proto::{PadFeedback, PadFrame};
 use tracing::{info, warn};
 
-use crate::map_frame::{pad_frame_to_dualsense_usb_report, stick_u8_to_i16};
+use crate::map_frame::stick_u8_to_i16;
+use crate::vhid_client::VhidClient;
 use crate::virtual_pad::{VirtualPadBackend, VirtualPadConfig};
 
 pub enum WindowsPad {
-    DualSenseVhid(DualSenseVhid),
+    DualSenseVhid(VhidClient),
     VigemXbox360(VigemXbox),
     VigemDs4(VigemDs4),
     Noop,
@@ -21,14 +20,14 @@ impl WindowsPad {
     pub fn create(cfg: &VirtualPadConfig) -> Result<Self> {
         match cfg.backend {
             VirtualPadBackend::Noop => Ok(Self::Noop),
-            VirtualPadBackend::DualSense => DualSenseVhid::connect()
+            VirtualPadBackend::DualSense => VhidClient::connect()
                 .map(Self::DualSenseVhid)
-                .context("DualSense VHID pipe not available"),
+                .context("DualSense VHID companion not available"),
             VirtualPadBackend::Ds4 => VigemDs4::create().map(Self::VigemDs4),
             VirtualPadBackend::Xbox360 => VigemXbox::create().map(Self::VigemXbox360),
             VirtualPadBackend::Auto => {
-                if let Ok(ds) = DualSenseVhid::connect() {
-                    info!("Windows virtual pad: DualSense VHID");
+                if let Ok(ds) = VhidClient::connect() {
+                    info!("Windows virtual pad: DualSense VHID companion");
                     return Ok(Self::DualSenseVhid(ds));
                 }
                 warn!("DualSense VHID unavailable — trying ViGEm DS4");
@@ -43,7 +42,7 @@ impl WindowsPad {
                 }
                 bail!(
                     "no Windows virtual pad backend: install ViGEmBus \
-                     (https://github.com/nefarius/ViGEmBus/releases) and/or DualSense VHID companion"
+                     (https://github.com/nefarius/ViGEmBus/releases) and/or run couchlink-ds-vhid"
                 )
             }
         }
@@ -57,31 +56,12 @@ impl WindowsPad {
             Self::Noop => Ok(()),
         }
     }
-}
 
-pub struct DualSenseVhid {
-    stream: std::fs::File,
-}
-
-impl DualSenseVhid {
-    pub fn connect() -> Result<Self> {
-        let stream = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(r"\\.\pipe\couchlink-ds-vhid")
-            .context("open \\\\.\\pipe\\couchlink-ds-vhid")?;
-        info!("connected DualSense VHID pipe");
-        Ok(Self { stream })
-    }
-
-    pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
-        let report = pad_frame_to_dualsense_usb_report(frame);
-        let mut buf = Vec::with_capacity(4 + 1 + 64);
-        buf.extend_from_slice(b"DSVH");
-        buf.push(1);
-        buf.extend_from_slice(&report);
-        self.stream.write_all(&buf)?;
-        Ok(())
+    pub fn poll_feedback(&mut self) -> Result<Vec<PadFeedback>> {
+        match self {
+            Self::DualSenseVhid(p) => p.poll_feedback(),
+            _ => Ok(Vec::new()),
+        }
     }
 }
 
@@ -180,7 +160,6 @@ impl VigemDs4 {
     }
 
     pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
-        // DS4 HID button word: low nibble = dpad hat (8 = neutral), then face/shoulders.
         let mut btn: u16 = ds4_dpad_hat(frame.buttons);
         let b = frame.buttons;
         if b & buttons::SQUARE != 0 {

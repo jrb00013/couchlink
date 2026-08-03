@@ -121,3 +121,40 @@ couchlink_local_ip() {
   fi
   echo "${ip:-}"
 }
+
+# Quiet-by-default logging for run.sh / start-*.sh (opt in with --verbose).
+couchlink_verbose() {
+  case "${COUCHLINK_VERBOSE:-0}" in
+    1|true|yes|on|TRUE|YES|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Always-visible status line (join URL hints, fatal paths).
+couchlink_say() {
+  echo "$@"
+}
+
+# Only when COUCHLINK_VERBOSE=1.
+couchlink_vlog() {
+  if couchlink_verbose; then
+    echo "$@"
+  fi
+}
+
+# Run a command; when quiet, stash stdout/stderr in a log file and print path on failure.
+couchlink_run_quiet() {
+  local log="$1"
+  shift
+  if couchlink_verbose; then
+    "$@"
+    return $?
+  fi
+  mkdir -p "$(dirname "$log")" 2>/dev/null || true
+  if "$@" >"$log" 2>&1; then
+    return 0
+  fi
+  local ec=$?
+  echo "==> command failed (exit $ec) — see $log" >&2
+  return "$ec"
+}

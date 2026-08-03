@@ -19,7 +19,9 @@ if [[ "$MODE" == "online" ]]; then
   # Best-effort — run.sh already ran Windows UPnP prep for --online.
   upnp_open "$PORT" tcp "signaling" || true
 else
-  echo "==> local mode — signaling on $BIND (no UPnP)"
+  if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+    echo "==> local mode — signaling on $BIND (no UPnP)"
+  fi
 fi
 
 BIN="${COUCHLINK_SIGNALING_BIN:-}"
@@ -36,5 +38,12 @@ if [[ ! -x "$BIN" && "$BIN" != "couchlink-signaling" ]]; then
   echo "==> building couchlink-signaling (release)"
   cargo build --release -p couchlink-signaling
   BIN="$ROOT/target/release/couchlink-signaling"
+fi
+if [[ -z "${RUST_LOG:-}" ]]; then
+  if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+    export RUST_LOG="couchlink_signaling=info,tower_http=info"
+  else
+    export RUST_LOG="warn,couchlink_signaling=warn,tower_http=error"
+  fi
 fi
 exec "$BIN" --bind "$BIND" --web-root "$ROOT/web/dist"

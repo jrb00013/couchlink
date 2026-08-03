@@ -23,17 +23,27 @@ upnp_local_ip() {
 # Returns 0 on success, 1 on failure.
 upnp_open() {
   local port="$1" proto="$2" desc="$3" ip="${4:-}"
-  command -v upnpc >/dev/null || { echo "upnpc not installed — skipping UPnP for $desc ($port/$proto)"; return 1; }
+  command -v upnpc >/dev/null || {
+    if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+      echo "upnpc not installed — skipping UPnP for $desc ($port/$proto)"
+    fi
+    return 1
+  }
+
   if [[ -z "$ip" ]]; then
     ip="$(upnp_local_ip)"
   fi
   [[ -z "$ip" ]] && return 1
   # Routers sometimes hang on UPnP — never block session start longer than a few seconds.
   if timeout 5 upnpc -e "couchlink-$desc" -a "$ip" "$port" "$port" "$proto" >/tmp/couchlink-upnp.log 2>&1; then
-    echo "==> UPnP: opened $port/$proto on router → $ip ($desc)"
+    if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+      echo "==> UPnP: opened $port/$proto on router → $ip ($desc)"
+    fi
     return 0
   fi
-  echo "==> UPnP: router didn't accept $port/$proto ($desc)"
+  if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+    echo "==> UPnP: router didn't accept $port/$proto ($desc)"
+  fi
   return 1
 }
 

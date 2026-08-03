@@ -1,4 +1,4 @@
-# Prepare Windows for couchlink --online:
+﻿# Prepare Windows for couchlink --online:
 #   Private profile, discovery, UPnP services, NATUPnP maps,
 #   firewall allow for 8443/3478, and WSL portproxy (IPv4+IPv6 → WSL).
 # Registers CouchlinkElevatedUpnp so later --online runs need no UAC.
@@ -186,13 +186,20 @@ Step "Couchlink: firewall + WSL portproxy (no router needed for LAN/IPv6 path)"
 Ensure-Fw "couchlink-signaling-$SignalingPort" "TCP" $SignalingPort
 Ensure-Fw "couchlink-turn-$TurnPort-tcp" "TCP" $TurnPort
 Ensure-Fw "couchlink-turn-$TurnPort-udp" "UDP" $TurnPort
+# Headscale control plane + embedded DERP STUN (friend mesh join).
+Ensure-Fw "couchlink-headscale-8080" "TCP" 8080
+Ensure-Fw "couchlink-derp-stun-34790" "UDP" 34790
 
 $connectIp = Get-WslConnectIp
 if ($connectIp) {
     Set-PortProxy "v4tov4" "0.0.0.0" $SignalingPort $connectIp $SignalingPort | Out-Null
     Set-PortProxy "v4tov4" "0.0.0.0" $TurnPort $connectIp $TurnPort | Out-Null
+    # Headscale control + DERP STUN (friend mesh join).
+    Set-PortProxy "v4tov4" "0.0.0.0" 8080 $connectIp 8080 | Out-Null
+    Set-PortProxy "v4tov4" "0.0.0.0" 34790 $connectIp 34790 | Out-Null
     Set-PortProxy "v6tov4" "::" $SignalingPort $connectIp $SignalingPort | Out-Null
     Set-PortProxy "v6tov4" "::" $TurnPort $connectIp $TurnPort | Out-Null
+    Set-PortProxy "v6tov4" "::" 8080 $connectIp 8080 | Out-Null
 } else {
     Warn "WSL IP not found — skipped portproxy (friends may not reach WSL listeners)"
 }
@@ -243,6 +250,9 @@ function Add-Map([int]$Port, [string]$Proto, [string]$Name) {
 $ok8443 = Add-Map $SignalingPort "TCP" "couchlink-signaling"
 Add-Map $TurnPort "TCP" "couchlink-turn-tcp" | Out-Null
 Add-Map $TurnPort "UDP" "couchlink-turn-udp" | Out-Null
+# Without these the friend can never reach the Headscale control plane.
+Add-Map 8080 "TCP" "couchlink-headscale" | Out-Null
+Add-Map 34790 "UDP" "couchlink-derp-stun" | Out-Null
 
 if ($ok8443) { Finish 0 }
 Finish 2

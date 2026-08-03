@@ -1,0 +1,31 @@
+[package]
+name = "couchlink-ds-vhid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows DualSense VHID companion — virtual pad for native/WSL hosts"
+publish = false
+
+[[bin]]
+name = "couchlink-ds-vhid"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+couchlink-pad = { workspace = true }
+couchlink-proto = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+vigem-client = { version = "0.1", features = ["unstable_ds4", "unstable_xtarget_notification"] }
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Pipes",
+  "Win32_System_IO",
+] }

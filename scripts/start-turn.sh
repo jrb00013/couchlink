@@ -105,6 +105,15 @@ if [[ "${COUCHLINK_SKIP_UPNP:-}" != "1" ]]; then
   upnp_open 3478 tcp "turn" || true
 fi
 
-echo "==> starting local TURN relay on :3478 (user=$COUCHLINK_TURN_USER external-ip=$TURN_EXTERNAL_IP)"
+echo "==> starting local TURN relay on :3478"
+if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+  echo "    user=$COUCHLINK_TURN_USER external-ip=$TURN_EXTERNAL_IP"
+fi
 # -n keeps coturn in the foreground so run.sh can track the PID.
-exec turnserver -n -c "$RUNTIME_CONF"
+TURN_LOG="${COUCHLINK_TURN_LOG:-$ROOT/.run/turnserver.log}"
+mkdir -p "$(dirname "$TURN_LOG")" 2>/dev/null || true
+if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
+  exec turnserver -n -c "$RUNTIME_CONF"
+fi
+# Quiet default: stash the banner / STUN dump; keep process in foreground.
+exec turnserver -n -c "$RUNTIME_CONF" >>"$TURN_LOG" 2>&1
