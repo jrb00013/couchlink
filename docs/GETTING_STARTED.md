@@ -18,13 +18,16 @@ couchlink-host \
 ```
 
 Ensure your user can write `/dev/uinput` (install udev rule from `install.sh`).
+On native Windows, install [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)
+once; optional DualSense VHID companion for real `054c:0ce6` identity.
 
 ## Friend (player) — browser (recommended)
 
 1. Open the **join URL / QR** printed by `couchlink-host`, or go to `http://HOST:8443`.
 2. Press any button on your DualSense so the browser unlocks Gamepad API.
 3. Click **Join session** (auto if the invite link has `?s=&p=&auto=1`).
-4. You should see the HD stream; pad state streams as `CLPD` onto the host virtual Bluetooth DualSense.
+4. You should see the HD stream; pad state streams as `CLPD` onto the host virtual pad
+   (Linux DualSense / Windows VHID or ViGEm).
 
 ## Friend — native client (optional)
 

@@ -445,11 +445,23 @@ pub fn create_virtual_pad(as_bluetooth: bool) -> Result<VirtualPad> {
     {
         VirtualPad::create(cfg)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
     {
-        // Video-only host: stream + WebRTC work; pad injection needs Linux uinput / ViGEm.
+        match VirtualPad::create(cfg.clone()) {
+            Ok(pad) => Ok(pad),
+            Err(e) => {
+                tracing::warn!(
+                    "Windows virtual pad unavailable ({e:#}) — running video-only host \
+                     (install ViGEmBus and/or DualSense VHID)"
+                );
+                Ok(VirtualPad::create_noop(cfg))
+            }
+        }
+    }
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
+    {
         tracing::warn!(
-            "virtual DualSense injection is Linux-only on this build — running video-only host"
+            "virtual pad injection is Linux/Windows-only on this build — running video-only host"
         );
         Ok(VirtualPad::create_noop(cfg))
     }
