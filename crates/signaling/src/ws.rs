@@ -160,7 +160,8 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
             SignalMessage::Offer { .. }
             | SignalMessage::Answer { .. }
             | SignalMessage::IceCandidate { .. }
-            | SignalMessage::StreamInfo { .. } => {
+            | SignalMessage::StreamInfo { .. }
+            | SignalMessage::PadInfo { .. } => {
                 if let (Some(sid), Some(r)) = (&session_id, role) {
                     store.relay(sid, r, &text);
                 }

@@ -7,6 +7,29 @@
 | Physical DualSense / Xbox on the **host** | Player 1 — bind in RPCS3/PCSX2 directly (couchlink does not touch it) |
 | Couchlink **virtual** pad | Player 2 — remote friend's controller (bound automatically, see below) |
 
+## Controller auto-detection
+
+The browser Gamepad API normalises every pad, so an Xbox controller and a
+DualSense produce byte-identical `PadFrame`s — the host cannot tell them apart
+from input alone. The player therefore announces its family over signaling:
+
+```
+player  --  pad_info { kind, id }  -->  host
+```
+
+`kind` comes from the web client's `controllerKind()` (`xbox` / `dualsense` /
+`generic`). On a change the host restarts the companion with the matching
+backend and rebinds the emulator slot:
+
+| Reported kind | Companion backend | RPCS3 handler |
+|---------------|-------------------|---------------|
+| `xbox` | `xbox360` | XInput |
+| `dualsense` | `ds4` | SDL |
+| `generic` | `xbox360` | XInput |
+
+`generic` maps to Xbox deliberately: XInput is the one handler present on every
+Windows emulator build without a vendor driver.
+
 ## Automatic P2 binding
 
 `scripts/link-emulator-pad.sh` runs from `start-host.sh` and points RPCS3's

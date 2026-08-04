@@ -6,6 +6,7 @@ import {
   VIDEO_CHANNEL,
   type VideoAccessUnit,
 } from "./clvd";
+import { controllerKind } from "./controllerKind";
 import { clog, cerror, cwarn } from "./log";
 import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
@@ -71,6 +72,8 @@ export class CouchlinkPlayer {
   private padSent = 0;
   private padWindowStart = 0;
   private padName = "none";
+  /** Last Gamepad.id announced to the host, so pad_info is sent only on change. */
+  private padInfoSent = "";
   private turn: { url: string; user: string; pass: string } | null = null;
   private gotVideoTrack = false;
   private lastOfferEpoch = 0;
@@ -594,6 +597,18 @@ export class CouchlinkPlayer {
       }
     }
     if (!gp) return;
+    // Tell the host which pad family this is. PadFrame is normalised by the
+    // Gamepad API, so the host cannot infer it from input — without this it
+    // binds the emulator to whatever was configured last, which drops every
+    // button when that device is not the one in the player's hands.
+    if (gp.id !== this.padInfoSent) {
+      this.padInfoSent = gp.id;
+      const kind = controllerKind(gp.id);
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        send(this.ws, { type: "pad_info", kind, id: gp.id });
+        clog("signal → pad_info", `${kind} (${gp.id})`);
+      }
+    }
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
     const state: PadState = fromBrowserGamepad(gp, this.seq);

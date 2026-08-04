@@ -55,6 +55,10 @@ fi
 # remote button without a single error anywhere.
 "$ROOT/scripts/link-emulator-pad.sh" || true
 
+# The host re-runs both of the above when the player reports its controller
+# family, so it needs to find them from a binary living under target/.
+export COUCHLINK_ROOT="$ROOT"
+
 # Release only: the BGRA→I420 conversion and scaler are per-pixel Rust loops, and
 # a debug build cannot keep up with 1080p60 — it shows up as seconds of video lag.
 BIN="${COUCHLINK_HOST_BIN:-$ROOT/target/release/couchlink-host}"

@@ -1,5 +1,6 @@
 mod capture;
 mod config;
+mod emulator_pad;
 mod encode;
 mod invite;
 mod latency;
@@ -209,6 +210,9 @@ async fn main() -> Result<()> {
         (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO);
     let mut force_idr = true;
     let mut idr_burst: u32 = 0;
+    // Last controller family reported by the player — reconciling is a process
+    // spawn, so only do it when the answer actually changes.
+    let mut last_pad_kind: Option<String> = None;
     let mut last_idr = std::time::Instant::now();
     let mut capture_ok_announced: Option<bool> = None;
 
@@ -397,6 +401,17 @@ async fn main() -> Result<()> {
                                     warn!("deferred signal ignored after rejoin coalesce: {other:?}");
                                 }
                             }
+                        }
+                    }
+                    Some(SignalMessage::PadInfo { kind, id }) => {
+                        // Reconcile off the loop: this shells out to the
+                        // companion + emulator config, and this same branch
+                        // relays video.
+                        if last_pad_kind.as_deref() != Some(kind.as_str()) {
+                            last_pad_kind = Some(kind.clone());
+                            tokio::task::spawn_blocking(move || {
+                                emulator_pad::apply(&kind, &id)
+                            });
                         }
                     }
                     Some(SignalMessage::Heartbeat) => {
