@@ -78,6 +78,12 @@ pub(crate) fn sanitize_nat_1to1_ips(ice_ips: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Queue depth on the video DataChannel past which frames are shed rather than
+/// awaited. Roughly 200ms at the 10 Mbps 720p60 preset — enough to ride out a
+/// normal congestion blip, short enough that a real stall is cut off before it
+/// can back up into the capture socket.
+const VIDEO_DC_MAX_BUFFERED: usize = 256 * 1024;
+
 pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
     pub video: Arc<TrackLocalStaticSample>,
@@ -98,6 +104,23 @@ impl WebRtcHost {
     /// True once since the last check: a viewer asked for a keyframe via RTCP.
     pub fn take_keyframe_request(&self) -> bool {
         self.keyframe_wanted.swap(false, Ordering::Relaxed)
+    }
+
+    /// True when the video DataChannel has more queued than we are willing to wait on.
+    ///
+    /// `send().await` on SCTP applies backpressure, and it is awaited from the same
+    /// `select!` branch that drains the Windows capture socket. On a congested link
+    /// that await parks the whole branch: capture is never read, its receive buffer
+    /// fills, win-capture blocks writing into it, and the stream freezes with the host
+    /// idle at ~1% CPU — the connection still up, simply no new frames. Shedding here
+    /// keeps the loop turning; the paired keyframe request repairs the decoder.
+    async fn video_dc_congested(&self) -> bool {
+        if self.video_dc.buffered_amount().await <= VIDEO_DC_MAX_BUFFERED {
+            return false;
+        }
+        // Dropping H.264 leaves the decoder referencing frames it never got.
+        self.keyframe_wanted.store(true, Ordering::Relaxed);
+        true
     }
 
     pub async fn new(
@@ -360,6 +383,7 @@ impl WebRtcHost {
         // Native clients ignore this channel and keep using the media track below.
         if self.video_dc.ready_state()
             == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+            && !self.video_dc_congested().await
         {
             let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
             let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
