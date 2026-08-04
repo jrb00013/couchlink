@@ -6,6 +6,7 @@ import {
   VIDEO_CHANNEL,
   type VideoAccessUnit,
 } from "./clvd";
+import { controllerKind } from "./controllerKind";
 import { clog, cerror, cwarn } from "./log";
 import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
@@ -43,6 +44,8 @@ export interface PlayerCallbacks {
 const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
 const MEDIA_RECOVER_DELAY_MS = 5000;
+/** 250Hz — matches the native client and keeps sampling off the display clock. */
+const PAD_POLL_MS = 4;
 
 function preferLegacyRtp(): boolean {
   if (typeof location === "undefined") return false;
@@ -71,6 +74,8 @@ export class CouchlinkPlayer {
   private padSent = 0;
   private padWindowStart = 0;
   private padName = "none";
+  /** Last Gamepad.id announced to the host, so pad_info is sent only on change. */
+  private padInfoSent = "";
   private turn: { url: string; user: string; pass: string } | null = null;
   private gotVideoTrack = false;
   private lastOfferEpoch = 0;
@@ -258,7 +263,7 @@ export class CouchlinkPlayer {
     if (this.mediaRecoverTimer) clearTimeout(this.mediaRecoverTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.statsTimer) clearInterval(this.statsTimer);
-    if (this.padTimer) cancelAnimationFrame(this.padTimer);
+    if (this.padTimer) clearInterval(this.padTimer);
     this.connectTimer = null;
     this.sessionRetryTimer = null;
     this.mediaRecoverTimer = null;
@@ -273,7 +278,7 @@ export class CouchlinkPlayer {
 
   /** Drop WebRTC only; keep signaling socket if open. */
   private resetPeer() {
-    if (this.padTimer) cancelAnimationFrame(this.padTimer);
+    if (this.padTimer) clearInterval(this.padTimer);
     this.padTimer = null;
     this.padDc?.close();
     this.videoDc?.close();
@@ -573,14 +578,21 @@ export class CouchlinkPlayer {
     this.cb.onPresentPath?.("rtp", "WebCodecs fallback");
   }
 
+  /**
+   * Poll the pad on a timer, not requestAnimationFrame.
+   *
+   * rAF fires at the display refresh — 60Hz on most screens — so every input
+   * carried up to 16.7ms of quantisation before it even left the browser, while
+   * the native client polls at 250Hz. The Gamepad API has no rAF requirement;
+   * getGamepads() reads current state whenever it is called.
+   *
+   * rAF also stops entirely when the tab is backgrounded, which silently killed
+   * input the moment the player alt-tabbed.
+   */
   private startPadLoop() {
     this.padWindowStart = performance.now();
     this.padSent = 0;
-    const tick = () => {
-      this.padTimer = requestAnimationFrame(tick);
-      this.pollAndSendPad();
-    };
-    this.padTimer = requestAnimationFrame(tick);
+    this.padTimer = window.setInterval(() => this.pollAndSendPad(), PAD_POLL_MS);
   }
 
   private pollAndSendPad() {
@@ -594,6 +606,18 @@ export class CouchlinkPlayer {
       }
     }
     if (!gp) return;
+    // Tell the host which pad family this is. PadFrame is normalised by the
+    // Gamepad API, so the host cannot infer it from input — without this it
+    // binds the emulator to whatever was configured last, which drops every
+    // button when that device is not the one in the player's hands.
+    if (gp.id !== this.padInfoSent) {
+      this.padInfoSent = gp.id;
+      const kind = controllerKind(gp.id);
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        send(this.ws, { type: "pad_info", kind, id: gp.id });
+        clog("signal → pad_info", `${kind} (${gp.id})`);
+      }
+    }
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
     const state: PadState = fromBrowserGamepad(gp, this.seq);

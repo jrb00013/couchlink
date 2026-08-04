@@ -58,6 +58,20 @@ pub enum SignalMessage {
         epoch: u64,
     },
     PeerLeft,
+    /// Player reports which controller family it is actually holding.
+    ///
+    /// The browser Gamepad API normalises every pad to the same layout, so an
+    /// Xbox pad and a DualSense arrive byte-identical in `PadFrame` — the host
+    /// cannot tell them apart from input alone. Without this the host guesses,
+    /// and a guess that misses means the emulator binds a device the player
+    /// does not have and silently drops every button.
+    PadInfo {
+        /// `xbox`, `dualsense`, or `generic` (see web `controllerKind`).
+        kind: String,
+        /// Raw `Gamepad.id`, for logs when the classification looks wrong.
+        #[serde(default)]
+        id: String,
+    },
     /// Host announces stream ready (codec / resolution).
     StreamInfo {
         width: u32,

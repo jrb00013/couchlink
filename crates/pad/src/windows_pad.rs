@@ -50,7 +50,23 @@ impl WindowsPad {
 
     pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
         match self {
-            Self::DualSenseVhid(p) => p.apply(frame),
+            // The companion is a separate process and is restarted whenever the
+            // player's controller family changes, which breaks this socket
+            // mid-session. Without reconnecting, every later frame returns
+            // "Broken pipe" and the player's input is dead for good while video
+            // keeps flowing — the failure looks like the pad, not the pipe.
+            Self::DualSenseVhid(p) => match p.apply(frame) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    let Ok(mut fresh) = VhidClient::connect() else {
+                        return Err(e);
+                    };
+                    tracing::info!("DualSense VHID companion reconnected after {e}");
+                    let r = fresh.apply(frame);
+                    *self = Self::DualSenseVhid(fresh);
+                    r
+                }
+            },
             Self::VigemXbox360(p) => p.apply(frame),
             Self::VigemDs4(p) => p.apply(frame),
             Self::Noop => Ok(()),

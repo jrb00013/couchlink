@@ -69,6 +69,17 @@ export default function App() {
   const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
+  /**
+   * Most recent RTP stream, kept so the WebCodecs fallback can re-attach it.
+   *
+   * Distinct from pendingStreamRef on purpose: that one means "waiting for the
+   * video ref to exist" and must be cleared once used. Overloading it for the
+   * fallback left it permanently set while WebCodecs owned the canvas, and the
+   * render-time effect below re-entered attachStream on every single render.
+   */
+  const heldStreamRef = useRef<MediaStream | null>(null);
+  /** Last stream we logged as held, so the notice prints once per stream. */
+  const heldLoggedRef = useRef<MediaStream | null>(null);
   const [videoDiag, setVideoDiag] = useState("video: —");
 
   function clearRtpFallbackTimer() {
@@ -85,7 +96,7 @@ export default function App() {
       rtpFallbackTimer.current = null;
       if (!webcodecsActiveRef.current) return;
       if (wcRef.current?.hasPainted()) return;
-      const stream = pendingStreamRef.current;
+      const stream = heldStreamRef.current;
       cwarn("WebCodecs produced no frames — falling back to RTP canvas");
       webcodecsActiveRef.current = false;
       playerRef.current?.preferRtpPresent();
@@ -126,10 +137,13 @@ export default function App() {
   }
 
   function attachStream(stream: MediaStream) {
-    pendingStreamRef.current = stream;
+    heldStreamRef.current = stream;
     // WebCodecs path owns the canvas — keep the RTP stream for fallback only.
     if (webcodecsActiveRef.current) {
-      clog("RTP stream held for fallback — WebCodecs present active");
+      if (heldLoggedRef.current !== stream) {
+        heldLoggedRef.current = stream;
+        clog("RTP stream held for fallback — WebCodecs present active");
+      }
       return;
     }
     clearRtpFallbackTimer();
@@ -239,11 +253,15 @@ export default function App() {
     bind(v);
   }
 
+  // No dependency array: this must run after whichever render creates the
+  // video element. The identity check is what keeps that cheap — without it
+  // every render re-attached the same stream and restarted the canvas.
   useEffect(() => {
     const v = videoRef.current;
     const pending = pendingStreamRef.current;
-    if (v && pending) {
+    if (v && pending && v.srcObject !== pending) {
       clog("attach pending stream after ref ready");
+      pendingStreamRef.current = null;
       attachStream(pending);
     }
   });
@@ -267,7 +285,7 @@ export default function App() {
         if (!ensureWebCodecs()) {
           cwarn("WebCodecs present failed to start — waiting for RTP fallback");
           webcodecsActiveRef.current = false;
-          const stream = pendingStreamRef.current;
+          const stream = heldStreamRef.current;
           if (stream) attachStream(stream);
         }
       }
