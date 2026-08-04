@@ -121,12 +121,7 @@ impl WebRtcHost {
     /// idle at ~1% CPU — the connection still up, simply no new frames. Shedding here
     /// keeps the loop turning; the paired keyframe request repairs the decoder.
     async fn video_dc_congested(&self) -> bool {
-        if self.video_dc.buffered_amount().await <= VIDEO_DC_MAX_BUFFERED {
-            return false;
-        }
-        // Dropping H.264 leaves the decoder referencing frames it never got.
-        self.keyframe_wanted.store(true, Ordering::Relaxed);
-        true
+        self.video_dc.buffered_amount().await > VIDEO_DC_MAX_BUFFERED
     }
 
     pub async fn new(
@@ -387,9 +382,14 @@ impl WebRtcHost {
 
         // DataChannel path first — browser WebCodecs paints without waiting on RTP JB.
         // Native clients ignore this channel and keep using the media track below.
+        // A keyframe is the only thing that can restore a starved decoder, so it
+        // is never shed — dropping it was a death spiral: skip, ask for an IDR,
+        // then skip the IDR too because it is the largest frame of all. The
+        // viewer's canvas froze on the DataChannel path while RTP kept decoding
+        // at ~55fps, which is what made it look like a network fault.
         if self.video_dc.ready_state()
             == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-            && !self.video_dc_congested().await
+            && (keyframe || !self.video_dc_congested().await)
         {
             let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
             let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
