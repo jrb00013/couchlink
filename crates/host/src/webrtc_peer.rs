@@ -102,6 +102,12 @@ pub struct WebRtcHost {
 
 impl WebRtcHost {
     /// True once since the last check: a viewer asked for a keyframe via RTCP.
+    /// Ask for an IDR on the next tick — used after a frame is dropped, since
+    /// the decoder is left referencing something it never received.
+    pub fn request_keyframe(&self) {
+        self.keyframe_wanted.store(true, Ordering::Relaxed);
+    }
+
     pub fn take_keyframe_request(&self) -> bool {
         self.keyframe_wanted.swap(false, Ordering::Relaxed)
     }

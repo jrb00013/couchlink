@@ -23,6 +23,41 @@ use tracing::{info, warn};
 /// once the encoder throttles on a static screen, stranding late joiners on black.
 const IDR_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Longest a single frame push may hold the loop that also drains capture.
+///
+/// Three frame times at 60fps. Past that the peer is not keeping up and the
+/// frame is already too old to be worth showing.
+const PUSH_BUDGET: Duration = Duration::from_millis(50);
+
+/// Push one frame, but never let it park the caller.
+///
+/// `push_h264` awaits twice — the SCTP DataChannel and the RTP sample writer —
+/// and both apply backpressure. Those awaits live in the same `select!` branch
+/// that drains the Windows capture socket, so a peer that stops consuming stalls
+/// the whole branch: capture goes unread, its buffer fills, win-capture blocks
+/// writing into it, and everything freezes with the host asleep at 0% CPU. The
+/// player cannot even rejoin, because the same branch services signaling.
+///
+/// Guarding the individual awaits is whack-a-mole — the invariant is that
+/// nothing here may block indefinitely, so the budget is enforced at the edge
+/// and covers any await added inside later.
+async fn push_bounded(
+    host: &webrtc_peer::WebRtcHost,
+    nal: Vec<u8>,
+    dur: Duration,
+    keyframe: bool,
+) -> Result<()> {
+    match tokio::time::timeout(PUSH_BUDGET, host.push_h264(nal, dur, keyframe)).await {
+        Ok(r) => r,
+        Err(_) => {
+            // Dropped H.264 leaves the decoder referencing frames it never got.
+            host.request_keyframe();
+            warn!("frame push exceeded {PUSH_BUDGET:?} — dropped, asked for a keyframe");
+            Ok(())
+        }
+    }
+}
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -472,7 +507,7 @@ async fn main() -> Result<()> {
                         if keyframe {
                             last_idr = std::time::Instant::now();
                         }
-                        if let Err(e) = host.push_h264(nal, per_frame, keyframe).await {
+                        if let Err(e) = push_bounded(&host, nal, per_frame, keyframe).await {
                             warn!("push h264: {e}");
                         } else {
                             frames_out += 1;
@@ -607,7 +642,8 @@ async fn main() -> Result<()> {
                         .elapsed()
                         .clamp(Duration::from_millis(1), Duration::from_millis(500));
                     last_push = std::time::Instant::now();
-                    if let Err(e) = host.push_h264(
+                    if let Err(e) = push_bounded(
+                        &host,
                         nal.clone(),
                         real_gap,
                         couchlink_proto::annex_b_is_keyframe(&nal),
