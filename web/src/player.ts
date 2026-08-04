@@ -44,6 +44,8 @@ export interface PlayerCallbacks {
 const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
 const MEDIA_RECOVER_DELAY_MS = 5000;
+/** 250Hz — matches the native client and keeps sampling off the display clock. */
+const PAD_POLL_MS = 4;
 
 function preferLegacyRtp(): boolean {
   if (typeof location === "undefined") return false;
@@ -261,7 +263,7 @@ export class CouchlinkPlayer {
     if (this.mediaRecoverTimer) clearTimeout(this.mediaRecoverTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.statsTimer) clearInterval(this.statsTimer);
-    if (this.padTimer) cancelAnimationFrame(this.padTimer);
+    if (this.padTimer) clearInterval(this.padTimer);
     this.connectTimer = null;
     this.sessionRetryTimer = null;
     this.mediaRecoverTimer = null;
@@ -276,7 +278,7 @@ export class CouchlinkPlayer {
 
   /** Drop WebRTC only; keep signaling socket if open. */
   private resetPeer() {
-    if (this.padTimer) cancelAnimationFrame(this.padTimer);
+    if (this.padTimer) clearInterval(this.padTimer);
     this.padTimer = null;
     this.padDc?.close();
     this.videoDc?.close();
@@ -576,14 +578,21 @@ export class CouchlinkPlayer {
     this.cb.onPresentPath?.("rtp", "WebCodecs fallback");
   }
 
+  /**
+   * Poll the pad on a timer, not requestAnimationFrame.
+   *
+   * rAF fires at the display refresh — 60Hz on most screens — so every input
+   * carried up to 16.7ms of quantisation before it even left the browser, while
+   * the native client polls at 250Hz. The Gamepad API has no rAF requirement;
+   * getGamepads() reads current state whenever it is called.
+   *
+   * rAF also stops entirely when the tab is backgrounded, which silently killed
+   * input the moment the player alt-tabbed.
+   */
   private startPadLoop() {
     this.padWindowStart = performance.now();
     this.padSent = 0;
-    const tick = () => {
-      this.padTimer = requestAnimationFrame(tick);
-      this.pollAndSendPad();
-    };
-    this.padTimer = requestAnimationFrame(tick);
+    this.padTimer = window.setInterval(() => this.pollAndSendPad(), PAD_POLL_MS);
   }
 
   private pollAndSendPad() {
