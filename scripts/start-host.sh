@@ -17,8 +17,15 @@ _KEEP_MESH_NEED_TURN="${COUCHLINK_MESH_NEED_TURN:-}"
 _KEEP_HS_URL="${COUCHLINK_HS_URL:-}"
 _KEEP_TS_AUTHKEY="${COUCHLINK_TS_AUTHKEY:-}"
 _KEEP_ICE_IPS="${COUCHLINK_ICE_IPS:-}"
+# `set -a` matters: .env.couchlink assigns without `export`, so without it the
+# settings stay shell-local. The host binary still looked correct because its
+# preset is passed as an argument, while ensure-win-capture.sh runs as a child
+# process, saw nothing, and fell back to its own 1080p60/60fps defaults — the
+# viewer got 1080p60 at 18Mbps while every log here said 720p60.
 # shellcheck disable=SC1091
+set -a
 [[ -f "$ROOT/.env.couchlink" ]] && source "$ROOT/.env.couchlink"
+set +a
 [[ -n "$_KEEP_MODE" ]] && COUCHLINK_MODE="$_KEEP_MODE"
 [[ -n "$_KEEP_SIGNALING" ]] && COUCHLINK_SIGNALING="$_KEEP_SIGNALING"
 [[ -n "$_KEEP_INVITE_SIGNALING" ]] && COUCHLINK_INVITE_SIGNALING="$_KEEP_INVITE_SIGNALING"

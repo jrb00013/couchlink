@@ -88,7 +88,11 @@ fi
 
 [[ -f .env.couchlink ]] || cp .env.example .env.couchlink
 # shellcheck disable=SC1091
+# set -a: .env.couchlink assigns without `export`, and these settings have to
+# reach child scripts (ensure-win-capture.sh reads COUCHLINK_PRESET itself).
+set -a
 source .env.couchlink
+set +a
 
 if [[ "$ROLE" == "host" && ( -z "${COUCHLINK_SESSION_ID:-}" || -z "${COUCHLINK_PIN:-}" ) ]]; then
   couchlink_say "==> no session set — generating one"
