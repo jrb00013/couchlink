@@ -94,6 +94,27 @@ set -a
 source .env.couchlink
 set +a
 
+# Drop a persisted ICE address this machine no longer holds.
+#
+# COUCHLINK_ICE_IPS becomes webrtc's nat_1to1_ips, which *rewrites* every host
+# candidate to that address. A stale value therefore does not merely add a dead
+# candidate — it replaces the good ones, so every host candidate the player
+# receives points somewhere unreachable. Switching WSL from NAT to mirrored
+# networking retires the old eth0 IP and leaves exactly this trap behind: ICE
+# reaches `connected` on some other pair, then drops, and the viewer sits on
+# "video track" with no frames.
+if [[ -n "${COUCHLINK_ICE_IPS:-}" && "${COUCHLINK_ICE_IPS}" != */* ]]; then
+  _stale=""
+  for _ip in ${COUCHLINK_ICE_IPS//,/ }; do
+    ip -o addr show 2>/dev/null | grep -qF " ${_ip}/" || _stale="${_stale} ${_ip}"
+  done
+  if [[ -n "${_stale// /}" ]]; then
+    couchlink_say "==> dropping ICE address(es) this machine no longer holds:${_stale}"
+    unset COUCHLINK_ICE_IPS
+  fi
+  unset _stale _ip
+fi
+
 if [[ "$ROLE" == "host" && ( -z "${COUCHLINK_SESSION_ID:-}" || -z "${COUCHLINK_PIN:-}" ) ]]; then
   couchlink_say "==> no session set — generating one"
   eval "$(./scripts/gen_session.sh)"
