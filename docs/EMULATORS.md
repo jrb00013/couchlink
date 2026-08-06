@@ -51,6 +51,31 @@ DualSense uses the SDL handler, so the two never collide.
 The original file is saved once as `Default.yml.couchlink.bak`, and the edit is
 idempotent and scoped to the chosen player — Player 1 is never modified.
 
+### PCSX2
+
+The same script also binds PCSX2, but the mechanism differs: PCSX2 binds each
+button to a device token rather than naming a device, so the whole `[Pad2]`
+block is rewritten and `[InputSources] XInput` is switched on — without that
+source enabled PCSX2 never enumerates the virtual pad at all.
+
+| Variable | Purpose |
+|----------|---------|
+| `COUCHLINK_PCSX2_CONFIG` | Path to `inis/PCSX2.ini` |
+| `COUCHLINK_PCSX2_DEVICE` | Device token (default `XInput-0`) |
+
+Only the `xbox360` backend is wired. `ds4` and `winuhid` enumerate through SDL
+with an index that cannot be predicted without reading PCSX2's own device list,
+so those are left alone rather than bound to a guess.
+
+`[Pad1]` and every other section are preserved, the original is saved once as
+`PCSX2.ini.couchlink.bak`, and re-running reports `already bound`.
+
+**Unverified against a live install.** PCSX2 had never been launched on the
+development machine, so there was no `PCSX2.ini` to test against — the binding
+token names come from PCSX2's XInput source naming, and the block was exercised
+against a synthetic ini. If a button lands wrong, the fix is the token on the
+right-hand side of that binding.
+
 ## Linux host
 
 The virtual device appears as:
