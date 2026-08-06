@@ -48,6 +48,45 @@ If routing does need work, in order of leverage:
       a box near the host, so the relay is the destination rather than a detour.
 - [ ] Only then consider port forwarding for a direct IPv4 path.
 
+### 1.1 Make WireGuard the enforced default; cloudflared strictly last resort
+
+Tonight's sessions ran with `COUCHLINK_SKIP_MESH=1` for most of the debugging,
+which meant every restart fell straight to a `cloudflared` quick tunnel. That
+was expedient for isolating the WSL networking bugs, but it is not the shape
+this project wants running by default. `README.md:18` already states the
+intended order — Headscale, then Tailscale/WireGuard, then TURN, then
+cloudflared last — but tonight lived at the bottom of that list far more than
+it should have.
+
+Doesn't cost latency in any number we've measured — signaling is not the media
+path. **What it is costing is real though, and worth hating: a new random URL
+every restart, a third party sitting in your handshake,** and a dependency
+that has already broken the Noise handshake once tonight and had to be worked
+around. `scripts/enable-wireguard.sh` is already a direct, point-to-point
+tunnel (`wg0-host.conf`, no relay in the data path) — nobody in the middle at
+all, unlike Headscale (control-plane dependency) or cloudflared (full
+in-path third party). It's the right thing to prefer; it just isn't being
+reached for.
+
+- [ ] Stop reaching for `COUCHLINK_SKIP_MESH=1` as the everyday debugging
+      habit — it was necessary while chasing the networking-mode bugs, and
+      those are fixed now. Test the real default path going forward.
+- [ ] Confirm `run.sh`'s fallback order actually tries WireGuard *before*
+      falling to cloudflared, not just Headscale before cloudflared. Trace it
+      end to end — this was never explicitly verified tonight.
+- [ ] Once mirrored networking is confirmed stable, check whether Headscale's
+      own control-plane dependency is worth keeping ahead of WireGuard in that
+      order, or whether direct WireGuard should be tried first now that WSL
+      can hold real addresses.
+- [ ] `cloudflared` stays wired in, but strictly as the fallback for a host
+      with no usable direct path at all — never the everyday default.
+- [ ] **Predict:** stable invite URLs across restarts once WireGuard is
+      actually the live path; no third party in the handshake for the common
+      case.
+- [ ] **Refuted if:** WireGuard setup itself turns out to need the same
+      per-restart churn (new keys, new config) — then the win is smaller than
+      it looks and the real fix is making *that* stable instead.
+
 ---
 
 ## Part 2 — the topology-independent work (this is the real list)
