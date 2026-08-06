@@ -290,8 +290,8 @@ async fn main() -> Result<()> {
     let mut rate_window = std::time::Instant::now();
     let mut rate_mark: u64 = 0;
     let mut idle_frames: u64 = 0;
-    /// Frames the PUSH_BUDGET timeout dropped in the current window — the
-    /// direct, on-host signal that the peer (or the link to it) can't keep up.
+    // Frames the PUSH_BUDGET timeout dropped in the current window — the
+    // direct, on-host signal that the peer (or the link to it) can't keep up.
     let mut dropped_frames: u64 = 0;
     let (mut stage_capture, mut stage_scale, mut stage_encode, mut stage_push) =
         (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO);
@@ -559,25 +559,38 @@ async fn main() -> Result<()> {
                         if keyframe {
                             last_idr = std::time::Instant::now();
                         }
-                        if let Err(e) = push_bounded(&host, nal, per_frame, keyframe).await {
-                            warn!("push h264: {e}");
-                        } else {
+                        match push_bounded(&host, nal, per_frame, keyframe).await {
+                            Err(e) => warn!("push h264: {e}"),
+                            Ok(true) => dropped_frames += 1,
+                            Ok(false) => {
                             frames_out += 1;
                             stage_capture += ms_capture;
                             if rate_window.elapsed() >= Duration::from_secs(5) {
                                 let window_frames = frames_out - rate_mark;
                                 let fps =
                                     window_frames as f64 / rate_window.elapsed().as_secs_f64();
-                                info!(
-                                    "streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
-                                     | per frame: relay {:.1}ms",
+                                let sent = window_frames + dropped_frames;
+                                let drop_pct = if sent > 0 { dropped_frames * 100 / sent } else { 0 };
+                                eprintln!(
+                                    "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
+                                     | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",
+                                    if dropped_frames == 0 {
+                                        "link keeping up".to_string()
+                                    } else {
+                                        format!(
+                                            "bottleneck: peer/network can't consume at {:.0} Mbps",
+                                            preset.bitrate_kbps as f64 / 1000.0
+                                        )
+                                    },
                                     (stage_capture / window_frames.max(1) as u32).as_secs_f64()
                                         * 1000.0
                                 );
                                 rate_window = std::time::Instant::now();
                                 rate_mark = frames_out;
                                 idle_frames = 0;
+                                dropped_frames = 0;
                                 stage_capture = Duration::ZERO;
+                            }
                             }
                         }
                         }
@@ -694,15 +707,16 @@ async fn main() -> Result<()> {
                         .elapsed()
                         .clamp(Duration::from_millis(1), Duration::from_millis(500));
                     last_push = std::time::Instant::now();
-                    if let Err(e) = push_bounded(
+                    match push_bounded(
                         &host,
                         nal.clone(),
                         real_gap,
                         couchlink_proto::annex_b_is_keyframe(&nal),
                     )
                     .await {
-                        warn!("push h264: {e}");
-                    } else {
+                        Err(e) => warn!("push h264: {e}"),
+                        Ok(true) => dropped_frames += 1,
+                        Ok(false) => {
                         frames_out += 1;
                         stage_capture += ms_capture;
                         stage_scale += ms_scale;
@@ -721,12 +735,23 @@ async fn main() -> Result<()> {
                                 0
                             };
                             let per = window_frames.max(1) as u32;
-                            info!(
-                                "streaming {fps:.1} fps ({frames_out} frames total, {idle_pct}% skipped as static)                                  | per frame: capture {:.1}ms scale {:.1}ms encode {:.1}ms push {:.1}ms",
+                            let sent = window_frames + dropped_frames;
+                            let drop_pct = if sent > 0 { dropped_frames * 100 / sent } else { 0 };
+                            let stages: [(&str, Duration); 4] = [
+                                ("capture", stage_capture / per),
+                                ("scale", stage_scale / per),
+                                ("encode", stage_encode / per),
+                                ("push", stage_push / per),
+                            ];
+                            eprintln!(
+                                "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, {idle_pct}% skipped as static) \
+                                 | per frame: capture {:.1}ms scale {:.1}ms encode {:.1}ms push {:.1}ms \
+                                 | dropped {dropped_frames}/{sent} ({drop_pct}%) | bottleneck: {}",
                                 (stage_capture / per).as_secs_f64() * 1000.0,
                                 (stage_scale / per).as_secs_f64() * 1000.0,
                                 (stage_encode / per).as_secs_f64() * 1000.0,
                                 (stage_push / per).as_secs_f64() * 1000.0,
+                                dominant_stage(&stages),
                             );
                             stage_capture = Duration::ZERO;
                             stage_scale = Duration::ZERO;
@@ -735,6 +760,8 @@ async fn main() -> Result<()> {
                             rate_window = std::time::Instant::now();
                             rate_mark = frames_out;
                             idle_frames = 0;
+                            dropped_frames = 0;
+                        }
                         }
                     }
                 }
