@@ -31,13 +31,25 @@ fi
 
 connect="${COUCHLINK_WIN_CAPTURE_CONNECT:-}"
 if [[ -z "$connect" ]]; then
-  # Prefer the WSL eth0 address. Windows 127.0.0.1:9876 often hits a stuck
-  # wslrelay half-connection and never reaches the Linux listener.
-  wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  if [[ -n "$wsl_ip" ]]; then
-    connect="${wsl_ip}:9876"
-  else
+  # Which address Windows should dial depends on the WSL networking mode.
+  #
+  # NAT mode: WSL has its own private eth0 and 127.0.0.1 on the Windows side
+  # often hits a stuck wslrelay half-connection, so dial the eth0 address.
+  #
+  # Mirrored mode: the two share a network stack, so loopback is correct — and
+  # `hostname -I` is actively wrong there. It returns whichever of a dozen
+  # addresses sorts first, which was 10.66.0.1 (a WireGuard interface) — not
+  # routable from Windows. win-capture then never connected, the host blocked
+  # forever on its first frame, and the player saw only "waiting for host".
+  if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 [23]'; then
     connect="127.0.0.1:9876"
+  else
+    wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [[ -n "$wsl_ip" ]]; then
+      connect="${wsl_ip}:9876"
+    else
+      connect="127.0.0.1:9876"
+    fi
   fi
 fi
 # Send frames at the stream resolution: the WSL virtual NIC, not the encoder,

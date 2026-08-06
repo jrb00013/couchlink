@@ -99,6 +99,27 @@ if [[ "$TURN_EXTERNAL_IP" != "$PUBLIC_IP" && "$PUBLIC_IP" != "bore.pub" ]]; then
   echo "external-ip=$PUBLIC_IP" >> "$RUNTIME_CONF"
 fi
 
+# Bind the address we advertise.
+#
+# With no `listening-ip`, this coturn build enumerated IPv4 only — zero IPv6
+# sockets even when the machine held a global IPv6. The invite still named that
+# address, so a friend behind a strict NAT allocated against a relay that was
+# not listening, gathered no `typ relay` candidate, and failed ICE. Naming an
+# address we do not bind is the whole bug class; bind it explicitly.
+#
+# Listing any listening-ip disables coturn's listen-on-everything default, so
+# loopback and the LAN IPv4 have to be named too or the direct path breaks.
+if [[ "$TURN_EXTERNAL_IP" == *:* ]] && ip -6 addr show scope global 2>/dev/null \
+     | grep -qiF "$TURN_EXTERNAL_IP"; then
+  {
+    echo "listening-ip=$TURN_EXTERNAL_IP"
+    echo "listening-ip=127.0.0.1"
+    lan4="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}')"
+    [[ -n "$lan4" ]] && echo "listening-ip=$lan4"
+  } >> "$RUNTIME_CONF"
+  echo "==> TURN binding $TURN_EXTERNAL_IP (advertised address)"
+fi
+
 # Best-effort only — Windows prep / manual forward if the router blocks UPnP.
 if [[ "${COUCHLINK_SKIP_UPNP:-}" != "1" ]]; then
   upnp_open 3478 udp "turn" || true
