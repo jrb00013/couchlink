@@ -41,11 +41,62 @@ HOST_IP="${COUCHLINK_WG_HOST_IP:-10.66.0.1}"
 PLAYER_IP="${COUCHLINK_WG_PLAYER_IP:-10.66.0.2}"
 LISTEN_PORT="${COUCHLINK_WG_LISTEN_PORT:-51820}"
 
-ENDPOINT_HOST="${COUCHLINK_PUBLIC_IP:-}"
+# Endpoint the friend dials. Order matters — this is the difference between a
+# tunnel that handshakes and one that silently never does.
+#
+# 1. COUCHLINK_WG_ENDPOINT — explicit override, always wins.
+# 2. A global IPv6 this machine actually holds. Preferred because it needs no
+#    port forward: the address is ours end-to-end, and UDP reaches it directly.
+#    Under WSL this only became possible with mirrored networking — in NAT mode
+#    WSL had no IPv6 at all, and `netsh portproxy` is TCP-only, so inbound UDP
+#    could never reach WireGuard however the firewall was configured.
+# 3. The IPv4 WAN address, which requires a router forward of UDP 51820. This
+#    was the old default and is why the generated config never handshaked here.
+ENDPOINT_HOST="${COUCHLINK_WG_ENDPOINT:-${COUCHLINK_PUBLIC_IP:-}}"
+if [[ -z "$ENDPOINT_HOST" ]]; then
+  # Reuse the address the rest of couchlink already calls "the" public IPv6, so
+  # WireGuard and TURN agree. Divergence here would be invisible until one of
+  # them worked and the other did not.
+  if [[ -f "$ROOT/scripts/lib-platform.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$ROOT/scripts/lib-platform.sh" 2>/dev/null || true
+    # shellcheck disable=SC1091
+    source "$ROOT/scripts/lib-online-tunnel.sh" 2>/dev/null || true
+    if declare -f couchlink_read_public_ipv6 >/dev/null 2>&1; then
+      ENDPOINT_HOST="$(couchlink_read_public_ipv6 2>/dev/null || true)"
+    fi
+  fi
+fi
+if [[ -z "$ENDPOINT_HOST" ]]; then
+  # Fallback scan. Skip ULAs (not routable off-link) and `deprecated` addresses
+  # — those are rotating privacy addresses, and baking one into a config the
+  # friend keeps means a tunnel that works today and silently dies later.
+  while read -r _addr _flags; do
+    case "$_addr" in
+      fd*|fc*) continue ;;
+    esac
+    case "$_flags" in
+      *deprecated*) continue ;;
+    esac
+    ENDPOINT_HOST="$_addr"
+    break
+  done < <(ip -6 addr show scope global 2>/dev/null \
+    | awk '/inet6/ {addr=$2; sub(/\/.*/,"",addr); $1=""; $2=""; print addr, $0}')
+  unset _addr _flags
+fi
 if [[ -z "$ENDPOINT_HOST" ]]; then
   ENDPOINT_HOST="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+  [[ -n "$ENDPOINT_HOST" ]] && \
+    echo "==> WARNING: no global IPv6 — endpoint falls back to IPv4 ${ENDPOINT_HOST}," >&2 && \
+    echo "    which needs UDP ${COUCHLINK_WG_LISTEN_PORT:-51820} forwarded at the router." >&2
 fi
 ENDPOINT_HOST="${ENDPOINT_HOST:-HOST_PUBLIC_IP}"
+
+# IPv6 literals must be bracketed in an Endpoint or wg-quick will not parse it.
+ENDPOINT_LITERAL="$ENDPOINT_HOST"
+case "$ENDPOINT_HOST" in
+  *:*) ENDPOINT_LITERAL="[${ENDPOINT_HOST}]" ;;
+esac
 
 mkdir -p "$KEYS"
 chmod 700 "$KEYS"
@@ -87,7 +138,7 @@ PrivateKey = ${PLAYER_PRIV}
 
 [Peer]
 PublicKey = ${HOST_PUB}
-Endpoint = ${ENDPOINT_HOST}:${LISTEN_PORT}
+Endpoint = ${ENDPOINT_LITERAL}:${LISTEN_PORT}
 AllowedIPs = ${HOST_IP}/32
 PersistentKeepalive = 25
 EOF
@@ -95,7 +146,7 @@ EOF
 chmod 600 "$WG_DIR/wg0-host.conf" "$WG_DIR/wg0-player.conf"
 
 echo "==> wrote $WG_DIR/wg0-host.conf"
-echo "==> wrote $WG_DIR/wg0-player.conf (Endpoint ${ENDPOINT_HOST}:${LISTEN_PORT})"
+echo "==> wrote $WG_DIR/wg0-player.conf (Endpoint ${ENDPOINT_LITERAL}:${LISTEN_PORT})"
 echo ""
 echo "Next (host):"
 echo "  1) Allow UDP ${LISTEN_PORT} inbound (router forward / firewall), or use Tailscale instead"
