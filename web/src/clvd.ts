@@ -24,6 +24,11 @@ export type VideoFragment = {
   payload: Uint8Array;
 };
 
+/** Bytes at the front of the parity fragment's payload: last data fragment's length. */
+const FEC_LEN_PREFIX = 2;
+/** Must match `VIDEO_MAX_FRAGMENT_PAYLOAD` in crates/proto/src/video_frame.rs. */
+export const VIDEO_MAX_FRAGMENT_PAYLOAD = 14_000;
+
 export function decodeClvdFragment(
   buf: ArrayBuffer | ArrayBufferView
 ): VideoFragment | null {
@@ -42,7 +47,9 @@ export function decodeClvdFragment(
   const seq = view.getUint32(10, true);
   const fragIdx = view.getUint16(14, true);
   const fragCount = view.getUint16(16, true);
-  if (fragCount === 0 || fragIdx >= fragCount) return null;
+  // fragIdx === fragCount is legal — it marks the FEC parity fragment, one
+  // slot past the last data index. Only fragIdx > fragCount is malformed.
+  if (fragCount === 0 || fragIdx > fragCount) return null;
   return {
     seq,
     width,
@@ -54,7 +61,46 @@ export function decodeClvdFragment(
   };
 }
 
-/** Reassemble unordered CLVD fragments into a full access unit. */
+/**
+ * Reconstruct the fragment at `missing` from the rest plus parity.
+ *
+ * Mirrors `recover_fragment` in crates/proto/src/video_frame.rs — keep them
+ * in lockstep, the wire format is shared. XOR-ing every present fragment
+ * (zero-padded to VIDEO_MAX_FRAGMENT_PAYLOAD) against the parity XOR leaves
+ * exactly the missing fragment, padded the same way; only the last fragment
+ * in an access unit can be short, so its length travels in the parity payload.
+ */
+function recoverFragment(
+  parts: (Uint8Array | null)[],
+  missing: number,
+  parity: Uint8Array | null
+): Uint8Array | null {
+  if (!parity || parity.byteLength < FEC_LEN_PREFIX + VIDEO_MAX_FRAGMENT_PAYLOAD) {
+    return null;
+  }
+  const lastLen = parity[0] | (parity[1] << 8);
+  const acc = new Uint8Array(VIDEO_MAX_FRAGMENT_PAYLOAD);
+  for (let i = 0; i < acc.length; i++) acc[i] = parity[FEC_LEN_PREFIX + i];
+  for (let i = 0; i < parts.length; i++) {
+    if (i === missing) continue;
+    const p = parts[i];
+    if (!p) return null;
+    for (let j = 0; j < p.length; j++) acc[j] ^= p[j];
+  }
+  const wantLen = missing + 1 === parts.length ? lastLen : VIDEO_MAX_FRAGMENT_PAYLOAD;
+  if (wantLen > acc.length) return null;
+  return acc.subarray(0, wantLen);
+}
+
+/**
+ * Reassemble unordered CLVD fragments into a full access unit.
+ *
+ * Recovers one missing data fragment via XOR parity when the host sent one
+ * (see `encode_fragments_with_fec` in crates/proto/src/video_frame.rs) — a
+ * dropped fragment on this unordered, unreliable channel otherwise costs a
+ * full keyframe round trip. Two or more losses in one access unit still need
+ * that keyframe; this only removes it as the response to a single loss.
+ */
 export class ClvdAssembler {
   private seq: number | null = null;
   private width = 0;
@@ -62,6 +108,7 @@ export class ClvdAssembler {
   private keyframe = false;
   private fragCount = 0;
   private parts: (Uint8Array | null)[] = [];
+  private parity: Uint8Array | null = null;
 
   push(frag: VideoFragment): VideoAccessUnit | null {
     if (this.seq !== frag.seq) {
@@ -71,12 +118,28 @@ export class ClvdAssembler {
       this.keyframe = frag.keyframe;
       this.fragCount = frag.fragCount;
       this.parts = Array.from({ length: frag.fragCount }, () => null);
+      this.parity = null;
     }
-    if (frag.fragCount !== this.fragCount || frag.fragIdx >= this.parts.length) {
+    if (frag.fragCount !== this.fragCount) return null;
+    if (frag.fragIdx === frag.fragCount) {
+      this.parity = frag.payload;
+    } else if (frag.fragIdx < this.parts.length) {
+      this.parts[frag.fragIdx] = frag.payload;
+    } else {
       return null;
     }
-    this.parts[frag.fragIdx] = frag.payload;
-    if (this.parts.some((p) => p === null)) return null;
+
+    const missing: number[] = [];
+    for (let i = 0; i < this.parts.length; i++) {
+      if (this.parts[i] === null) missing.push(i);
+    }
+    if (missing.length === 1) {
+      const recovered = recoverFragment(this.parts, missing[0], this.parity);
+      if (!recovered) return null;
+      this.parts[missing[0]] = recovered;
+    } else if (missing.length > 1) {
+      return null;
+    }
 
     let total = 0;
     for (const p of this.parts) total += p!.byteLength;
@@ -95,6 +158,7 @@ export class ClvdAssembler {
     };
     this.seq = null;
     this.parts = [];
+    this.parity = null;
     return au;
   }
 }
