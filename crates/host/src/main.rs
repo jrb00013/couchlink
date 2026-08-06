@@ -41,21 +41,49 @@ const PUSH_BUDGET: Duration = Duration::from_millis(50);
 /// Guarding the individual awaits is whack-a-mole — the invariant is that
 /// nothing here may block indefinitely, so the budget is enforced at the edge
 /// and covers any await added inside later.
+/// `Ok(true)` means the frame was dropped by the budget, not sent.
+///
+/// The caller must not count a dropped frame as delivered — this used to
+/// return `Ok(())` on both a real send and a timeout indistinguishably, so
+/// the periodic fps/stage diagnostics silently over-counted during exactly
+/// the congestion they exist to reveal.
 async fn push_bounded(
     host: &webrtc_peer::WebRtcHost,
     nal: Vec<u8>,
     dur: Duration,
     keyframe: bool,
-) -> Result<()> {
+) -> Result<bool> {
     match tokio::time::timeout(PUSH_BUDGET, host.push_h264(nal, dur, keyframe)).await {
-        Ok(r) => r,
+        Ok(r) => r.map(|()| false),
         Err(_) => {
             // Dropped H.264 leaves the decoder referencing frames it never got.
             host.request_keyframe();
             warn!("frame push exceeded {PUSH_BUDGET:?} — dropped, asked for a keyframe");
-            Ok(())
+            Ok(true)
         }
     }
+}
+
+/// One stage's share of a frame's total processing time, for naming the
+/// current bottleneck rather than leaving the reader to eyeball four numbers.
+fn dominant_stage(stages: &[(&str, Duration)]) -> &'static str {
+    stages
+        .iter()
+        .max_by_key(|(_, d)| *d)
+        .map(|(name, _)| match *name {
+            "capture" => "capture (Windows→WSL handoff)",
+            "scale" => "scale (BGRA resize)",
+            "encode" => "encode (H.264)",
+            "push" => "push (network send)",
+            other => {
+                // New stage names must be taught here explicitly rather than
+                // silently falling through to a placeholder — a bottleneck
+                // label that doesn't say what it means is worse than none.
+                debug_assert!(false, "dominant_stage: unlabelled stage {other:?}");
+                "unknown"
+            }
+        })
+        .unwrap_or("none")
 }
 
 
@@ -121,6 +149,26 @@ async fn main() -> Result<()> {
         }),
         _ => None,
     };
+    // Ship the friend's WireGuard config inside the link when one exists, so a
+    // direct tunnel needs no out-of-band file transfer. Opt out with
+    // COUCHLINK_INVITE_WG=0 — the config is credential-bearing, and a host that
+    // pastes join links into a group chat may not want it embedded.
+    let wg_conf = if std::env::var("COUCHLINK_INVITE_WG").as_deref() == Ok("0") {
+        None
+    } else {
+        std::env::var("COUCHLINK_ROOT")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|e| e.parent()?.parent()?.parent().map(|p| p.to_path_buf()))
+            })
+            .map(|root| root.join("infra/wireguard/wg0-player.conf"))
+            .filter(|p| p.is_file())
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .filter(|c| c.contains("[Peer]") && c.contains("Endpoint"))
+    };
     let join = invite::player_invite_url(
         &public_http,
         &args.session_id,
@@ -129,6 +177,7 @@ async fn main() -> Result<()> {
         turn,
         mesh.as_deref(),
         headscale,
+        wg_conf.as_deref(),
     );
     // Always surface the invite — this is what the friend needs.
     println!("friend join URL:\n{join}");
@@ -241,6 +290,9 @@ async fn main() -> Result<()> {
     let mut rate_window = std::time::Instant::now();
     let mut rate_mark: u64 = 0;
     let mut idle_frames: u64 = 0;
+    /// Frames the PUSH_BUDGET timeout dropped in the current window — the
+    /// direct, on-host signal that the peer (or the link to it) can't keep up.
+    let mut dropped_frames: u64 = 0;
     let (mut stage_capture, mut stage_scale, mut stage_encode, mut stage_push) =
         (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO);
     let mut force_idr = true;
