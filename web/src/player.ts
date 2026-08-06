@@ -78,6 +78,8 @@ export class CouchlinkPlayer {
   private padInfoSent = "";
   /** Last logged media-path summary, so the line prints only on change. */
   private lastPathKey = "";
+  /** Last present path reported to the host, so it is sent only on change. */
+  private presentPathSent: PresentPath | "" = "";
   private turn: { url: string; user: string; pass: string } | null = null;
   private gotVideoTrack = false;
   private lastOfferEpoch = 0;
@@ -174,6 +176,24 @@ export class CouchlinkPlayer {
     clog("disconnect()");
     this.cleanup();
     this.cb.onState("disconnected");
+  }
+
+  /**
+   * Report the present path to the UI, and to the host over signaling.
+   *
+   * Before this the host wrote every frame to RTP *and* the DataChannel,
+   * because it had no way to know which one the browser paints — double the
+   * per-frame send work, and two streams competing inside one congestion
+   * controller. Sent only on change, and only once the socket is open; a path
+   * decided before `register_player` completes is reported as soon as it can be.
+   */
+  private notifyPresentPath(path: PresentPath, detail?: string) {
+    this.cb.onPresentPath?.(path, detail);
+    if (this.presentPathSent === path) return;
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.presentPathSent = path;
+    send(this.ws, { type: "present_path", path });
+    clog("signal → present_path", path);
   }
 
   private sendRegister(ws: WebSocket) {
@@ -513,7 +533,7 @@ export class CouchlinkPlayer {
         this.cb.onVideo(stream);
         return;
       }
-      this.cb.onPresentPath?.("rtp");
+      this.notifyPresentPath("rtp");
       this.cb.onVideo(stream);
     };
 
@@ -567,7 +587,7 @@ export class CouchlinkPlayer {
       });
       if (useWc) {
         this.webcodecsPath = true;
-        this.cb.onPresentPath?.(
+        this.notifyPresentPath(
           "webcodecs",
           "CLVD DataChannel + WebCodecs (no RTP jitter buffer)"
         );
@@ -584,7 +604,7 @@ export class CouchlinkPlayer {
             hasDecoder: typeof VideoDecoder === "function",
           }
         );
-        this.cb.onPresentPath?.(
+        this.notifyPresentPath(
           "rtp",
           window.isSecureContext
             ? "WebCodecs missing"
@@ -620,7 +640,7 @@ export class CouchlinkPlayer {
   /** Stop preferring CLVD/WebCodecs — UI is switching to the RTP present path. */
   preferRtpPresent() {
     this.webcodecsPath = false;
-    this.cb.onPresentPath?.("rtp", "WebCodecs fallback");
+    this.notifyPresentPath("rtp", "WebCodecs fallback");
   }
 
   /**

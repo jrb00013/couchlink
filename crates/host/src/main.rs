@@ -449,6 +449,9 @@ async fn main() -> Result<()> {
                             });
                         }
                     }
+                    Some(SignalMessage::PresentPath { path }) => {
+                        host.set_present_path(&path);
+                    }
                     Some(SignalMessage::Heartbeat) => {
                         let _ = signal_out.send(SignalMessage::Pong);
                     }

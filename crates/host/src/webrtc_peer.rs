@@ -7,7 +7,7 @@ use couchlink_proto::{
     PadFeedback, PadFrame, SignalMessage, VideoAccessUnit, PAD_CHANNEL, VIDEO_CHANNEL,
 };
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -98,6 +98,43 @@ pub struct WebRtcHost {
     offer_epoch: Arc<AtomicU64>,
     /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
     keyframe_wanted: Arc<AtomicBool>,
+    /// Which path the viewer is actually painting from (`PATH_*` below).
+    ///
+    /// Before this, every frame was written to RTP *and* the DataChannel
+    /// because the host had no way to know which one the browser used —
+    /// double the per-frame send work, and two streams competing inside one
+    /// congestion controller. Chrome paints the DataChannel; Safari has no
+    /// WebCodecs here and falls back to RTP. Until the client reports in,
+    /// default to sending both so nobody goes black during that window.
+    present_path: Arc<AtomicU8>,
+}
+
+/// `present_path` has not been reported yet — send both paths.
+const PATH_UNKNOWN: u8 = 0;
+/// Client is painting from the CLVD DataChannel — RTP is unnecessary.
+const PATH_WEBCODECS: u8 = 1;
+/// Client is painting from the RTP media track — the DataChannel is unnecessary.
+const PATH_RTP: u8 = 2;
+
+/// Which of (RTP, DataChannel) to write for a given `present_path` state.
+///
+/// Utilisation on the measured online path is ~0.29, so skipping a path was
+/// never about saving bandwidth — the cost was two streams competing inside
+/// one congestion controller, converting self-inflicted contention into the
+/// jitter the receiver then buffers as delay. `PATH_UNKNOWN` sends both: a
+/// viewer that hasn't reported in yet must not go black while we guess.
+fn path_flags(path: u8) -> (bool, bool) {
+    (path != PATH_WEBCODECS, path != PATH_RTP)
+}
+
+/// Parse a client-reported present path. An unrecognised value maps to
+/// `PATH_UNKNOWN` — a typo here must never be the reason a viewer goes black.
+fn parse_present_path(path: &str) -> u8 {
+    match path {
+        "webcodecs" => PATH_WEBCODECS,
+        "rtp" => PATH_RTP,
+        _ => PATH_UNKNOWN,
+    }
 }
 
 impl WebRtcHost {
@@ -110,6 +147,16 @@ impl WebRtcHost {
 
     pub fn take_keyframe_request(&self) -> bool {
         self.keyframe_wanted.swap(false, Ordering::Relaxed)
+    }
+
+    /// Record which path the viewer just reported painting from.
+    ///
+    /// An unrecognised value is treated as unknown (send both) rather than
+    /// silently picking a side — a typo here must never be the reason a
+    /// viewer goes black.
+    pub fn set_present_path(&self, path: &str) {
+        self.present_path
+            .store(parse_present_path(path), Ordering::Relaxed);
     }
 
     /// True when the video DataChannel has more queued than we are willing to wait on.
@@ -292,6 +339,7 @@ impl WebRtcHost {
                 pad_dc,
                 offer_epoch,
                 keyframe_wanted,
+                present_path: Arc::new(AtomicU8::new(PATH_UNKNOWN)),
             },
             pad_rx,
         ))
@@ -380,34 +428,40 @@ impl WebRtcHost {
         use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
         use rtp::extension::HeaderExtension;
 
-        // RTP first. It is the only path every browser can decode: Safari has no
-        // WebCodecs here, so it falls back to the media track and nothing else.
-        // Sending the DataChannel first meant a slow CLVD send could burn the
-        // whole per-frame budget and the RTP write never happened — the Safari
-        // viewer stayed black while a Chrome viewer on the same host was fine,
-        // because Chrome was being fed by the very channel that starved it.
+        let (send_rtp, send_dc) = path_flags(self.present_path.load(Ordering::Relaxed));
+
+        // RTP first when sent at all. It is the only path every browser can
+        // decode: Safari has no WebCodecs here, so it falls back to the media
+        // track and nothing else. Sending the DataChannel first meant a slow
+        // CLVD send could burn the whole per-frame budget and the RTP write
+        // never happened — the Safari viewer stayed black while a Chrome
+        // viewer on the same host was fine, because Chrome was being fed by
+        // the very channel that starved it.
         //
         // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
         // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
-        let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
-        self.video
-            .sample_writer()
-            .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
-                min_delay, max_delay,
-            )))
-            .write_sample(&Sample {
-                data: Bytes::from(annex_b.clone()),
-                duration,
-                ..Default::default()
-            })
-            .await?;
+        if send_rtp {
+            let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
+            self.video
+                .sample_writer()
+                .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
+                    min_delay, max_delay,
+                )))
+                .write_sample(&Sample {
+                    data: Bytes::from(annex_b.clone()),
+                    duration,
+                    ..Default::default()
+                })
+                .await?;
+        }
 
         // Accelerated path, second: browser WebCodecs paints without waiting on
         // the RTP jitter buffer. Native clients and Safari ignore this channel.
         // A keyframe is never shed — dropping it was a death spiral: skip, ask
         // for an IDR, then skip the IDR too because it is the largest frame of
         // all, and the viewer's canvas froze while RTP kept decoding beside it.
-        if self.video_dc.ready_state()
+        if send_dc
+            && self.video_dc.ready_state()
             == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
             && (keyframe || !self.video_dc_congested().await)
         {
@@ -597,5 +651,35 @@ mod controller_host_tests {
         let mut pad = VirtualPad::create_noop(VirtualPadConfig::default());
         let err = apply_pad_bytes(&mut pad, &[0; 31]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn unknown_path_sends_both_so_nobody_goes_black_while_unreported() {
+        assert_eq!(path_flags(PATH_UNKNOWN), (true, true));
+    }
+
+    #[test]
+    fn webcodecs_path_skips_rtp_only() {
+        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
+    }
+
+    #[test]
+    fn rtp_path_skips_datachannel_only() {
+        assert_eq!(path_flags(PATH_RTP), (true, false));
+    }
+
+    #[test]
+    fn parse_present_path_recognises_both_values() {
+        assert_eq!(parse_present_path("webcodecs"), PATH_WEBCODECS);
+        assert_eq!(parse_present_path("rtp"), PATH_RTP);
+    }
+
+    #[test]
+    fn parse_present_path_treats_garbage_as_unknown_not_a_guess() {
+        // A typo or a future unrecognised value must fall back to "send both",
+        // not silently pick a side — the one failure mode this exists to
+        // prevent is a viewer going black because we guessed wrong.
+        assert_eq!(parse_present_path("not-a-real-path"), PATH_UNKNOWN);
+        assert_eq!(parse_present_path(""), PATH_UNKNOWN);
     }
 }

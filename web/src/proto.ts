@@ -36,6 +36,9 @@ export type SignalMessage =
    * the virtual device and emulator binding. The Gamepad API normalises input,
    * so the host cannot tell an Xbox pad from a DualSense without being told. */
   | { type: "pad_info"; kind: string; id: string }
+  /** Player → host: which video path it is actually presenting from, so the
+   * host can stop writing the path nobody is painting from. */
+  | { type: "present_path"; path: "webcodecs" | "rtp" }
   | {
       type: "stream_info";
       width: number;
