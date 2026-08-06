@@ -97,80 +97,133 @@ regardless of which of the three routes the triage found.
 
 Ordered by expected gain per unit of risk.
 
-### 2.1 Spend the spare bandwidth on FEC
+### 2.1 Spend the spare bandwidth on FEC — implemented, awaiting measurement
 
-**The observation nobody has used yet:** utilisation is **0.29**. Roughly 70% of
-the uplink is sitting idle while the pipeline pays latency for reliability.
+**Status: built and tested on `perf/clvd-fec-single-loss-recovery`, PR #17.
+Not yet measured against a live friend — the mechanism is proven, whether it's
+worth turning on isn't.**
 
-Every lost packet currently costs either a retransmission (a full round trip —
-~30 ms on the measured path) or a corrupted frame that waits for the next
-keyframe. Both are latency events caused by *loss*, not by bandwidth.
+**The observation nobody had used yet:** utilisation is **0.29**. Roughly 70%
+of the uplink sits idle while the pipeline pays latency for reliability. A
+dropped fragment on the unordered, unreliable CLVD channel cost a full
+keyframe request — a multi-frame stall for the round trip plus the next IDR.
 
-Forward error correction inverts that trade: send redundancy up front, and
-recover small losses **without any round trip at all**. It costs bandwidth we
-demonstrably have, to buy latency we demonstrably lack.
+Implemented: `encode_fragments_with_fec()`
+(`crates/proto/src/video_frame.rs`) appends one XOR-parity fragment per
+multi-fragment access unit — `frag_idx == frag_count`, one slot past the last
+data index. Any single missing data fragment reconstructs as `XOR of the
+rest, XOR parity`, no round trip. Two or more losses in one access unit still
+fall through to the existing keyframe path. Ported to the client
+(`web/src/clvd.ts`, `ClvdAssembler`). Wire-compatible: an assembler that
+predates this treats the extra index as out of range and ignores it — no
+protocol negotiation needed, the fragment is simply inert on old code.
+
+Gated behind `COUCHLINK_FEC=1`, **default off** — enabling this without a
+measured loss rate spends bandwidth on a problem that may not exist. Every
+recovery path is unit-tested (8 new Rust tests, 6 mirrored TS tests): every
+single-fragment-loss index including the variable-length last fragment, the
+two-loss case provably never fabricating output, and single-fragment access
+units correctly skipping parity (nothing to XOR against). Runtime-verified
+that the wiring itself doesn't panic (`WebRtcHost::new()` runs at host
+startup, before any player joins) — that's boot safety, not end-to-end proof.
 
 - [ ] Measure loss rate on the media path first (`packetsLost` in the same
       `getStats()` we already poll).
-- [ ] If loss > ~0.1%, add FEC to the CLVD path sized to cover it.
+- [ ] If loss > ~0.1%, `COUCHLINK_FEC=1` and compare against the same session
+      without it.
 - [ ] **Predict:** p95 falls sharply, p50 barely moves — FEC removes tail
-      events, not steady-state delay.
+      events, not steady-state delay. Fewer/no `frame push exceeded 50ms`
+      events triggered by keyframe stalls.
 - [ ] **Refuted if:** loss is ~0. Then retransmission is never triggered and
-      FEC is pure overhead. *Check before building.*
+      FEC is pure overhead — leave `COUCHLINK_FEC` unset.
 
-### 2.2 Kill the keyframe spike (periodic intra-refresh)
+### 2.2 Kill the keyframe spike (periodic intra-refresh) — refuted as scoped
 
-A full IDR is many times the size of a P-frame. On a paced link that burst is a
-queueing event: it delays itself and everything behind it, and it recurs every
-IDR interval. Worse, our own congestion guard *asks* for IDRs when things get
-tight, which is exactly when the pipe can least afford one.
+**Checked, not built.** Searched the vendored `windows` crate's Media
+Foundation bindings (`crates/capture-bridge/src/mf_encoder.rs` already uses
+`ICodecAPI`) for an intra-refresh control GUID. None exists in that surface —
+Media Foundation's generic `ICodecAPI` doesn't expose a standard
+`CODECAPI_AVEncVideoIntraRefreshMode`-equivalent; that capability lives in
+vendor-specific NVENC/AMF/QuickSync APIs, not the generic MF wrapper this
+code goes through.
 
-Intra-refresh replaces the periodic spike with a rolling band of intra-coded
-macroblocks spread across many frames. Same recovery property, no burst.
-Standard practice in game streaming for exactly this reason.
+- [ ] If ever revisited: bind the vendor API directly (NVENC on the dev
+      machine's RTX 5080) rather than through MF's generic surface. Real scope
+      increase — separate FFI surface, hardware-specific — not a quick add.
+- **Refuted:** the generic MF path this codebase uses cannot do this. Recorded
+  so nobody re-searches the same GUID list and reaches the same dead end.
 
-- [ ] Check whether the Windows GPU encoder exposes intra-refresh.
-- [ ] If so, switch from IDR-on-interval to rolling refresh.
-- [ ] **Predict:** bitrate variance collapses; p95 improves; periodic hitches
-      every IDR interval disappear.
-- [ ] **Refuted if:** the encoder has no intra-refresh mode — then fall back to
-      capping IDR size or lengthening the interval.
+### 2.3 Send slices, not whole frames — API confirmed, build blocked here
 
-### 2.3 Send slices, not whole frames
+**Checked, not built — genuinely implementable, but not from this session.**
+The same MF bindings search that refuted 2.2 found the opposite result for
+slicing: `CODECAPI_AVEncSliceControlMode` and `CODECAPI_AVEncSliceControlSize`
+are both present in the vendored `windows` crate
+(`windows-0.56.0/.../MediaFoundation/mod.rs`). The API to emit multiple
+slices per frame exists and is reachable from the same `ICodecAPI` the
+encoder already uses for `CODECAPI_AVLowLatencyMode`.
 
-We currently wait for a complete encoded frame before sending. If the encoder
-emits slices, each can go the moment it exists, and the decoder can start work
-before the frame is complete. That removes most of one frame-time from the
-pipeline, on every frame, for everyone.
+Why not built now: this touches `crates/capture-bridge` (Windows-only,
+requires the MSVC toolchain to compile — reachable via the existing
+`powershell.exe` build pipeline, not blocked) **and** the CLVD wire format to
+express a partial frame, **and** correctness here can only really be verified
+by watching real decoded video — something this session had no way to confirm
+headlessly. Shipping a wire-format change to the frame the browser paints,
+unverified by an actual decode, is a different risk tier than the FEC change
+above (which degrades to today's behavior if COUCHLINK_FEC is unset).
 
-- [ ] Confirm the encoder can emit multiple slices per frame.
-- [ ] Send per slice; ensure CLVD framing can express partial frames.
+- [ ] Confirm slice count/size behavior with `CODECAPI_AVEncSliceControlMode`
+      set, by inspecting encoder output on the Windows side directly.
+- [ ] Extend CLVD framing to express partial frames.
 - [ ] **Predict:** ~one frame-time (up to 16.7 ms) off p50.
 - [ ] **Refuted if:** decoder-side buffering re-serialises it anyway.
+- [ ] **Do this with a friend online** so the video result can actually be
+      watched, not just built.
 
-### 2.4 Make the game's clock the master clock
+### 2.4 Make the game's clock the master clock — partially already true
 
-The deepest structural fix, and the one that subsumes the phase-locking
-experiment.
+**Correction to the original model, found by reading the code rather than
+re-deriving from the naive 60Hz-everywhere assumption.** The "five 60Hz
+boundaries → ~40ms quantisation" estimate in
+`2026-08-06-latency-model-and-experiments.md` assumed every boundary polls at
+frame rate. `crates/host/src/main.rs`:
 
-Right now every stage runs on its own metronome and we pay half a period per
-boundary. The alternative is not "more metronomes, faster" — it is **one clock
-for the whole pipeline**: the game's frame completion drives capture, which
-drives encode, which drives send. Every downstream stage becomes event-driven
-instead of polled, and the quantisation term collapses toward zero.
+```rust
+let tick = if capturer.is_preencoded() {
+    Duration::from_millis(2)   // 500Hz, not 60Hz
+} else {
+    Duration::from_millis(1000 / preset.fps.max(1) as u64)
+};
+```
 
-The existing metronome is deliberate — arrival-paced sending wobbled 20–60 ms
-and inflated the receiver's buffer. So the answer is not to delete it but to
-make it a **phase-corrected pacer**: driven by frame arrival, smoothed enough to
-stay uniform, without adding a fixed half-period of wait.
+The **production path is pre-encoded** (Windows GPU H.264, confirmed by
+tonight's host logs: "GPU-encoded on Windows"). For that path the host
+already polls the capture socket at 500Hz. Average wait for a frame that just
+became available: ~1ms, not the ~8.3ms a naive 60Hz metronome would cost. One
+of the plan's five boundaries was already collapsed before this session
+started — it just hadn't been checked against the actual running code.
 
-- [ ] Measure the frame-arrival interval distribution first. Its spread decides
-      whether this is possible at all.
-- [ ] If spread ≪ frame interval, drive the pipeline from arrival with a
-      phase-corrected pacer.
-- [ ] **Predict:** removes most of the ~40 ms quantisation budget.
-- [ ] **Refuted if:** arrival spread approaches a frame interval — then the
-      metronome is load-bearing and must stay.
+What's left, honestly:
+
+- **This send-side collapse only matters for the pre-encoded path.** The raw
+  (non-pre-encoded) path still ticks at `preset.fps`, i.e. genuinely 60Hz —
+  the original estimate stands there.
+- **The remaining unknown is upstream of this codebase entirely**: how DWM
+  composition hands frames to `couchlink-win-capture.exe`'s WGC session. That
+  happens inside `crates/capture-bridge` / the Windows compositor and is not
+  observable from the Rust host at all without instrumenting the capture
+  binary itself — a live-friend-independent measurement, but a real one, not
+  done tonight.
+
+- [ ] If the raw path is ever the one in use (no GPU encode), apply the
+      phase-lock idea there — that boundary is still a real ~60Hz metronome.
+- [ ] Instrument `couchlink-win-capture.exe`'s own frame-arrival timestamps
+      (WGC callback to socket-write) to find the one quantisation source this
+      session couldn't reach. Doesn't need a friend, does need a Windows build.
+- **Refuted (partially):** "make the game's clock the master clock" as
+  originally scoped assumed a problem that's already half-solved for the path
+  actually in production use. Scope any further work to the two items above,
+  not a rewrite of an already-fast poll loop.
 
 ### 2.5 Remove the WSL↔Windows hop
 
