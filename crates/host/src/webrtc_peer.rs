@@ -380,13 +380,33 @@ impl WebRtcHost {
         use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
         use rtp::extension::HeaderExtension;
 
-        // DataChannel path first — browser WebCodecs paints without waiting on RTP JB.
-        // Native clients ignore this channel and keep using the media track below.
-        // A keyframe is the only thing that can restore a starved decoder, so it
-        // is never shed — dropping it was a death spiral: skip, ask for an IDR,
-        // then skip the IDR too because it is the largest frame of all. The
-        // viewer's canvas froze on the DataChannel path while RTP kept decoding
-        // at ~55fps, which is what made it look like a network fault.
+        // RTP first. It is the only path every browser can decode: Safari has no
+        // WebCodecs here, so it falls back to the media track and nothing else.
+        // Sending the DataChannel first meant a slow CLVD send could burn the
+        // whole per-frame budget and the RTP write never happened — the Safari
+        // viewer stayed black while a Chrome viewer on the same host was fine,
+        // because Chrome was being fed by the very channel that starved it.
+        //
+        // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
+        // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
+        let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
+        self.video
+            .sample_writer()
+            .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
+                min_delay, max_delay,
+            )))
+            .write_sample(&Sample {
+                data: Bytes::from(annex_b.clone()),
+                duration,
+                ..Default::default()
+            })
+            .await?;
+
+        // Accelerated path, second: browser WebCodecs paints without waiting on
+        // the RTP jitter buffer. Native clients and Safari ignore this channel.
+        // A keyframe is never shed — dropping it was a death spiral: skip, ask
+        // for an IDR, then skip the IDR too because it is the largest frame of
+        // all, and the viewer's canvas froze while RTP kept decoding beside it.
         if self.video_dc.ready_state()
             == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
             && (keyframe || !self.video_dc_congested().await)
@@ -399,7 +419,7 @@ impl WebRtcHost {
                 width: w,
                 height: h,
                 keyframe,
-                annex_b: annex_b.clone(),
+                annex_b,
             };
             for frag in au.encode_fragments() {
                 if let Err(e) = self.video_dc.send(&Bytes::from(frag)).await {
@@ -408,21 +428,6 @@ impl WebRtcHost {
                 }
             }
         }
-
-        // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
-        // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
-        let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
-        self.video
-            .sample_writer()
-            .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
-                min_delay, max_delay,
-            )))
-            .write_sample(&Sample {
-                data: Bytes::from(annex_b),
-                duration,
-                ..Default::default()
-            })
-            .await?;
         Ok(())
     }
 }
