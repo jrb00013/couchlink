@@ -167,13 +167,22 @@ couchlink_apply_online_fallback() {
   if [[ -n "$v6" ]]; then
     local v6br
     v6br="$(couchlink_bracket_host "$v6")"
-    export COUCHLINK_TURN_URL="turn:${v6br}:3478"
-    export COUCHLINK_TURN_EXTERNAL_IP="$v6"
+    # Signaling over the Windows IPv6 is fine — it is TCP, and portproxy
+    # forwards v6->WSL. TURN is UDP and cannot be forwarded that way.
     if [[ "$used_cf" != "1" ]]; then
       export COUCHLINK_INVITE_SIGNALING="ws://${v6br}:${PORT}/ws"
     fi
-    couchlink_say "==> TURN on public IPv6 ${v6} (no IPv4 port forward needed)"
-    return 0
+    if couchlink_owns_ipv6 "$v6"; then
+      export COUCHLINK_TURN_URL="turn:${v6br}:3478"
+      export COUCHLINK_TURN_EXTERNAL_IP="$v6"
+      couchlink_say "==> TURN on public IPv6 ${v6} (no IPv4 port forward needed)"
+      return 0
+    fi
+    couchlink_say "==> WARN: public IPv6 ${v6} belongs to Windows, not this WSL instance —"
+    couchlink_say "         not advertising TURN there (UDP cannot be portproxied to WSL)."
+    couchlink_say "         Friends behind a strict NAT will fail ICE until one of:"
+    couchlink_say "           * forward UDP+TCP 3478 to this PC, or"
+    couchlink_say "           * WSL mirrored networking (.wslconfig networkingMode=mirrored)"
   fi
 
   # No IPv6 — keep TURN on WAN IPv4 (needs UPnP/forward to actually work).

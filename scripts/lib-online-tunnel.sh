@@ -35,6 +35,21 @@ couchlink_read_public_ipv6() {
   return 1
 }
 
+# True when *this* machine actually holds `addr` on a global-scope interface.
+#
+# couchlink_read_public_ipv6 deliberately returns the *Windows* address, which is
+# right for a TCP invite (netsh portproxy forwards v6->WSL) and wrong for TURN.
+# coturn runs inside WSL, which has no IPv6 at all in NAT mode, and portproxy
+# cannot forward UDP — so advertising turn:[windows-v6] hands the friend a relay
+# that can never answer. Their browser gathers no `typ relay` candidate, and ICE
+# fails outright the moment their NAT refuses the direct path. Silent, and
+# permanent: it looks exactly like the friend's network being at fault.
+couchlink_owns_ipv6() {
+  local addr="${1:-}"
+  [[ -n "$addr" ]] || return 1
+  ip -6 addr show scope global 2>/dev/null | grep -qiF "$addr"
+}
+
 # Bracket IPv6 for URLs; leave IPv4 / hostnames alone.
 couchlink_bracket_host() {
   local h="$1"
