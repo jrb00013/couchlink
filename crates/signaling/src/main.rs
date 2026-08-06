@@ -1,6 +1,7 @@
 mod api;
 mod audit;
 mod metrics;
+mod players;
 mod session;
 mod ws;
 
