@@ -72,6 +72,16 @@ pub enum SignalMessage {
         #[serde(default)]
         id: String,
     },
+    /// Player reports which video path it is actually presenting from.
+    ///
+    /// The host otherwise writes every frame to both the RTP track and the
+    /// CLVD DataChannel, because it has no way to know which one the browser
+    /// paints — double the per-frame send work, and two streams competing
+    /// inside one congestion controller. `path` is `"webcodecs"` or `"rtp"`;
+    /// an unrecognised value is treated as unknown (send both).
+    PresentPath {
+        path: String,
+    },
     /// Host announces stream ready (codec / resolution).
     StreamInfo {
         width: u32,
@@ -146,5 +156,25 @@ impl SignalMessage {
 
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn present_path_round_trips() {
+        let m = SignalMessage::PresentPath {
+            path: "webcodecs".into(),
+        };
+        let s = m.to_json().unwrap();
+        assert!(s.contains("\"type\":\"present_path\""));
+        assert!(s.contains("\"path\":\"webcodecs\""));
+        let back = SignalMessage::from_json(&s).unwrap();
+        match back {
+            SignalMessage::PresentPath { path } => assert_eq!(path, "webcodecs"),
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 }
