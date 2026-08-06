@@ -76,6 +76,8 @@ export class CouchlinkPlayer {
   private padName = "none";
   /** Last Gamepad.id announced to the host, so pad_info is sent only on change. */
   private padInfoSent = "";
+  /** Last logged media-path summary, so the line prints only on change. */
+  private lastPathKey = "";
   private turn: { url: string; user: string; pass: string } | null = null;
   private gotVideoTrack = false;
   private lastOfferEpoch = 0;
@@ -185,6 +187,48 @@ export class CouchlinkPlayer {
   }
 
   /**
+   * Report which ICE candidate pair media is actually using, and its RTT.
+   *
+   * Nothing in the system logged this, so "the online path is slow" could not
+   * be distinguished between a direct IPv6 route, an IPv4 hole-punch, and a
+   * TURN relay — three paths with very different costs. `currentRoundTripTime`
+   * on the succeeded pair is also the only honest transit measurement we have:
+   * it is measured on the media path itself, not inferred from a ping to some
+   * unrelated host.
+   *
+   * Logged only when the pair or the rounded RTT changes, so it does not spam
+   * a line every poll.
+   */
+  private logSelectedPath(stats: RTCStatsReport) {
+    let pair: any = null;
+    const byId = new Map<string, any>();
+    stats.forEach((r: any) => byId.set(r.id, r));
+    stats.forEach((r: any) => {
+      if (r.type === "candidate-pair" && (r.selected || r.state === "succeeded")) {
+        // Prefer the nominated pair when the browser marks one.
+        if (!pair || r.nominated) pair = r;
+      }
+    });
+    if (!pair) return;
+    const local = byId.get(pair.localCandidateId);
+    const remote = byId.get(pair.remoteCandidateId);
+    const rttMs = Math.round((pair.currentRoundTripTime ?? 0) * 1000);
+    const relayed =
+      local?.candidateType === "relay" || remote?.candidateType === "relay";
+    const key = `${local?.candidateType}/${remote?.candidateType}/${rttMs}`;
+    if (key === this.lastPathKey) return;
+    this.lastPathKey = key;
+    clog("media path", {
+      local: local?.candidateType,
+      remote: remote?.candidateType,
+      family: local?.address?.includes(":") ? "IPv6" : "IPv4",
+      protocol: local?.protocol,
+      relayed,
+      rttMs,
+    });
+  }
+
+  /**
    * The browser is the one segment the host cannot measure. jitterBufferDelay
    * divided by jitterBufferEmittedCount is the average time each frame sat in
    * Chrome's buffer before being shown — that is felt latency the host's stage
@@ -197,6 +241,7 @@ export class CouchlinkPlayer {
       if (!pc) return;
       try {
         const stats = await pc.getStats();
+        this.logSelectedPath(stats);
         stats.forEach((r: any) => {
           if (r.type !== "inbound-rtp" || r.kind !== "video") return;
           const delay = r.jitterBufferDelay ?? 0;
