@@ -88,17 +88,31 @@ if [[ -z "$HS_URL" ]]; then
       exit 1
     fi
   else
-    PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
-    if [[ -z "$PUBLIC_IP" ]]; then
-      PUBLIC_IP="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
-    fi
-    if [[ -n "$PUBLIC_IP" ]]; then
-      HS_URL="http://${PUBLIC_IP}:8080"
-      echo "==> Headscale invite URL $HS_URL (open TCP 8080 / UPnP for friends)"
-      echo "    override: COUCHLINK_HS_URL=https://hs.example.com"
+    # Self-hosted, zero-config friend reachability: advertise the host's public
+    # IPv6 as the control-plane URL. IPv6 has no NAT, so a global address is an
+    # always-on inbound path — the functional equivalent of a router port forward
+    # with no Spectrum app change, no relay, and no cloud. Windows portproxy
+    # (v6tov4) maps the inbound to WSL's headscale. Only cost: the friend needs
+    # working IPv6 (mobile + most ISPs have it). Override anytime with
+    # COUCHLINK_HS_URL.
+    PUBLIC_V6="$(couchlink_read_public_ipv6 2>/dev/null || true)"
+    if [[ -n "$PUBLIC_V6" && "$PUBLIC_V6" == *:* ]]; then
+      HS_URL="http://[${PUBLIC_V6}]:8080"
+      echo "==> Headscale invite URL $HS_URL (public IPv6 — no router forward, no relay)"
+      echo "    friend needs IPv6; override: COUCHLINK_HS_URL=https://hs.example.com"
     else
-      HS_URL="http://127.0.0.1:8080"
-      echo "==> no public IP — using $HS_URL (set COUCHLINK_HS_URL for friends)"
+      PUBLIC_IP="${COUCHLINK_PUBLIC_IP:-}"
+      if [[ -z "$PUBLIC_IP" ]]; then
+        PUBLIC_IP="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+      fi
+      if [[ -n "$PUBLIC_IP" ]]; then
+        HS_URL="http://${PUBLIC_IP}:8080"
+        echo "==> Headscale invite URL $HS_URL (open TCP 8080 / UPnP for friends)"
+        echo "    override: COUCHLINK_HS_URL=https://hs.example.com"
+      else
+        HS_URL="http://127.0.0.1:8080"
+        echo "==> no public IP — using $HS_URL (set COUCHLINK_HS_URL for friends)"
+      fi
     fi
   fi
 fi

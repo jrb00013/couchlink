@@ -5,6 +5,7 @@ mod keyboard_input;
 mod xbox_reader;
 mod config_file;
 mod invite;
+mod wireguard;
 mod prompt;
 mod reachability;
 mod signaling_client;
@@ -126,6 +127,7 @@ impl Args {
             if args.turn_pass.is_none() {
                 args.turn_pass = parsed.turn_pass.clone();
             }
+            raise_tunnel_if_offered(&parsed);
             if invite::is_headscale_invite(&parsed) {
                 info!(
                     "Headscale join link — use ./scripts/join-headscale.sh (or install.sh --online) then route via {}",
@@ -222,8 +224,52 @@ fn init_tracing() {
         .ok();
 }
 
+/// Raise the WireGuard tunnel the invite carries, if it carries one.
+///
+/// Never fatal. The invite already describes a working path (mesh address,
+/// TURN, or a public signaling URL), so a tunnel we cannot raise costs speed,
+/// not the session — and failing the join over it would be strictly worse than
+/// connecting the slow way.
+fn raise_tunnel_if_offered(parsed: &invite::ParsedInvite) {
+    let Some(conf) = parsed.wireguard_conf.as_deref() else {
+        return;
+    };
+    // Both invite-handling paths call this, and a --join-url run can hit both.
+    // Without the guard the user sees the status twice and wg-quick is invoked
+    // twice for one join.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let mut ran = false;
+    ONCE.call_once(|| ran = true);
+    if !ran {
+        return;
+    }
+    // eprintln, not tracing: the invite is resolved before the subscriber is
+    // installed (main initialises it further down), so info!/warn! here are
+    // dropped on the floor. This is the one message that says whether the
+    // direct tunnel came up — losing it silently defeats the whole feature.
+    match wireguard::ensure_up(conf) {
+        wireguard::TunnelState::Up => {
+            eprintln!("==> direct WireGuard tunnel up (handshake confirmed)");
+        }
+        wireguard::TunnelState::AlreadyUp => {
+            eprintln!("==> direct WireGuard tunnel already up");
+        }
+        wireguard::TunnelState::NoHandshake => {
+            eprintln!(
+                "==> direct tunnel did not handshake — the host endpoint is not reachable\n    from this network; continuing over {}",
+                parsed.signaling
+            );
+        }
+        wireguard::TunnelState::Unavailable(why) => {
+            eprintln!("==> direct tunnel unavailable ({why})");
+            eprintln!("    continuing over {}", parsed.signaling);
+        }
+    }
+}
+
 fn resolve_join_string(raw: &str, cli: &Args) -> Result<ResolvedArgs> {
     let parsed = invite::parse_join_input(raw)?;
+    raise_tunnel_if_offered(&parsed);
     if invite::is_headscale_invite(&parsed) {
         info!(
             "Headscale join link — use ./scripts/join-headscale.sh (or install.sh --online) then route via {}",
