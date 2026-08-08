@@ -57,20 +57,27 @@ Allow **UDP 51820** on the host firewall and forward it on the router to this ma
 
 ### WSL (recommended layout)
 
-WireGuard **inside** WSL2 is painful. Prefer:
+WireGuard **inside** WSL2 is painful. Prefer the **Windows WireGuard app** —
+especially in NAT mode, where the WSL VM has no IPv6 and `netsh portproxy` is
+TCP-only, so a WSL-hosted `wg0` can never answer the friend's inbound UDP
+handshake. Hosting the tunnel on Windows means the friend dials the host's real
+addresses directly.
 
-1. Import `wg0-host.conf` into the **Windows WireGuard** app and activate it.  
-2. Ensure Windows can reach couchlink in WSL on TCP **8443** (existing WSL portproxy from `--online` prep helps for public paths; for mesh, friend hits `10.66.0.1` on **Windows** — you may need to portproxy `10.66.0.1:8443` → WSL or run with mirrored networking).  
-3. If detection can’t see `wg0` from WSL, force the invite IP:
+1. `./scripts/setup-wireguard.sh` (generates keys + confs)
+2. `./scripts/enable-wireguard.sh` — detects NAT mode and installs the tunnel as
+   a **Windows** service (`WireGuardTunnel$couchlink`), no mirroring required.
+3. `./scripts/run.sh host --online` — detects the tunnel (Windows side first in
+   NAT mode) and prints the mesh join URL.
 
-```bash
-export COUCHLINK_WG_HOST_IP=10.66.0.1
-export COUCHLINK_MESH=wireguard
-export COUCHLINK_MESH_IP=10.66.0.1
-./scripts/run.sh host --online
-```
+When **mirrored** networking is live, a WSL `wg-quick up wg0` is an option too
+(`couchlink_wireguard_ip` checks WSL first under mirroring) — but the Windows
+app remains the simplest path on either mode.
 
-Spike your exact WSL networking before relying on this in production play nights.
+> Note: with the tunnel on Windows, the mesh IP `10.66.0.1` lives in Windows,
+> not WSL. `enable-wireguard.ps1` adds the TCP portproxy (`8443`, `3478`) so the
+> WSL-hosted server/signaling stays reachable; media rides the tunnel to
+> `10.66.0.1` and Windows forwards it into WSL.
+
 
 ### macOS
 

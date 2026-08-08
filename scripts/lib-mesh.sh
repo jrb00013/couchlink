@@ -107,12 +107,27 @@ couchlink_windows_wireguard_ip() {
 couchlink_wireguard_ip() {
   local ifc="${COUCHLINK_WG_IF:-wg0}"
   local expect="${COUCHLINK_WG_HOST_IP:-10.66.0.1}"
-  local ip=""
+  local ip="" wsl_mode=""
 
   # Explicit override always wins (Windows WG + WSL host).
   if [[ "${COUCHLINK_WG_FORCE:-0}" == "1" && -n "${COUCHLINK_WG_HOST_IP:-}" ]]; then
     printf '%s' "$COUCHLINK_WG_HOST_IP"
     return 0
+  fi
+
+  # WSL without mirrored networking cannot host inbound WireGuard: NAT mode has
+  # no global IPv6 and netsh portproxy is TCP-only, so a WSL wg0 is unreachable
+  # from the friend. Prefer the Windows WireGuard app tunnel, which owns the
+  # real addresses. Only fall back to WSL wg0 when mirroring is live.
+  if declare -F couchlink_wsl_networking_mode >/dev/null 2>&1; then
+    wsl_mode="$(couchlink_wsl_networking_mode 2>/dev/null || true)"
+  fi
+  if [[ "$wsl_mode" == "nat" ]]; then
+    if ip="$(couchlink_windows_wireguard_ip 2>/dev/null)"; then
+      printf '%s' "$ip"
+      return 0
+    fi
+    return 1
   fi
 
   if command -v wg >/dev/null 2>&1 && wg show "$ifc" >/dev/null 2>&1; then
