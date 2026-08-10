@@ -161,6 +161,17 @@ case "$PLATFORM" in
       if ! as_root apt-get install -y -qq "${APT_PKGS[@]}"; then
         echo "warning: some apt packages failed to install — build may still succeed"
       fi
+      # Debian enables the coturn service on install, and it grabs 3478 at boot.
+      # couchlink starts its own session-scoped coturn with generated
+      # credentials, which then cannot bind and dies with errno=98 — taking the
+      # whole session down with it. The distro service is never the one we want.
+      if [[ "$INSTALL_ROLE" == "host" ]] && command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-enabled coturn >/dev/null 2>&1 || systemctl is-active coturn >/dev/null 2>&1; then
+          echo "==> disabling the distro coturn service (it would hold port 3478)"
+          as_root systemctl disable --now coturn || \
+            echo "warning: could not disable coturn — run: sudo systemctl disable --now coturn"
+        fi
+      fi
     fi
     if [[ "$INSTALL_ROLE" == "host" ]]; then
       echo "==> configuring /dev/uinput access…"
@@ -246,6 +257,22 @@ if [[ "${EUID:-$(id -u)}" -eq 0 && "$REAL_USER" != "root" ]]; then
 fi
 
 if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "wsl" ]]; then
+  # Mirrored networking first: it decides what the rest of the stack can even do.
+  #
+  # In WSL's default NAT mode the VM has a private IPv4 and no IPv6, and the
+  # only inbound bridge is `netsh portproxy`, which is TCP-only. That makes
+  # inbound UDP impossible, which rules out both a reachable TURN relay and a
+  # direct WireGuard endpoint — the two things that let a friend connect
+  # without a third-party tunnel. Mirrored mode gives WSL the Windows addresses
+  # outright, so both simply work.
+  #
+  # Opt out with COUCHLINK_SKIP_MIRRORED=1. Needs `wsl --shutdown` to apply,
+  # which the script says rather than doing behind your back.
+  if [[ "${COUCHLINK_SKIP_MIRRORED:-0}" != "1" ]]; then
+    echo "==> configuring WSL mirrored networking (direct connections without a tunnel)"
+    bash "$ROOT/scripts/enable-wsl-mirrored.sh" ||       echo "warning: mirrored networking not configured — Cloudflare tunnel stays the fallback"
+  fi
+
   echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
   if command -v powershell.exe >/dev/null 2>&1; then
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File \

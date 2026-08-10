@@ -178,7 +178,16 @@ couchlink_apply_online_fallback() {
   v6="$(couchlink_read_public_ipv6 2>/dev/null || true)"
 
   local used_cf=0
-  if couchlink_start_cloudflared "$ROOT" "$PORT"; then
+  # COUCHLINK_NO_CLOUDFLARE=1 keeps every byte between the two of you: signaling
+  # falls through to the direct IPv6 URL below instead of a third party.
+  #
+  # The cost is a secure context. Browsers gate WebCodecs behind HTTPS, and a
+  # bare ws:// invite is not one — a browser friend silently drops to the RTP
+  # path. Native clients and mesh (Headscale/WireGuard) URLs are unaffected,
+  # which is why this is opt-in rather than the default.
+  if [[ "${COUCHLINK_NO_CLOUDFLARE:-0}" == "1" ]]; then
+    couchlink_say "==> cloudflared disabled (COUCHLINK_NO_CLOUDFLARE=1) — direct signaling only"
+  elif couchlink_start_cloudflared "$ROOT" "$PORT"; then
     used_cf=1
     # Host still dials loopback; friends get https://*.trycloudflare.com
     export COUCHLINK_INVITE_SIGNALING="${COUCHLINK_CF_URL/https:/wss:}/ws"
