@@ -50,11 +50,7 @@ Xbox One/Series controller, both over `hidraw` — and normalizes it onto the sa
 `PadFrame` wire format. On Linux the virtual pad is always DualSense identity;
 on Windows Auto may present DualSense VHID, DS4, or Xbox 360 depending on drivers.
 Xbox face buttons are remapped by position (A→bottom, B→right, X→left, Y→top) to land
-correctly on the DualSense diamond. Xbox parsing uses the standard gamepad report
-(report id `0x01`, sticks as u16 centered on `0x8000`, 10-bit analog triggers, `1..=8`
-hat switch, button bytes) and accepts both the legacy 16-byte Xbox One S packet and
-the unified 17+ byte One S 5.x / Series / Elite 2 layout, plus the `0x02` guide packet
-on firmware that keeps the Xbox button out of the state packet.
+correctly on the DualSense diamond.
 
 ## Adaptive streaming
 

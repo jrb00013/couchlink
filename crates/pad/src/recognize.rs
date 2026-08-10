@@ -4,12 +4,12 @@
 //! Kept pure (no filesystem) so unit tests can prove every supported Xbox
 //! variant and DualSense / DualSense Edge / DualShock 4 product is accepted.
 
-use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 use crate::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
 use crate::xbox::{
     KNOWN_PIDS as XBOX_PIDS, MICROSOFT_VID, PID_XBOX_ELITE_2, PID_XBOX_ONE_S, PID_XBOX_ONE_S_BT,
     PID_XBOX_SERIES, PID_XBOX_SERIES_BT, PID_XBOX_WIRELESS, PRODUCT_NAME as XBOX_NAME,
 };
+use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 
 /// DualShock 4 (PS4) — recognized for native hidraw + web Standard Gamepad.
 pub const PID_DUALSHOCK4_V1: u16 = 0x05C4;
@@ -158,10 +158,7 @@ mod tests {
     fn dualsense_and_edge_are_recognized() {
         assert!(is_supported_dualsense(SONY_VID, PID_DUALSENSE));
         assert!(is_supported_dualsense(SONY_VID, PID_DUALSENSE_EDGE));
-        assert_eq!(
-            classify(SONY_VID, PID_DUALSENSE),
-            ControllerFamily::DualSense
-        );
+        assert_eq!(classify(SONY_VID, PID_DUALSENSE), ControllerFamily::DualSense);
         assert_eq!(
             classify(SONY_VID, PID_DUALSENSE_EDGE),
             ControllerFamily::DualSense
@@ -187,7 +184,8 @@ mod tests {
 
     #[test]
     fn parses_sysfs_hid_id() {
-        let (bus, vid, pid) = parse_hid_id_line("HID_ID=0003:0000045E:00000B12").unwrap();
+        let (bus, vid, pid) =
+            parse_hid_id_line("HID_ID=0003:0000045E:00000B12").unwrap();
         assert_eq!(bus, 0x0003);
         assert_eq!(vid, MICROSOFT_VID);
         assert_eq!(pid, PID_XBOX_SERIES);

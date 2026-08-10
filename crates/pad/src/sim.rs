@@ -63,27 +63,14 @@ impl SimButton {
     }
 }
 
-/// Neutral Xbox state report in the unified layout (report id `0x01` + 16 body
-/// bytes, used by One S firmware 5.x, Series X|S and Elite 2): sticks centered
-/// on `0x8000`, triggers released, hat released (`0`), no buttons.
+/// Neutral Xbox HID report (sticks centered, hat released, no buttons).
 pub fn xbox_neutral_report() -> Vec<u8> {
-    let mut raw = vec![0u8; 17];
-    raw[0] = XBOX_REPORT_ID;
-    for pair in [1usize, 3, 5, 7] {
-        raw[pair..pair + 2].copy_from_slice(&0x8000u16.to_le_bytes());
-    }
-    raw
-}
-
-/// Neutral Xbox state report in the legacy layout (report id `0x01` + 15 body
-/// bytes, original Xbox One S firmware) where the third button byte holds only
-/// the stick clicks and the guide button arrives in a separate report.
-pub fn xbox_legacy_neutral_report() -> Vec<u8> {
     let mut raw = vec![0u8; 16];
     raw[0] = XBOX_REPORT_ID;
     for pair in [1usize, 3, 5, 7] {
-        raw[pair..pair + 2].copy_from_slice(&0x8000u16.to_le_bytes());
+        raw[pair..pair + 2].copy_from_slice(&0i16.to_le_bytes());
     }
+    raw[13] = 8; // hat released
     raw
 }
 
@@ -112,8 +99,8 @@ pub fn dualsense_bt_neutral_report() -> Vec<u8> {
     raw
 }
 
-/// Press one Xbox button (or set hat) on a neutral unified-layout report.
-/// Analog L2/R2 use a full 10-bit pull so the digital bit also latches.
+/// Press one Xbox button (or set hat) on a neutral report. Analog L2/R2 use a
+/// full 10-bit pull so the digital bit also latches.
 pub fn xbox_press(btn: SimButton) -> Vec<u8> {
     let mut raw = xbox_neutral_report();
     match btn {
@@ -123,34 +110,18 @@ pub fn xbox_press(btn: SimButton) -> Vec<u8> {
         SimButton::Triangle => raw[14] |= 0x08,
         SimButton::L1 => raw[14] |= 0x10,
         SimButton::R1 => raw[14] |= 0x20,
-        SimButton::Create => raw[14] |= 0x40,  // View
-        SimButton::Options => raw[14] |= 0x80, // Menu
-        SimButton::Ps => raw[15] |= 0x10,      // Guide
-        SimButton::L3 => raw[15] |= 0x20,
-        SimButton::R3 => raw[15] |= 0x40,
+        SimButton::Ps => raw[14] |= 0x40,
+        SimButton::Create => raw[14] |= 0x80,
+        SimButton::Options => raw[15] |= 0x01,
+        SimButton::L3 => raw[15] |= 0x02,
+        SimButton::R3 => raw[15] |= 0x04,
         SimButton::L2 => raw[9..11].copy_from_slice(&1023u16.to_le_bytes()),
         SimButton::R2 => raw[11..13].copy_from_slice(&1023u16.to_le_bytes()),
-        SimButton::DpadUp => raw[13] = 1,
-        SimButton::DpadDown => raw[13] = 5,
-        SimButton::DpadLeft => raw[13] = 7,
-        SimButton::DpadRight => raw[13] = 3,
+        SimButton::DpadUp => raw[13] = 0,
+        SimButton::DpadDown => raw[13] = 4,
+        SimButton::DpadLeft => raw[13] = 6,
+        SimButton::DpadRight => raw[13] = 2,
         SimButton::Touch | SimButton::Mute => {}
-    }
-    raw
-}
-
-/// Press one Xbox button on the legacy 16-byte layout (original Xbox One S
-/// firmware), where the third button byte holds only the stick clicks.
-pub fn xbox_legacy_press(btn: SimButton) -> Vec<u8> {
-    let mut raw = xbox_legacy_neutral_report();
-    match btn {
-        SimButton::L3 => raw[15] |= 0x01,
-        SimButton::R3 => raw[15] |= 0x02,
-        _ => {
-            // Same offsets as the unified layout for everything else.
-            raw = xbox_press(btn);
-            raw.truncate(16);
-        }
     }
     raw
 }
@@ -189,14 +160,13 @@ pub fn dualsense_usb_press(btn: SimButton) -> Vec<u8> {
     raw
 }
 
-/// Xbox sticks as full-range i16 (center 0), stored as u16 centered on `0x8000`
-/// exactly like real hardware; DualSense sticks as u8 (0..=255, 128 center).
+/// Xbox sticks as full-range i16; DualSense sticks as u8 (0..=255, 128 center).
 pub fn xbox_with_sticks(lx: i16, ly: i16, rx: i16, ry: i16) -> Vec<u8> {
     let mut raw = xbox_neutral_report();
-    for (dst, v) in [([1usize, 2], lx), ([3, 4], ly), ([5, 6], rx), ([7, 8], ry)] {
-        let centered = (0x8000i32 + v as i32) as u16;
-        raw[dst[0]..dst[1] + 1].copy_from_slice(&centered.to_le_bytes());
-    }
+    raw[1..3].copy_from_slice(&lx.to_le_bytes());
+    raw[3..5].copy_from_slice(&ly.to_le_bytes());
+    raw[5..7].copy_from_slice(&rx.to_le_bytes());
+    raw[7..9].copy_from_slice(&ry.to_le_bytes());
     raw
 }
 
