@@ -144,6 +144,7 @@ fn parse_present_path(path: &str) -> u8 {
         "rtp" => PATH_RTP,
         _ => PATH_UNKNOWN,
     }
+}
 
 impl WebRtcHost {
     /// True once since the last check: a viewer asked for a keyframe via RTCP.

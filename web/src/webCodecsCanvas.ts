@@ -24,6 +24,34 @@ export function canUseWebCodecs(): boolean {
   );
 }
 
+/**
+ * Label the likely bottleneck from the numbers this decoder can actually see.
+ *
+ * Deliberately coarse — this is a first triage step, not a diagnosis. `dropped`
+ * counts frames this decoder discarded (stale/out of order), which on this
+ * unordered channel is the client-visible symptom of a packet loss or a host
+ * stall; it cannot tell those two apart from here, hence "consider" rather
+ * than a firm verdict.
+ */
+export function webcodecsDiagnosis(
+  presentFps: number,
+  decodeMsAvg: number,
+  dropped: number
+): string {
+  // A 60fps stream gives ~16.7ms per frame; decode competing with paint and
+  // compositing eating half that budget is a real local bottleneck, not noise.
+  if (decodeMsAvg > 8) {
+    return `decode-bound (${decodeMsAvg.toFixed(1)}ms/frame on this device)`;
+  }
+  if (dropped > 0 && presentFps < 45) {
+    return "frames arriving incomplete — possible network loss (host: try COUCHLINK_FEC=1)";
+  }
+  if (presentFps < 45) {
+    return "low frame rate with fast local decode — host or network side, not this device";
+  }
+  return "healthy";
+}
+
 export type WebCodecsStats = {
   mode: "webcodecs";
   presentFps: number;
@@ -255,13 +283,28 @@ export class WebCodecsCanvasView {
     if (now - this.windowStart >= 1000) {
       const elapsed = (now - this.windowStart) / 1000;
       const n = Math.max(this.painted, 1);
-      this.onStats?.({
-        mode: "webcodecs",
-        presentFps: Math.round(this.painted / elapsed),
+      const presentFps = Math.round(this.painted / elapsed);
+      const decodeMs = this.decodeMsAccum / n;
+      // This is the real path for Chrome: WebCodecs + CLVD paints directly,
+      // bypassing the RTP jitter buffer entirely. Every latency number logged
+      // elsewhere tonight came from getStats() on the RTP receiver — a shadow
+      // stream nobody was watching. This is the first one taken from the
+      // pipeline actually on screen.
+      clog("webcodecs stats", {
+        presentFps,
+        decodeMsAvg: Math.round(decodeMs * 10) / 10,
         dropped: this.dropped,
         width: this.lastW,
         height: this.lastH,
-        decodeMs: this.decodeMsAccum / n,
+        diagnosis: webcodecsDiagnosis(presentFps, decodeMs, this.dropped),
+      });
+      this.onStats?.({
+        mode: "webcodecs",
+        presentFps,
+        dropped: this.dropped,
+        width: this.lastW,
+        height: this.lastH,
+        decodeMs,
       });
       this.painted = 0;
       this.dropped = 0;

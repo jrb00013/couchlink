@@ -21,7 +21,7 @@ if [[ ! -f "$CONF" ]]; then
 fi
 [[ -f "$CONF" ]] || { echo "missing $CONF" >&2; exit 1; }
 
-# Already up?
+# Already up? couchlink_wireguard_ip prefers the Windows app tunnel in NAT mode.
 if ip="$(couchlink_wireguard_ip 2>/dev/null)"; then
   echo "==> WireGuard already up ($ip)"
   exit 0
@@ -31,6 +31,15 @@ case "$PLATFORM" in
   wsl|windows)
     ps_win="$(command -v powershell.exe 2>/dev/null || true)"
     [[ -n "${ps_win:-}" ]] || { echo "powershell.exe required on WSL/Windows" >&2; exit 1; }
+
+    # WSL without mirroring cannot host inbound WireGuard (NAT = no IPv6, portproxy
+    # is TCP-only). The tunnel MUST live in the Windows WireGuard app so the friend
+    # reaches the host's real addresses. Mirrored mode may host in WSL instead.
+    wsl_mode="$(couchlink_wsl_networking_mode 2>/dev/null || true)"
+    if [[ "$wsl_mode" == "nat" ]]; then
+      echo "==> WSL is in NAT mode (not mirrored) — hosting WireGuard in the Windows app"
+      echo "    (a WSL wg0 would be unreachable: no IPv6, and portproxy is TCP-only)"
+    fi
 
     WIN_USER=""
     if command -v cmd.exe >/dev/null 2>&1; then

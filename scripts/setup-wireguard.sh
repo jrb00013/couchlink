@@ -47,9 +47,10 @@ LISTEN_PORT="${COUCHLINK_WG_LISTEN_PORT:-51820}"
 # 1. COUCHLINK_WG_ENDPOINT — explicit override, always wins.
 # 2. A global IPv6 this machine actually holds. Preferred because it needs no
 #    port forward: the address is ours end-to-end, and UDP reaches it directly.
-#    Under WSL this only became possible with mirrored networking — in NAT mode
-#    WSL had no IPv6 at all, and `netsh portproxy` is TCP-only, so inbound UDP
-#    could never reach WireGuard however the firewall was configured.
+#    On WSL the tunnel lives in the Windows WireGuard app (unless mirrored mode
+#    is live), so we read the Windows-side address — NAT-mode WSL has no IPv6,
+#    and netsh portproxy is TCP-only, which is why inbound UDP must terminate on
+#    Windows, not in the WSL VM.
 # 3. The IPv4 WAN address, which requires a router forward of UDP 51820. This
 #    was the old default and is why the generated config never handshaked here.
 ENDPOINT_HOST="${COUCHLINK_WG_ENDPOINT:-${COUCHLINK_PUBLIC_IP:-}}"
@@ -150,10 +151,9 @@ echo "==> wrote $WG_DIR/wg0-player.conf (Endpoint ${ENDPOINT_LITERAL}:${LISTEN_P
 echo ""
 echo "Next (host):"
 echo "  1) Allow UDP ${LISTEN_PORT} inbound (router forward / firewall), or use Tailscale instead"
-echo "  2) sudo install -m 600 $WG_DIR/wg0-host.conf /etc/wireguard/wg0.conf"
-echo "     sudo wg-quick up wg0"
-echo "     (WSL: prefer Windows WireGuard app — import wg0-host.conf; see docs/WIREGUARD.md)"
-echo "  3) ./scripts/run.sh host --online   # detects wg0 and prints mesh join URL"
+echo "  2) WSL (NAT, no mirror): import this conf in the Windows WireGuard app — ./scripts/enable-wireguard.sh"
+echo "     WSL (mirrored) / Linux / macOS: sudo wg-quick up wg0 (see docs/WIREGUARD.md)"
+echo "  3) ./scripts/run.sh host --online   # detects the tunnel and prints mesh join URL"
 echo ""
 echo "Next (friend):"
 echo "  1) Copy wg0-player.conf to their machine; import / wg-quick up"

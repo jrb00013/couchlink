@@ -122,6 +122,33 @@ couchlink_local_ip() {
   echo "${ip:-}"
 }
 
+# WSL networking mode: "mirrored" | "nat" | "" (not WSL / unknown).
+#
+# Runtime signal wins: only live mirroring gives the WSL instance a global IPv6,
+# which is exactly what decides whether a WSL-hosted WireGuard/coturn can answer
+# inbound. Falls back to the .wslconfig intent when WSL was not restarted yet.
+couchlink_wsl_networking_mode() {
+  if [[ "$(couchlink_detect_platform 2>/dev/null)" != "wsl" ]]; then
+    return 1
+  fi
+  if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 [23]'; then
+    echo "mirrored"
+    return 0
+  fi
+  local conf="" win_user=""
+  if command -v cmd.exe >/dev/null 2>&1; then
+    win_user="$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r')"
+  fi
+  win_user="${win_user:-josep}"
+  conf="/mnt/c/Users/${win_user}/.wslconfig"
+  if [[ -f "$conf" ]] && grep -qiE '^[[:space:]]*networkingMode[[:space:]]*=[[:space:]]*mirrored' "$conf"; then
+    echo "mirrored"
+    return 0
+  fi
+  echo "nat"
+  return 0
+}
+
 # Quiet-by-default logging for run.sh / start-*.sh (opt in with --verbose).
 couchlink_verbose() {
   case "${COUCHLINK_VERBOSE:-0}" in
