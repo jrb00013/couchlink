@@ -27,6 +27,12 @@ pick_linux_tailscale() {
     printf '%s' "$b"
     return 0
   fi
+  # macOS: the `tailscale` cask may not be on PATH; use the app bundle CLI.
+  if [[ "$(uname -s)" == "Darwin" ]] \
+    && [[ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]]; then
+    printf '%s\n' "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    return 0
+  fi
   return 1
 }
 
@@ -80,5 +86,5 @@ if bin="$(pick_linux_tailscale)"; then
   exit 0
 fi
 
-echo "Linux Tailscale client still missing after install" >&2
+echo "Headscale client binary not found after install (platform: $PLATFORM)" >&2
 exit 1
