@@ -97,6 +97,28 @@ regardless of which of the three routes the triage found.
 
 Ordered by expected gain per unit of risk.
 
+### 2.0 Single-path video send — implemented, awaiting measurement
+
+**Status: built on `perf/single-path-video-send` (merging to main alongside
+FEC below).** No session was active when this was implemented, so there is no
+before/after from the real instrument yet — that is the first thing to capture
+next time someone connects.
+
+The client now reports which path it paints (`present_path` over signaling)
+and the host stops writing the other one (`crates/host/src/webrtc_peer.rs`,
+`path_flags`). Unknown/unreported still sends both, so no viewer can go black
+because we guessed. This composes with FEC below: `present_path` decides
+*whether* the DataChannel is sent, `COUCHLINK_FEC` decides *how* it's encoded
+when it is — independent knobs, same `push_h264`.
+
+- [ ] Get the `before` number: on `main` pre-merge, watch for
+      `frame push exceeded 50ms` rate and p95 `jitterBufferMs` on a live session.
+- [ ] Reproduce the same session, same preset, post-merge.
+- [ ] Compare. **Predict:** fewer/no `exceeded 50ms` events, p95 improves more
+      than p50 (removes self-inflicted congestion, not steady-state delay).
+- [ ] **Refuted if:** no measurable change — then the two streams were not
+      meaningfully contending, and this is safe-but-inert.
+
 ### 2.1 Spend the spare bandwidth on FEC — implemented, awaiting measurement
 
 **Status: built and tested on `perf/clvd-fec-single-loss-recovery`, PR #17.
