@@ -22,3 +22,4 @@ __pycache__/
 *.pyc
 web/tsconfig.tsbuildinfo
 native/uinput-helper/couchlink-uinput-helper
+.rocketride/

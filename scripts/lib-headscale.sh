@@ -134,6 +134,27 @@ sys.exit(1)
 ' <<<"$out"
 }
 
+# Locate a usable tailscaled daemon binary across platforms.
+# Linux/WSL: `tailscaled` on PATH or /usr/sbin. macOS: the Tailscale.app
+# bundle binary doubles as the daemon+CLI (no separate `tailscaled` exists).
+couchlink_headscale_tailscaled_bin() {
+  local b=""
+  b="$(command -v tailscaled 2>/dev/null || true)"
+  if [[ -n "$b" && -x "$b" ]]; then
+    printf '%s' "$b"; return 0
+  fi
+  if [[ -x /usr/sbin/tailscaled ]]; then
+    printf '%s' '/usr/sbin/tailscaled'; return 0
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local bundle="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    if [[ -x "$bundle" ]]; then
+      printf '%s' "$bundle"; return 0
+    fi
+  fi
+  return 1
+}
+
 # Userspace tailscaled for Headscale (no sudo / no Windows Tailscale popup).
 # Prints socket path on stdout.
 couchlink_headscale_userspace_start() {
@@ -144,9 +165,7 @@ couchlink_headscale_userspace_start() {
   local pidf="$dir/tailscaled.pid"
   local logf="$dir/tailscaled.log"
   local tsbin
-  tsbin="$(command -v tailscaled 2>/dev/null || true)"
-  [[ -n "$tsbin" ]] || tsbin="/usr/sbin/tailscaled"
-  [[ -x "$tsbin" ]] || return 1
+  tsbin="$(couchlink_headscale_tailscaled_bin)" || return 1
   mkdir -p "$dir"
   if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
     [[ -S "$sock" ]] && { printf '%s' "$sock"; return 0; }
