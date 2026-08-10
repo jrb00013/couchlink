@@ -206,7 +206,12 @@ fn main() -> Result<()> {
             view::ViewResult::Closed => return Ok(()),
             view::ViewResult::Rejoin(url) => {
                 let _ = config_file::write_join_url(&url);
-                join_prefill = url;
+                // winit allows exactly one EventLoop per process, so looping
+                // back into run_windowed fails with "EventLoop can't be
+                // recreated" and silently drops to headless — which renders no
+                // video at all, so the user sees the app do nothing. Re-exec
+                // instead: a fresh process gets a fresh EventLoop.
+                return rejoin_via_reexec(&url);
             }
         }
     }
@@ -265,6 +270,28 @@ fn run_headless(args: ResolvedArgs) -> Result<()> {
 ///
 /// `join_prefill` seeds the waiting-screen field. `args` starts networking when
 /// present; otherwise the window waits until the user submits a join link.
+/// Restart this binary with the new join URL.
+///
+/// The alternative is recreating winit's EventLoop, which it forbids.
+fn rejoin_via_reexec(url: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("locate current executable")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--join-url").arg(url);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec replaces this process, so there is no window of two clients
+        // fighting over the same pad device or audio output.
+        let err = cmd.exec();
+        return Err(err).context("re-exec for rejoin");
+    }
+    #[allow(unreachable_code)]
+    {
+        let status = cmd.status().context("re-exec for rejoin")?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
+}
+
 fn run_windowed(args: Option<ResolvedArgs>, join_prefill: String) -> Result<view::ViewResult> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -302,7 +329,11 @@ fn run_windowed(args: Option<ResolvedArgs>, join_prefill: String) -> Result<view
     let view_result = match view::run(frame_rx, keyboard_pad, shutdown_tx, join_prefill) {
         Ok(r) => r,
         Err(e) => {
-            warn!("windowed viewer failed ({e}), falling back to headless mode");
+            // Headless has no video output at all — say so rather than
+            // letting the user watch a silent process and conclude the whole
+            // thing is broken.
+            warn!("windowed viewer failed ({e})");
+            warn!("falling back to headless: input still works, but THERE WILL BE NO VIDEO WINDOW");
             if let Some(net_thread) = net_thread {
                 if let Err(join_err) = net_thread.join() {
                     warn!("network thread panicked during fallback shutdown: {join_err:?}");
