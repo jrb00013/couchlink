@@ -98,6 +98,15 @@ pub struct WebRtcHost {
     offer_epoch: Arc<AtomicU64>,
     /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
     keyframe_wanted: Arc<AtomicBool>,
+    /// `COUCHLINK_FEC=1` — send an XOR parity fragment on the CLVD channel so a
+    /// single dropped fragment recovers with no round trip instead of costing a
+    /// full keyframe request.
+    ///
+    /// Off by default: it was built and tested (crates/proto/src/video_frame.rs)
+    /// without a live session to measure real packet loss against, and enabling
+    /// it unmeasured would spend bandwidth on a problem that may not exist. See
+    /// docs/superpowers/plans/2026-08-06-latency-next-session.md §2.1.
+    fec_enabled: bool,
 }
 
 impl WebRtcHost {
@@ -292,6 +301,10 @@ impl WebRtcHost {
                 pad_dc,
                 offer_epoch,
                 keyframe_wanted,
+                fec_enabled: matches!(
+                    std::env::var("COUCHLINK_FEC").as_deref(),
+                    Ok("1") | Ok("true")
+                ),
             },
             pad_rx,
         ))
@@ -421,7 +434,12 @@ impl WebRtcHost {
                 keyframe,
                 annex_b,
             };
-            for frag in au.encode_fragments() {
+            let fragments = if self.fec_enabled {
+                au.encode_fragments_with_fec()
+            } else {
+                au.encode_fragments()
+            };
+            for frag in fragments {
                 if let Err(e) = self.video_dc.send(&Bytes::from(frag)).await {
                     warn!("video datachannel send: {e}");
                     break;
