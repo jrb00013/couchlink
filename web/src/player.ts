@@ -68,6 +68,7 @@ export class CouchlinkPlayer {
   private connectTimer: number | null = null;
   private sessionRetryTimer: number | null = null;
   private mediaRecoverTimer: number | null = null;
+  private iceDisconnectTimer: number | null = null;
   private sessionRetries = 0;
   private pending: { sid: string; pin: string } | null = null;
   private seq = 0;
@@ -326,12 +327,14 @@ export class CouchlinkPlayer {
     if (this.connectTimer) clearTimeout(this.connectTimer);
     if (this.sessionRetryTimer) clearTimeout(this.sessionRetryTimer);
     if (this.mediaRecoverTimer) clearTimeout(this.mediaRecoverTimer);
+    if (this.iceDisconnectTimer) clearTimeout(this.iceDisconnectTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.statsTimer) clearInterval(this.statsTimer);
     if (this.padTimer) clearInterval(this.padTimer);
     this.connectTimer = null;
     this.sessionRetryTimer = null;
     this.mediaRecoverTimer = null;
+    this.iceDisconnectTimer = null;
     this.heartbeatTimer = null;
     this.statsTimer = null;
     this.lastStats = null;
@@ -345,6 +348,8 @@ export class CouchlinkPlayer {
   private resetPeer() {
     if (this.padTimer) clearInterval(this.padTimer);
     this.padTimer = null;
+    if (this.iceDisconnectTimer) clearTimeout(this.iceDisconnectTimer);
+    this.iceDisconnectTimer = null;
     this.padDc?.close();
     this.videoDc?.close();
     this.pc?.close();
@@ -473,10 +478,41 @@ export class CouchlinkPlayer {
     pc.oniceconnectionstatechange = () => {
       clog("pc.iceConnectionState", pc.iceConnectionState);
       if (pc.iceConnectionState === "failed") {
+        if (this.iceDisconnectTimer) {
+          clearTimeout(this.iceDisconnectTimer);
+          this.iceDisconnectTimer = null;
+        }
         cwarn("ICE problem", pc.iceConnectionState);
         this.scheduleMediaRecover("ICE failed");
       } else if (pc.iceConnectionState === "disconnected") {
         cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
+        // "disconnected" only means the browser's own consent-freshness pings
+        // stopped getting answered — a NAT rebind or a brief drop on a live
+        // direct P2P path (srflx/srflx, no relay) does exactly this. Chrome
+        // waits its own multi-second-to-tens-of-seconds timer before ever
+        // trying `failed`, and nothing here did anything proactive during
+        // that whole window — the video just stayed frozen while the browser
+        // quietly kept probing. restartIce() is the standard primitive for
+        // "try to recover this same connection" and is far cheaper than
+        // waiting for `failed` to trigger a full renegotiation. Give the
+        // browser's own recovery a head start, then force it.
+        if (!this.iceDisconnectTimer) {
+          this.iceDisconnectTimer = window.setTimeout(() => {
+            this.iceDisconnectTimer = null;
+            if (this.pc?.iceConnectionState !== "disconnected") return;
+            clog("ICE still disconnected after grace period — restarting ICE");
+            try {
+              this.pc.restartIce();
+            } catch (e) {
+              cwarn("restartIce failed", String(e));
+            }
+          }, 4000);
+        }
+      } else {
+        if (this.iceDisconnectTimer) {
+          clearTimeout(this.iceDisconnectTimer);
+          this.iceDisconnectTimer = null;
+        }
       }
     };
     pc.onicegatheringstatechange = () => {
