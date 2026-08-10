@@ -10,14 +10,15 @@ mod tests {
 
     use crate::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, PRODUCT_NAME, SONY_VID};
     use crate::recognize::{
-        classify, is_native_supported, is_supported_dualsense, is_supported_xbox, parse_hid_id_line,
-        product_label, ControllerFamily, XboxVariant, DUALSHOCK4_PIDS, PID_DUALSHOCK4_V2,
+        classify, is_native_supported, is_supported_dualsense, is_supported_xbox,
+        parse_hid_id_line, product_label, ControllerFamily, XboxVariant, DUALSHOCK4_PIDS,
+        PID_DUALSHOCK4_V2,
     };
     use crate::sim::{
         decode_clpd, dualsense_bt_neutral_report, dualsense_usb_neutral_report,
         dualsense_usb_press, dualsense_usb_with_sticks, encode_clpd, simulate_dualsense_frame,
-        simulate_xbox_frame, xbox_neutral_report, xbox_press, xbox_with_sticks, SimButton,
-        DUALSENSE_ONLY_BUTTONS, SHARED_BUTTONS,
+        simulate_xbox_frame, xbox_legacy_press, xbox_neutral_report, xbox_press, xbox_with_sticks,
+        SimButton, DUALSENSE_ONLY_BUTTONS, SHARED_BUTTONS,
     };
     use crate::virtual_pad::{VirtualPad, VirtualPadConfig};
     use crate::xbox::MICROSOFT_VID;
@@ -90,11 +91,7 @@ mod tests {
 
         for &btn in SHARED_BUTTONS {
             let f = simulate_xbox_frame(&xbox_press(btn)).unwrap();
-            assert!(
-                f.buttons & btn.pad_bit() != 0,
-                "Xbox sim missing {:?}",
-                btn
-            );
+            assert!(f.buttons & btn.pad_bit() != 0, "Xbox sim missing {:?}", btn);
         }
         // Xbox has no Touch/Mute in our HID layout
         for &btn in DUALSENSE_ONLY_BUTTONS {
@@ -128,6 +125,20 @@ mod tests {
             assert_eq!(got.buttons, expected.buttons, "{}", v.label());
             assert_eq!(got.lx, expected.lx);
         }
+    }
+
+    #[test]
+    fn xbox_tester_legacy_16byte_layout_maps_stick_clicks() {
+        // Original Xbox One S firmware keeps L3/R3 in the third button byte
+        // and ships the guide button in a separate report id 0x02 packet.
+        use crate::parse_xbox::XBOX_GUIDE_REPORT_ID;
+        let l3 = simulate_xbox_frame(&xbox_legacy_press(SimButton::L3)).unwrap();
+        assert!(l3.buttons & buttons::L3 != 0);
+        let r3 = simulate_xbox_frame(&xbox_legacy_press(SimButton::R3)).unwrap();
+        assert!(r3.buttons & buttons::R3 != 0);
+
+        let guide = simulate_xbox_frame(&[XBOX_GUIDE_REPORT_ID, 0x01]).unwrap();
+        assert!(guide.buttons & buttons::PS != 0);
     }
 
     // ── Client: simulated DualSense / PlayStation input ────────────────────
