@@ -6,7 +6,7 @@ mod cursor_x11;
 use anyhow::{bail, Context, Result};
 pub use bridge::Captured;
 use bridge::WindowsBridge;
-use couchlink_capture_bridge::FrameFormat;
+use couchlink_capture_bridge::{EncodeTarget, FrameFormat};
 use local::ScrapCapture;
 
 pub fn sample_avg_luma_bgra(bgra: &[u8], max_pixels: usize) -> u64 {
@@ -62,6 +62,14 @@ impl FrameCapture {
     pub fn request_idr(&mut self) {
         if let Self::Windows(c) = self {
             c.request_idr();
+        }
+    }
+
+    /// Command the Windows encoder to match the stream target. No-op on the local
+    /// path, where the host's own encoder already uses the preset directly.
+    pub fn set_target(&mut self, target: EncodeTarget) {
+        if let Self::Windows(c) = self {
+            c.set_target(target);
         }
     }
 

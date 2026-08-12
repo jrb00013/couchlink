@@ -4,6 +4,7 @@ mod emulator_pad;
 mod encode;
 mod invite;
 mod latency;
+mod link_gov;
 mod motion;
 mod scale;
 mod signaling_client;
@@ -279,6 +280,29 @@ async fn main() -> Result<()> {
             "local display"
         }
     );
+    // Command the Windows encoder to match the preset so the wire size, rate and
+    // bitrate can never silently diverge from what the host advertises. Without
+    // this a directly-launched host and a stale win-capture stream e.g. 1728x1080
+    // while the player is told 1280x720 — overloading both the link and a remote
+    // decoder that cannot shrink the stream in time.
+    capturer.set_target(couchlink_capture_bridge::EncodeTarget {
+        width: preset.width,
+        height: preset.height,
+        fps: preset.fps,
+        bitrate_kbps: preset.bitrate_kbps,
+    });
+    // Close the loop between the link and the Windows encoder: when the push
+    // shows persistent sheds, work the commanded target down the rung ladder so
+    // the player's decoder stays fed instead of burning keyframe requests on a
+    // stream it cannot drain. Only the pre-encoded path feeds it (the local
+    // encoder is in-process and already preset-bound).
+    let mut link_gov = link_gov::LinkGov::new(couchlink_capture_bridge::EncodeTarget {
+        width: preset.width,
+        height: preset.height,
+        fps: preset.fps,
+        bitrate_kbps: preset.bitrate_kbps,
+    });
+    let mut commanded_target = link_gov.current();
     let mut encoder = encode::H264Encoder::new(preset.width, preset.height, preset.bitrate_kbps)?;
     let mut motion = motion::MotionDetector::new(preset.width, preset.height);
     // Motion is measured on the raw capture, whose size is not the preset size.
@@ -568,12 +592,27 @@ async fn main() -> Result<()> {
                             Ok(false) => {
                             frames_out += 1;
                             stage_capture += ms_capture;
-                            if rate_window.elapsed() >= Duration::from_secs(5) {
+if rate_window.elapsed() >= Duration::from_secs(5) {
                                 let window_frames = frames_out - rate_mark;
                                 let fps =
                                     window_frames as f64 / rate_window.elapsed().as_secs_f64();
                                 let sent = window_frames + dropped_frames;
                                 let drop_pct = if sent > 0 { dropped_frames * 100 / sent } else { 0 };
+                                // The pre-encoded encoder is the only component the
+                                // link cannot throttle by itself. If sheds persist,
+                                // step the commanded target down so the player gets
+                                // every frame the link can carry.
+                                let decided =
+                                    link_gov.on_window(dropped_frames as u32, window_frames as u32);
+                                if decided != commanded_target {
+                                    commanded_target = decided;
+                                    capturer.set_target(decided.clone());
+                                    info!(
+                                        "link governor: commanded encoder {}x{}@{} ({} kbps) after {}% sheds",
+                                        decided.width, decided.height, decided.fps,
+                                        decided.bitrate_kbps, drop_pct
+                                    );
+                                }
                                 eprintln!(
                                     "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
                                      | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",

@@ -27,6 +27,43 @@ const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 /// joining mid-session waits for the encoder's own keyframe interval.
 pub const REQUEST_IDR: u8 = b'I';
 
+/// Sent by the host back up the capture socket to command the encode target.
+///
+/// Without this the Windows encoder is *detached from the link*: it encodes the
+/// captured window at its native size using whatever `--max-width/--max-height`
+/// arguments it happened to launch with, while the host's stream preset says
+/// something entirely different. The join only "worked" when the launch script
+/// happened to pass matching values — a direct host launch (or a stale
+/// win-capture) silently streamed the wrong resolution at the wrong bitrate.
+///
+/// The command carries the whole target so the encoder matches the preset
+/// (or a later bandwidth decision) without a restart: width, height, fps, and
+/// bitrate in kbps, each `u32` LE. A fresh win-capture gets its defaults from
+/// CLI args and adopts the commanded target the moment the host connects.
+pub const SET_TARGET: u8 = b'T';
+
+/// Encode target a host commands win-capture to use. Mirrors `StreamPreset`
+/// (minus the name) on purpose — the host should say exactly what it sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodeTarget {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
+/// Write a `SET_TARGET` command. The reader side is the peer that owns the
+/// encoder, so this is deliberately the only writer in the capture-bridge crate.
+pub fn write_set_target(w: &mut impl Write, target: EncodeTarget) -> Result<()> {
+    w.write_all(&[SET_TARGET])?;
+    w.write_all(&target.width.to_le_bytes())?;
+    w.write_all(&target.height.to_le_bytes())?;
+    w.write_all(&target.fps.to_le_bytes())?;
+    w.write_all(&target.bitrate_kbps.to_le_bytes())?;
+    w.flush()?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameFormat {
     /// Raw BGRA8, `width * height * 4` bytes. The fallback path.
@@ -219,5 +256,30 @@ mod tests {
         wire.extend_from_slice(&[0u8; 16]);
         let mut buf = Vec::new();
         assert!(read_frame_sync(&mut Cursor::new(&wire), &mut buf).is_err());
+    }
+
+    #[test]
+    fn set_target_command_writes_opcode_and_fields() {
+        let target = EncodeTarget {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            bitrate_kbps: 10_000,
+        };
+        let mut wire = Vec::new();
+        write_set_target(&mut wire, target).unwrap();
+        assert_eq!(wire[0], SET_TARGET);
+        assert_eq!(u32::from_le_bytes(wire[1..5].try_into().unwrap()), 1280);
+        assert_eq!(u32::from_le_bytes(wire[5..9].try_into().unwrap()), 720);
+        assert_eq!(u32::from_le_bytes(wire[9..13].try_into().unwrap()), 60);
+        assert_eq!(u32::from_le_bytes(wire[13..17].try_into().unwrap()), 10_000);
+        assert_eq!(wire.len(), 17);
+    }
+
+    /// SET_TARGET and REQUEST_IDR are distinct commands on the same stream; the
+    /// reader must not confuse the opcode byte with the IDR byte.
+    #[test]
+    fn set_target_opcode_is_distinct_from_idr() {
+        assert_ne!(SET_TARGET, REQUEST_IDR);
     }
 }

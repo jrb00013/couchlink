@@ -15,7 +15,7 @@ mod run {
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
     use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::io::BufWriter;
     use std::net::TcpStream;
     use std::sync::mpsc;
@@ -101,14 +101,41 @@ mod run {
     #[derive(Clone, Copy)]
     pub struct EncoderCfg {
         pub enabled: bool,
-        pub fps: u32,
-        pub bitrate_bps: u32,
     }
 
     /// Set by the socket reader when the host asks for an IDR (a player joined and
     /// needs something it can decode from scratch). Read by the capture thread,
     /// which owns the encoder.
     static IDR_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+    /// The encode target the host wants us to match. Written only by the socket
+    /// reader when a SET_TARGET command arrives; read by the capture thread on
+    /// every frame (fit box) and by the encoder thread at build time (fps/bitrate).
+    ///
+    /// Seeded from CLI args at startup so a host that never sends the command gets
+    /// its old behaviour exactly — the command is a *correction*, not a necessity.
+    static TARGET_W: AtomicU32 = AtomicU32::new(1920);
+    static TARGET_H: AtomicU32 = AtomicU32::new(1080);
+    static TARGET_FPS: AtomicU32 = AtomicU32::new(60);
+    static TARGET_BITRATE_KBPS: AtomicU32 = AtomicU32::new(18000);
+
+    fn apply_target(t: couchlink_capture_bridge::EncodeTarget) {
+        if t.width == 0 || t.height == 0 || t.fps == 0 {
+            warn!("ignoring malformed SET_TARGET {t:?}");
+            return;
+        }
+        TARGET_W.store(t.width, Ordering::Relaxed);
+        TARGET_H.store(t.height, Ordering::Relaxed);
+        TARGET_FPS.store(t.fps, Ordering::Relaxed);
+        TARGET_BITRATE_KBPS.store(t.bitrate_kbps, Ordering::Relaxed);
+        info!(
+            "host commanded encode target: {}x{}@{} ({} kbps)",
+            t.width, t.height, t.fps, t.bitrate_kbps
+        );
+        // A target change is exactly when the frame size / GOP may change; start
+        // the new encoder with a keyframe so the decoder never hangs on P-frames.
+        IDR_REQUESTED.store(true, Ordering::Relaxed);
+    }
 
     /// Set when GPU encoding is unavailable or has failed, switching the capture
     /// thread back to shipping raw pixels. Latched: we do not retry COM setup on
@@ -154,8 +181,6 @@ mod run {
     /// an MFT is bound to exactly one frame size.
     fn spawn_encoder_thread(
         device: SendDevice,
-        fps: u32,
-        bitrate_bps: u32,
         out: mpsc::SyncSender<FrameMsg>,
     ) -> mpsc::SyncSender<(u32, u32, Surface, Instant)> {
         let (raw_tx, raw_rx) = mpsc::sync_channel::<(u32, u32, Surface, Instant)>(1);
@@ -170,6 +195,11 @@ mod run {
                 let Some((w, h, pixels, _t)) = seed.take().or_else(|| raw_rx.recv().ok()) else {
                     return;
                 };
+                // The host may have commanded fps/bitrate since the last build —
+                // re-read them so a SET_TARGET lands on the next encoder, and mark
+                // what we built so a later change rebuilds again.
+                let fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
+                let bitrate_bps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed) * 1000;
                 // Prefer the device-backed encoder so textures can go straight in;
                 // fall back to the system-memory encoder if it will not take a device.
                 let zero_copy_wanted = matches!(pixels, Surface::Texture(_));
@@ -187,7 +217,7 @@ mod run {
                             ZERO_COPY_OK.store(false, Ordering::Relaxed);
                         }
                         info!(
-                            "GPU H.264 encoding at {w}x{h} ({}) — host receives NALs, not pixels",
+                            "GPU H.264 encoding at {w}x{h}@{fps} ({bitrate_bps} bps rate budget — {}) — host receives NALs, not pixels",
                             if e.is_zero_copy() { "zero-copy textures" } else { "system memory" }
                         );
                         e
@@ -283,6 +313,18 @@ mod run {
                             submitted_at = from_source.then_some(captured_at);
                             if (fw, fh) != encoder.dimensions() {
                                 info!("capture resized to {fw}x{fh} — rebuilding the encoder");
+                                seed = Some((fw, fh, surface, captured_at));
+                                continue 'build;
+                            }
+                            // A SET_TARGET can change fps/bitrate without changing the
+                            // frame size; the MFT is bound to one rate config at build,
+                            // so rebuild then too.
+                            let now_fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
+                            let now_kbps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed);
+                            if now_fps != fps || now_kbps * 1000 != bitrate_bps {
+                                info!(
+                                    "encode target now {fw}x{fh}@{now_fps} ({now_kbps} kbps) — rebuilding encoder"
+                                );
                                 seed = Some((fw, fh, surface, captured_at));
                                 continue 'build;
                             }
@@ -465,8 +507,6 @@ mod run {
                 raw_tx: cfg.enabled.then(|| {
                     spawn_encoder_thread(
                         SendDevice(ctx.device.clone()),
-                        cfg.fps,
-                        cfg.bitrate_bps,
                         ctx.flags.0.clone(),
                     )
                 }),
@@ -486,6 +526,10 @@ mod run {
             _capture_control: InternalCaptureControl,
         ) -> Result<(), Self::Error> {
             self.arrived += 1;
+            // The host may have commanded a resolution since this capture started;
+            // re-read the target every frame so a resize takes effect promptly.
+            self.max_w = TARGET_W.load(Ordering::Relaxed);
+            self.max_h = TARGET_H.load(Ordering::Relaxed);
             if self.rate_window.elapsed() >= Duration::from_secs(5) {
                 let secs = self.rate_window.elapsed().as_secs_f64();
                 // Tells apart "Windows isn't rendering the window" from "the wire is
@@ -609,18 +653,38 @@ mod run {
         Ok(())
     }
 
-    /// One byte per request; anything else means the link died.
-    fn watch_for_idr_requests(mut reader: TcpStream) {
+    /// Host commands, multiplexed on the reverse of the frame socket.
+    ///
+    /// `I` = request IDR (1 byte). `T` = SET_TARGET, followed by 16 bytes of
+    /// `EncodeTarget` (4 × `u32` LE). The reader blocks on the 16 bytes once it
+    /// sees a `T`, which is fine: the host writes a command in one `write_all`,
+    /// so a partial `T` payload only happens on a torn socket, which is broken
+    /// anyway. Anything else means the link died.
+    fn watch_commands(mut reader: TcpStream) {
         use std::io::Read;
         let mut byte = [0u8; 1];
         loop {
             match reader.read(&mut byte) {
                 Ok(0) | Err(_) => return,
-                Ok(_) => {
-                    if byte[0] == couchlink_capture_bridge::REQUEST_IDR {
+                Ok(_) => match byte[0] {
+                    couchlink_capture_bridge::REQUEST_IDR => {
                         IDR_REQUESTED.store(true, Ordering::Relaxed);
                     }
-                }
+                    couchlink_capture_bridge::SET_TARGET => {
+                        let mut body = [0u8; 16];
+                        if reader.read_exact(&mut body).is_err() {
+                            return;
+                        }
+                        let u32le = |i: usize| u32::from_le_bytes(body[i..i + 4].try_into().unwrap());
+                        apply_target(couchlink_capture_bridge::EncodeTarget {
+                            width: u32le(0),
+                            height: u32le(4),
+                            fps: u32le(8),
+                            bitrate_kbps: u32le(12),
+                        });
+                    }
+                    _ => return, // unknown command = protocol mismatch
+                },
             }
         }
     }
@@ -634,7 +698,7 @@ mod run {
                     // The host writes back on this socket to request keyframes; read
                     // it on its own thread so writes never block on it.
                     if let Ok(reader) = stream.try_clone() {
-                        std::thread::spawn(move || watch_for_idr_requests(reader));
+                        std::thread::spawn(move || watch_commands(reader));
                     }
                     let mut writer = BufWriter::new(stream);
                     while let Ok((w, h, payload, format, keyframe)) = rx.recv() {
@@ -671,6 +735,11 @@ mod run {
         if args.list_windows {
             return list_windows();
         }
+        // CLI args are the fallback the host's SET_TARGET supersedes.
+        TARGET_W.store(args.max_width, Ordering::Relaxed);
+        TARGET_H.store(args.max_height, Ordering::Relaxed);
+        TARGET_FPS.store(args.max_fps, Ordering::Relaxed);
+        TARGET_BITRATE_KBPS.store(args.bitrate_kbps, Ordering::Relaxed);
 
         // Depth is a latency/throughput trade and it depends on frame size. A raw
         // 3.3MB frame takes ~50ms to push, so queueing one costs real latency —
@@ -685,8 +754,6 @@ mod run {
         // simply keep sending raw pixels as before.
         let enc_cfg = EncoderCfg {
             enabled: args.gpu_encode,
-            fps: args.max_fps,
-            bitrate_bps: args.bitrate_kbps * 1000,
         };
         if !enc_cfg.enabled {
             info!("GPU encoding disabled by flag — sending raw BGRA");

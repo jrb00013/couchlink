@@ -3,7 +3,8 @@
 
 use anyhow::{bail, Context, Result};
 use couchlink_capture_bridge::{
-    read_frame_body_sync, FrameFormat, FrameInfo, FRAME_MAGIC, REQUEST_IDR,
+    read_frame_body_sync, write_set_target, EncodeTarget, FrameFormat, FrameInfo, FRAME_MAGIC,
+    REQUEST_IDR,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -52,6 +53,10 @@ pub struct WindowsBridge {
     last: Option<Vec<u8>>,
     format: FrameFormat,
     keyframe: bool,
+    /// The encode target the host commanded win-capture to match. Remembered so a
+    /// reconnecting client is re-told immediately; a fresh win-capture process
+    /// starts from its CLI defaults until this reaches it.
+    target: Option<EncodeTarget>,
 }
 
 impl WindowsBridge {
@@ -79,9 +84,29 @@ impl WindowsBridge {
             last: None,
             format: FrameFormat::Bgra,
             keyframe: false,
+            target: None,
         };
         bridge.read_one()?;
         Ok(bridge)
+    }
+
+    /// Tell the Windows encoder to match this target. Safe before a format is seen:
+    /// the command is round-tripped on reconnect too, so it is not lost.
+    pub fn set_target(&mut self, target: EncodeTarget) {
+        self.target = Some(target);
+        if let Some(stream) = self.stream.as_mut() {
+            if let Err(e) = write_set_target(stream, target) {
+                tracing::warn!("could not command encode target to win-capture: {e}");
+            } else {
+                tracing::info!(
+                    "commanded win-capture encode target {}x{}@{} ({} kbps)",
+                    target.width,
+                    target.height,
+                    target.fps,
+                    target.bitrate_kbps
+                );
+            }
+        }
     }
 
     fn read_one(&mut self) -> Result<()> {
@@ -97,11 +122,18 @@ impl WindowsBridge {
     /// is waiting yet, which is normal while win-capture restarts.
     fn try_reconnect(&mut self) -> bool {
         match self.listener.accept() {
-            Ok((stream, peer)) => {
+            Ok((mut stream, peer)) => {
                 if configure(&stream).is_err() {
                     return false;
                 }
                 tracing::info!("Windows capture client reconnected from {peer}");
+                // A fresh win-capture process starts at its CLI defaults; re-assert
+                // the preset before it encodes its first frame.
+                if let Some(target) = self.target {
+                    if let Err(e) = write_set_target(&mut stream, target) {
+                        tracing::warn!("could not re-command encode target after reconnect: {e}");
+                    }
+                }
                 self.stream = Some(stream);
                 true
             }
