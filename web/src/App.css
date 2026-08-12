@@ -624,3 +624,32 @@ button.ghost {
     border-radius: 12px;
   }
 }
+
+/* ── Keyboard+mouse input toggle ─────────────────────────── */
+.kbm-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+  margin-top: .5rem;
+}
+.kbm-toggle {
+  padding: .3rem .75rem;
+  border-radius: 6px;
+  border: 1.5px solid var(--accent, #4a9eff);
+  background: transparent;
+  color: var(--accent, #4a9eff);
+  font-size: .8rem;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.kbm-toggle.is-active {
+  background: var(--accent, #4a9eff);
+  color: #000;
+}
+.kbm-hint {
+  font-size: .72rem;
+  color: #aaa;
+  max-width: 420px;
+  line-height: 1.4;
+}

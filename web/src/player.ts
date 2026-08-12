@@ -1,4 +1,5 @@
 import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
+import { KeyboardMouseInput } from "./keyboardMouse";
 import {
   ClvdAssembler,
   decodeClvdFragment,
@@ -138,6 +139,8 @@ export class CouchlinkPlayer {
   private padInfoSent = "";
   /** Last logged media-path summary, so the line prints only on change. */
   private lastPathKey = "";
+  /** Keyboard+mouse input source — injected by the UI, null if not active. */
+  private kbm: KeyboardMouseInput | null = null;
   /** Previous inbound-rtp sample, for bitrate + loss deltas. */
   private lastInbound:
     | { bytes: number; lost: number; count: number; at: number }
@@ -158,6 +161,11 @@ export class CouchlinkPlayer {
 
   setTurn(turn: { url: string; user: string; pass: string } | null) {
     this.turn = turn;
+  }
+
+  /** Attach or detach a keyboard/mouse input source. Call with null to disable. */
+  setKbm(kbm: KeyboardMouseInput | null) {
+    this.kbm = kbm;
   }
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
@@ -798,7 +806,23 @@ export class CouchlinkPlayer {
         break;
       }
     }
-    if (!gp) return;
+    if (!gp) {
+      // No gamepad — fall back to keyboard/mouse if active
+      const kbm = this.kbm;
+      if (!kbm) return;
+      this.seq = (this.seq + 1) >>> 0;
+      const kbmState = kbm.sample(this.seq);
+      this.padDc.send(encodeClpd(kbmState));
+      this.padSent += 1;
+      const now = performance.now();
+      if (now - this.padWindowStart >= 1000) {
+        this.lastPadHz = this.padSent;
+        this.cb.onPadStats?.(this.padSent, "keyboard+mouse");
+        this.padSent = 0;
+        this.padWindowStart = now;
+      }
+      return;
+    }
     // Tell the host which pad family this is. PadFrame is normalised by the
     // Gamepad API, so the host cannot infer it from input — without this it
     // binds the emulator to whatever was configured last, which drops every

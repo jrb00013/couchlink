@@ -12,6 +12,7 @@ import { ControllerViz, useLivePads } from "./ControllerViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
+import { KeyboardMouseInput } from "./keyboardMouse";
 import type { PlayerTelemetry } from "./player";
 import "./App.css";
 
@@ -78,6 +79,9 @@ export default function App() {
   } | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [kbmActive, setKbmActive] = useState(false);
+  const [pointerLocked, setPointerLocked] = useState(false);
+  const kbmRef = useRef<KeyboardMouseInput | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -366,6 +370,30 @@ export default function App() {
     playerRef.current?.connect(signalingUrl, invite.sessionId, invite.pin);
   }, [invite.auto, invite.sessionId, invite.pin, signalingUrl]);
 
+  // Create/destroy keyboard+mouse input and wire it into the player
+  useEffect(() => {
+    const canvas = canvasRef.current ?? stageRef.current ?? undefined;
+    if (kbmActive) {
+      const kbm = new KeyboardMouseInput({ lockTarget: canvas ?? null });
+      kbmRef.current = kbm;
+      kbm.start();
+      playerRef.current?.setKbm(kbm);
+      const onLockChange = () => setPointerLocked(!!document.pointerLockElement);
+      document.addEventListener("pointerlockchange", onLockChange);
+      return () => {
+        kbm.stop();
+        kbmRef.current = null;
+        playerRef.current?.setKbm(null);
+        document.removeEventListener("pointerlockchange", onLockChange);
+        setPointerLocked(false);
+      };
+    } else {
+      kbmRef.current?.stop();
+      kbmRef.current = null;
+      playerRef.current?.setKbm(null);
+    }
+  }, [kbmActive]);
+
   const connected = state === "connected" || state === "negotiating";
   const livePads = useLivePads(true);
 
@@ -488,6 +516,22 @@ export default function App() {
             <p className="pads-empty">
               Pair a pad, then press any button so the browser unlocks it.
             </p>
+            <div className="kbm-row">
+              <button
+                type="button"
+                className={`kbm-toggle ${kbmActive ? "is-active" : ""}`}
+                onClick={() => setKbmActive((v) => !v)}
+              >
+                {kbmActive ? "⌨ keyboard+mouse ON" : "⌨ use keyboard+mouse"}
+              </button>
+              {kbmActive && (
+                <span className="kbm-hint">
+                  {pointerLocked
+                    ? "🔒 mouse locked — Esc to release"
+                    : "click stream to lock mouse · WASD=move · LMB=R2 · RMB=L2 · Space=✕ · E=△ · Q=□ · F=○"}
+                </span>
+              )}
+            </div>
           </section>
         )}
       </div>

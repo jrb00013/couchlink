@@ -22,7 +22,8 @@ export type BottleneckCheck = {
  * the drawer is a triage tool, not a profiler — each row either looks fine
  * or names the thing to look at first.
  */
-export const LAN_RTT_MAX_MS = 30;
+/** Direct path RTT limit — 30ms for host/prflx (LAN), 80ms for srflx (internet punched). */
+export const LAN_RTT_MAX_MS = 80;
 export const TURN_RTT_MAX_MS = 120;
 export const MAX_JITTER_BUF_MS = 20;
 export const MIN_DECODE_FPS = 50;
@@ -43,13 +44,15 @@ export function bottleneckChecks(t: {
     checks.push({
       label: path.relayed
         ? `TURN relay RTT ${path.rttMs}ms (limit ${TURN_RTT_MAX_MS}ms)`
-        : `${path.family} ${path.local}→${path.remote} RTT ${path.rttMs}ms (limit ${LAN_RTT_MAX_MS}ms)`,
+        : `${path.family} ${path.local}→${path.remote} RTT ${path.rttMs}ms${path.rttMs <= LAN_RTT_MAX_MS ? "" : " ⚠ high"}`,
       ok: path.rttMs <= rttLimit,
       detail:
         path.rttMs > rttLimit
           ? path.relayed
             ? "relaying through TURN — prefer a direct path (port-forward or WireGuard)"
-            : "high latency on the direct path — check Wi-Fi / the link to the host"
+            : (path.local === "srflx" || path.remote === "srflx"
+              ? "internet peer (STUN punched) — RTT reflects your internet link, not a config problem"
+              : "high latency on the direct path — check Wi-Fi / the link to the host")
           : undefined,
     });
     if (path.relayed) {

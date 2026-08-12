@@ -229,10 +229,12 @@ export class WebCodecsCanvasView {
       }
 
       if (dec.decodeQueueSize > 2) {
-        // Prefer newest over catch-up — drop this AU; keep decoder configured.
+        // Decoder is backed up locally (slow paint/GPU, not a network issue).
+        // Drop the frame to let it catch up, but do NOT set waitingKeyframe —
+        // the decoder is still configured and the last keyframe is still valid.
+        // Requesting an IDR here just floods the host with PLIs and makes the
+        // stream degenerate into keyframe-only mode.
         this.dropped += 1;
-        this.waitingKeyframe = true;
-        this.requestKeyframe();
         return;
       }
 
