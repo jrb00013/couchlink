@@ -587,25 +587,28 @@ export class CouchlinkPlayer {
 
     pc.onconnectionstatechange = () => {
       clog("pc.connectionState", pc.connectionState);
-      if (pc.connectionState === "failed") {
-        cwarn("WebRTC connection failed — check ICE / firewall / WSL IP in signaling URL");
-        this.scheduleMediaRecover("connection failed");
-      } else if (pc.connectionState === "connected") {
+      if (pc.connectionState === "connected") {
+        // Authoritative healthy signal — both ICE and DTLS are up.
         this.mediaHealthy = this.gotVideoTrack;
         if (this.mediaRecoverTimer) {
           clearTimeout(this.mediaRecoverTimer);
           this.mediaRecoverTimer = null;
         }
+      } else if (pc.connectionState === "disconnected") {
+        // Transient loss — schedule a recover with the full grace period.
+        // If ICE self-heals the timer will be cancelled before it fires.
+        this.scheduleMediaRecover("connection disconnected");
+      } else if (pc.connectionState === "failed") {
+        cwarn("WebRTC connection failed — scheduling recover");
+        this.scheduleMediaRecover("connection failed");
       }
     };
     pc.oniceconnectionstatechange = () => {
       clog("pc.iceConnectionState", pc.iceConnectionState);
-      if (pc.iceConnectionState === "failed") {
-        cwarn("ICE problem", pc.iceConnectionState);
-        this.scheduleMediaRecover("ICE failed");
-      } else if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        // ICE self-healed — cancel any pending recover timer so we don't
-        // tear down a working connection after the grace period expires.
+      if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        // ICE layer is up — mark healthy and cancel any pending recover timer.
+        // connectionState may lag behind iceConnectionState on some browsers.
+        this.mediaHealthy = this.gotVideoTrack;
         if (this.mediaRecoverTimer) {
           clog("ICE reconnected — cancelling media recover timer");
           clearTimeout(this.mediaRecoverTimer);
@@ -613,6 +616,11 @@ export class CouchlinkPlayer {
         }
       } else if (pc.iceConnectionState === "disconnected") {
         cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
+        // Don't schedule recover here — connectionState will fire disconnected/failed
+        // if it doesn't self-heal, and that drives the single recover path.
+      } else if (pc.iceConnectionState === "failed") {
+        cwarn("ICE failed — scheduling recover", pc.iceConnectionState);
+        this.scheduleMediaRecover("ICE failed");
       }
     };
     pc.onicegatheringstatechange = () => {
