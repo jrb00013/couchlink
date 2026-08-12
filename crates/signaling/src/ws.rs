@@ -161,6 +161,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
             | SignalMessage::Answer { .. }
             | SignalMessage::IceCandidate { .. }
             | SignalMessage::StreamInfo { .. }
+            | SignalMessage::HostStats { .. }
             | SignalMessage::PadInfo { .. }
             | SignalMessage::PresentPath { .. } => {
                 if let (Some(sid), Some(r)) = (&session_id, role) {

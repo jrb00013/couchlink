@@ -97,7 +97,11 @@ export type PlayerTelemetry = {
 
 const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
-const MEDIA_RECOVER_DELAY_MS = 5000;
+/** How long to wait before triggering a peer reset when media was previously healthy.
+ *  TURN paths regularly bounce ICE failed→connected; give them time to self-heal. */
+const MEDIA_RECOVER_DELAY_MS = 12_000;
+/** Shorter delay when the peer was never healthy (first-connect failure). */
+const MEDIA_RECOVER_DELAY_COLD_MS = 5_000;
 /** 250Hz — matches the native client and keeps sampling off the display clock. */
 const PAD_POLL_MS = 4;
 
@@ -491,7 +495,7 @@ export class CouchlinkPlayer {
         send(this.ws, { type: "request_offer" });
         this.cb.onState("waiting_host", "Recovering media…");
       }
-    }, MEDIA_RECOVER_DELAY_MS);
+    }, this.mediaHealthy ? MEDIA_RECOVER_DELAY_MS : MEDIA_RECOVER_DELAY_COLD_MS);
   }
 
   private async applyRemoteOffer(sdp: string, epoch: number) {
@@ -591,6 +595,14 @@ export class CouchlinkPlayer {
       if (pc.iceConnectionState === "failed") {
         cwarn("ICE problem", pc.iceConnectionState);
         this.scheduleMediaRecover("ICE failed");
+      } else if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        // ICE self-healed — cancel any pending recover timer so we don't
+        // tear down a working connection after the grace period expires.
+        if (this.mediaRecoverTimer) {
+          clog("ICE reconnected — cancelling media recover timer");
+          clearTimeout(this.mediaRecoverTimer);
+          this.mediaRecoverTimer = null;
+        }
       } else if (pc.iceConnectionState === "disconnected") {
         cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
       }
