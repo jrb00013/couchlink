@@ -11,6 +11,8 @@ import {
 import { ControllerViz, useLivePads } from "./ControllerViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
+import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
+import type { PlayerTelemetry } from "./player";
 import "./App.css";
 
 const DEFAULT_WS =
@@ -58,6 +60,9 @@ export default function App() {
   const [fullscreen, setFullscreen] = useState(false);
   const [presentMode, setPresentMode] = useState<"webcodecs" | "canvas" | "video" | "—">("—");
   const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
+  const [telemetry, setTelemetry] = useState<PlayerTelemetry | null>(null);
+  const [present, setPresent] = useState<PresentSummary | null>(null);
+  const [debugOpen, setDebugOpen] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -116,6 +121,7 @@ export default function App() {
           `webcodecs: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped} dec=${s.decodeMs.toFixed(1)}ms`
         );
         setPresentMode("webcodecs");
+        setPresent({ fps: s.presentFps, dropped: s.dropped, width: s.width, height: s.height });
       });
       wcRef.current.setKeyframeHandler(() => {
         playerRef.current?.requestVideoKeyframe();
@@ -160,6 +166,7 @@ export default function App() {
             `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped}`
           );
           setPresentMode("canvas");
+          setPresent({ fps: s.presentFps, dropped: s.dropped, width: s.width, height: s.height });
         });
       }
       void viewRef.current.start(track).then((ok) => {
@@ -276,6 +283,7 @@ export default function App() {
         viewRef.current?.stop();
         wcRef.current?.stop();
         webcodecsActiveRef.current = false;
+        setPresent(null);
       }
     },
     onVideo: (stream) => attachStream(stream),
@@ -308,6 +316,7 @@ export default function App() {
     onPadStats: (hz, name) => {
       setPadMeta(`${hz} Hz · ${name}`);
     },
+    onTelemetry: (t) => setTelemetry(t),
   });
 
   useEffect(() => {
@@ -466,6 +475,15 @@ export default function App() {
           </section>
         )}
       </div>
+
+      <DebugDrawer
+        telemetry={telemetry}
+        present={present}
+        streamInfo={streamMeta}
+        presentMode={presentMode}
+        open={debugOpen}
+        onToggle={() => setDebugOpen((o) => !o)}
+      />
 
       <footer className="meta">
         <span>{streamMeta}</span>

@@ -1,5 +1,10 @@
 import { useRef } from "react";
-import type { ConnectionState, PlayerCallbacks, PresentPath } from "./player";
+import type {
+  ConnectionState,
+  PlayerCallbacks,
+  PlayerTelemetry,
+  PresentPath,
+} from "./player";
 import type { VideoAccessUnit } from "./clvd";
 
 /** Stable WebRTC player callbacks — safe across React re-renders. */
@@ -10,6 +15,7 @@ export function usePlayerCallbacks(handlers: {
   onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: PlayerCallbacks["onStreamInfo"];
   onPadStats?: PlayerCallbacks["onPadStats"];
+  onTelemetry?: (t: PlayerTelemetry) => void;
 }): PlayerCallbacks {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -24,6 +30,7 @@ export function usePlayerCallbacks(handlers: {
         handlersRef.current.onPresentPath?.(path, detail),
       onStreamInfo: (info) => handlersRef.current.onStreamInfo?.(info),
       onPadStats: (hz, name) => handlersRef.current.onPadStats?.(hz, name),
+      onTelemetry: (t) => handlersRef.current.onTelemetry?.(t),
     };
   }
   return stableRef.current;

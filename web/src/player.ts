@@ -39,7 +39,45 @@ export interface PlayerCallbacks {
     capture_hint?: string;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
+  /** Full getStats-derived telemetry snapshot, ~2s tick. */
+  onTelemetry?: (t: PlayerTelemetry) => void;
 }
+
+export type MediaPathStats = {
+  local: string;
+  remote: string;
+  family: "IPv4" | "IPv6";
+  protocol: string;
+  relayed: boolean;
+  rttMs: number;
+};
+
+export type InboundVideoStats = {
+  jitterBufferMs: number;
+  decodeFps: number;
+  framesDropped: number;
+  framesDecoded: number;
+  bitrateKbps: number;
+  bytesReceived: number;
+  packetsLost: number;
+  packetsReceived: number;
+  packetLossPct: number;
+  jitterMs: number;
+  frameWidth: number;
+  frameHeight: number;
+  framesPerSecond: number;
+  pauseCount: number;
+  freezeCount: number;
+  totalFreezesDuration: number;
+};
+
+export type PlayerTelemetry = {
+  path: MediaPathStats | null;
+  video: InboundVideoStats | null;
+  padHz: number;
+  padName: string;
+  at: number;
+};
 
 const SESSION_NOT_FOUND_RETRIES = 12;
 const SESSION_NOT_FOUND_DELAY_MS = 750;
@@ -74,10 +112,16 @@ export class CouchlinkPlayer {
   private padSent = 0;
   private padWindowStart = 0;
   private padName = "none";
+  /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
+  private lastPadHz = 0;
   /** Last Gamepad.id announced to the host, so pad_info is sent only on change. */
   private padInfoSent = "";
   /** Last logged media-path summary, so the line prints only on change. */
   private lastPathKey = "";
+  /** Previous inbound-rtp sample, for bitrate + loss deltas. */
+  private lastInbound:
+    | { bytes: number; lost: number; count: number; at: number }
+    | null = null;
   /** Last present path reported to the host, so it is sent only on change. */
   private presentPathSent: PresentPath | "" = "";
   private turn: { url: string; user: string; pass: string } | null = null;
@@ -219,7 +263,7 @@ export class CouchlinkPlayer {
    * Logged only when the pair or the rounded RTT changes, so it does not spam
    * a line every poll.
    */
-  private logSelectedPath(stats: RTCStatsReport) {
+  private logSelectedPath(stats: RTCStatsReport): MediaPathStats | null {
     let pair: any = null;
     const byId = new Map<string, any>();
     stats.forEach((r: any) => byId.set(r.id, r));
@@ -229,23 +273,95 @@ export class CouchlinkPlayer {
         if (!pair || r.nominated) pair = r;
       }
     });
-    if (!pair) return;
+    if (!pair) return null;
     const local = byId.get(pair.localCandidateId);
     const remote = byId.get(pair.remoteCandidateId);
     const rttMs = Math.round((pair.currentRoundTripTime ?? 0) * 1000);
     const relayed =
       local?.candidateType === "relay" || remote?.candidateType === "relay";
-    const key = `${local?.candidateType}/${remote?.candidateType}/${rttMs}`;
-    if (key === this.lastPathKey) return;
-    this.lastPathKey = key;
-    clog("media path", {
-      local: local?.candidateType,
-      remote: remote?.candidateType,
+    const result: MediaPathStats = {
+      local: local?.candidateType ?? "?",
+      remote: remote?.candidateType ?? "?",
       family: local?.address?.includes(":") ? "IPv6" : "IPv4",
-      protocol: local?.protocol,
+      protocol: local?.protocol ?? "?",
       relayed,
       rttMs,
+    };
+    const key = `${result.local}/${result.remote}/${rttMs}`;
+    if (key === this.lastPathKey) return result;
+    this.lastPathKey = key;
+    clog("media path", result);
+    return result;
+  }
+
+  private collectInbound(stats: RTCStatsReport): InboundVideoStats | null {
+    let r: any = null;
+    stats.forEach((s: any) => {
+      if (s.type === "inbound-rtp" && s.kind === "video") r = s;
     });
+    if (!r) return null;
+    const now = performance.now();
+    const prev = this.lastInbound;
+    const bytes = r.bytesReceived ?? 0;
+    const lost = r.packetsLost ?? 0;
+    const count = r.jitterBufferEmittedCount ?? 0;
+    const decoded = r.framesDecoded ?? 0;
+    const bitrateKbps = prev
+      ? Math.max(0, Math.round(((bytes - prev.bytes) * 8) / Math.max(1, now - prev.at)))
+      : 0;
+    const lostDelta = prev ? Math.max(0, lost - prev.lost) : 0;
+    const received = r.packetsReceived ?? 0;
+    const packetLossPct =
+      lostDelta + received > 0 ? (lostDelta / (lostDelta + received)) * 100 : 0;
+    this.lastInbound = { bytes, lost, count, at: now };
+
+    // jitterBufferMs / decodeFps need the delta over the polling window, so we
+    // can't derive them from the cumulative inbound-rtp row alone.
+    const prevStats = this.lastStats;
+    this.lastStats = { delay: r.jitterBufferDelay ?? 0, count, decoded };
+    let jitterBufferMs = 0;
+    let decodeFps = 0;
+    if (prev && prevStats && count > prevStats.count) {
+      const w = jitterWindow(
+        {
+          jitterBufferDelay: prevStats.delay,
+          jitterBufferEmittedCount: prevStats.count,
+          framesDecoded: prevStats.decoded,
+          framesDropped: 0,
+        },
+        {
+          jitterBufferDelay: r.jitterBufferDelay ?? 0,
+          jitterBufferEmittedCount: count,
+          framesDecoded: decoded,
+          framesDropped: r.framesDropped ?? 0,
+        },
+        (now - prev.at) / 1000
+      );
+      if (w) {
+        jitterBufferMs = w.jitterBufferMs;
+        decodeFps = w.decodeFps;
+      }
+    }
+    // Chrome will grow the JB after packet jitter; pin it back every poll.
+    this.pinJitterBuffer();
+    return {
+      jitterBufferMs,
+      decodeFps,
+      framesDropped: r.framesDropped ?? 0,
+      framesDecoded: decoded,
+      bitrateKbps,
+      bytesReceived: bytes,
+      packetsLost: r.packetsLost ?? 0,
+      packetsReceived: received,
+      packetLossPct,
+      jitterMs: (r.jitter ?? 0) * 1000,
+      frameWidth: r.frameWidth ?? 0,
+      frameHeight: r.frameHeight ?? 0,
+      framesPerSecond: r.framesPerSecond ?? 0,
+      pauseCount: r.pauseCount ?? 0,
+      freezeCount: r.freezeCount ?? 0,
+      totalFreezesDuration: r.totalFreezesDuration ?? 0,
+    };
   }
 
   /**
@@ -261,44 +377,27 @@ export class CouchlinkPlayer {
       if (!pc) return;
       try {
         const stats = await pc.getStats();
-        this.logSelectedPath(stats);
-        stats.forEach((r: any) => {
-          if (r.type !== "inbound-rtp" || r.kind !== "video") return;
-          const delay = r.jitterBufferDelay ?? 0;
-          const count = r.jitterBufferEmittedCount ?? 0;
-          const decoded = r.framesDecoded ?? 0;
-          const prev = this.lastStats;
-          this.lastStats = { delay, count, decoded };
-          if (!prev || count === prev.count) return;
-          const window = jitterWindow(
-            {
-              jitterBufferDelay: prev.delay,
-              jitterBufferEmittedCount: prev.count,
-              framesDecoded: prev.decoded,
-              framesDropped: 0,
-            },
-            {
-              jitterBufferDelay: delay,
-              jitterBufferEmittedCount: count,
-              framesDecoded: decoded,
-              framesDropped: r.framesDropped ?? 0,
-            },
-            2
-          );
-          if (!window) return;
-          // Chrome will grow the JB after packet jitter; pin it back every poll.
-          this.pinJitterBuffer();
+        const path = this.logSelectedPath(stats);
+        const video = this.collectInbound(stats);
+        this.cb.onTelemetry?.({
+          path,
+          video,
+          padHz: this.lastPadHz,
+          padName: this.padName,
+          at: performance.now(),
+        });
+        if (video && video.framesDecoded > 0) {
           clog("video stats", {
-            jitterBufferMs: Math.round(window.jitterBufferMs),
-            decodeFps: Math.round(window.decodeFps),
-            framesDropped: window.framesDropped,
-            frameHeight: r.frameHeight,
-            pauseCount: r.pauseCount,
-            freezeCount: r.freezeCount,
-            totalFreezesDuration: r.totalFreezesDuration,
+            jitterBufferMs: Math.round(video.jitterBufferMs),
+            decodeFps: Math.round(video.decodeFps),
+            framesDropped: video.framesDropped,
+            frameHeight: video.frameHeight,
+            pauseCount: video.pauseCount,
+            freezeCount: video.freezeCount,
+            totalFreezesDuration: video.totalFreezesDuration,
             jbTarget: this.videoReceiver?.jitterBufferTarget ?? null,
           });
-        });
+        }
       } catch (e) {
         cwarn("getStats failed", String(e));
       }
@@ -335,6 +434,7 @@ export class CouchlinkPlayer {
     this.heartbeatTimer = null;
     this.statsTimer = null;
     this.lastStats = null;
+    this.lastInbound = null;
     this.padTimer = null;
     this.resetPeer();
     this.ws?.close();
@@ -690,6 +790,7 @@ export class CouchlinkPlayer {
     this.padSent += 1;
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {
+      this.lastPadHz = this.padSent;
       this.cb.onPadStats?.(this.padSent, this.padName);
       this.padSent = 0;
       this.padWindowStart = now;
