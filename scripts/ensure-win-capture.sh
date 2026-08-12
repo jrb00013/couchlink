@@ -76,10 +76,10 @@ build_ps1="$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
 start_ps1="$(wslpath -w "$ROOT/scripts/start-win-capture.ps1")"
 
 echo "==> ensuring Windows capture binary is built…"
-if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1"
-else
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1" >/dev/null 2>&1
+if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1" >/dev/null 2>&1; then
+  echo "error: could not build couchlink-win-capture.exe" >&2
+  echo "       install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1" >&2
+  exit 1
 fi
 
 if command -v taskkill.exe >/dev/null 2>&1; then

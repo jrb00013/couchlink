@@ -275,8 +275,11 @@ if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "wsl" ]]; then
 
   echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
   if command -v powershell.exe >/dev/null 2>&1; then
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
-      "$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
+    if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+      "$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"; then
+      echo "warning: couchlink-win-capture.exe build failed — host will stream video only"
+      echo "         install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1"
+    fi
   else
     echo "warning: powershell.exe missing — cannot build couchlink-win-capture.exe"
   fi

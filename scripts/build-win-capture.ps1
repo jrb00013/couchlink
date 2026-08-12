@@ -20,6 +20,9 @@ if (-not $needBuild) {
 }
 
 if ($needBuild) {
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        throw "cargo not found on Windows — install Rust (https://rustup.rs) with the MSVC toolchain, then reopen your terminal"
+    }
     Write-Host "==> building couchlink-win-capture.exe (Windows DXGI / Graphics Capture)"
     Push-Location $Root
     try {
