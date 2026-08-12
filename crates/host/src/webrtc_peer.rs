@@ -214,6 +214,14 @@ impl WebRtcHost {
         setting_engine.set_sctp_max_message_size_can_send(
             webrtc::api::setting_engine::SctpMaxMessageSize::Bounded(256 * 1024),
         );
+        // Skip Docker bridge interfaces (br-*, docker0) when gathering host
+        // candidates. Each one becomes a useless "typ host" candidate sent
+        // to the remote peer, and this WSL box regularly has a dozen+ from
+        // Docker Desktop — pure ICE-gathering noise that can crowd out /
+        // delay the candidate pairs that would actually connect.
+        setting_engine.set_interface_filter(Box::new(|iface: &str| {
+            !(iface.starts_with("br-") || iface == "docker0")
+        }));
         let api = APIBuilder::new()
             .with_setting_engine(setting_engine)
             .with_media_engine(m)
@@ -305,6 +313,15 @@ impl WebRtcHost {
                     }
                 }
             })
+        }));
+
+        pc.on_ice_connection_state_change(Box::new(move |s| {
+            info!("host pc.iceConnectionState {s}");
+            Box::pin(async move {})
+        }));
+        pc.on_peer_connection_state_change(Box::new(move |s| {
+            info!("host pc.connectionState {s}");
+            Box::pin(async move {})
         }));
 
         // Pad: unordered + no retransmit — gaming input must never HOL-block.

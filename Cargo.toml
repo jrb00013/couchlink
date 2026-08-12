@@ -33,3 +33,14 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 couchlink-proto = { path = "crates/proto" }
 couchlink-pad = { path = "crates/pad" }
+
+# webrtc-ice 0.17.2 builds "host:port" for STUN/TURN server addresses by
+# gluing url.host and url.port together with a bare format!(), even though
+# Url::parse_url already stripped the [] brackets from IPv6 literals earlier
+# in the same crate. The result is ambiguous ("2603:...::1dbd:3478") and
+# fails to resolve, breaking ICE entirely for any IPv6-only STUN/TURN URL —
+# no fix has shipped upstream as of 0.17.2 (the latest release). Patched
+# locally in vendor/webrtc-ice-0.17.2 to re-bracket IPv6 hosts before the
+# concatenation, matching Url's own Display impl a few lines above the bug.
+[patch.crates-io]
+webrtc-ice = { path = "vendor/webrtc-ice-0.17.2" }
