@@ -159,8 +159,25 @@ function fmtKbps(k: number): string {
   return `${Math.round(k)} kbps`;
 }
 
+export type HostStats = {
+  fps: number;
+  frames_out: number;
+  dropped_frames: number;
+  drop_pct: number;
+  capture_ms: number;
+  scale_ms: number;
+  encode_ms: number;
+  push_ms: number;
+  dominant_stage: string;
+  target_width: number;
+  target_height: number;
+  target_fps: number;
+  target_bitrate_kbps: number;
+};
+
 export default function DebugDrawer({
   telemetry,
+  hostStats,
   present,
   streamInfo,
   presentMode,
@@ -168,6 +185,7 @@ export default function DebugDrawer({
   onToggle,
 }: {
   telemetry: PlayerTelemetry | null;
+  hostStats: HostStats | null;
   present: PresentSummary | null;
   streamInfo: string;
   presentMode: string;
@@ -222,6 +240,24 @@ export default function DebugDrawer({
               <Row label="Packets" value={`${t.video.packetsReceived} recv · ${t.video.packetsLost} lost`} />
               <Row label="Feed loss" value={`${t.video.packetLossPct.toFixed(2)}%`} />
               <Row label="Jitter" value={`${t.video.jitterMs.toFixed(1)}ms`} />
+            </Group>
+          )}
+          {hostStats && (
+            <Group title="Host pipeline (per frame)">
+              <Row label="Push rate" value={`${hostStats.fps.toFixed(1)}fps`} />
+              <Row
+                label="Dropped / shed"
+                value={`${hostStats.dropped_frames}/${hostStats.frames_out + hostStats.dropped_frames} (${hostStats.drop_pct}%)`}
+              />
+              <Row label="Capture" value={`${hostStats.capture_ms.toFixed(1)}ms`} />
+              <Row label="Scale" value={`${hostStats.scale_ms.toFixed(1)}ms`} />
+              <Row label="Encode" value={`${hostStats.encode_ms.toFixed(1)}ms`} />
+              <Row label="Push" value={`${hostStats.push_ms.toFixed(1)}ms`} />
+              <Row label="Bottleneck" value={hostStats.dominant_stage} />
+              <Row
+                label="Encoder target"
+                value={`${hostStats.target_width}×${hostStats.target_height}@${hostStats.target_fps} ${fmtKbps(hostStats.target_bitrate_kbps)}`}
+              />
             </Group>
           )}
           <Group title="Input">

@@ -38,6 +38,22 @@ export interface PlayerCallbacks {
     capture_ok?: boolean;
     capture_hint?: string;
   }) => void;
+  /** Host pipeline stage timings + commanded encoder target, ~5s tick. */
+  onHostStats?: (stats: {
+    fps: number;
+    frames_out: number;
+    dropped_frames: number;
+    drop_pct: number;
+    capture_ms: number;
+    scale_ms: number;
+    encode_ms: number;
+    push_ms: number;
+    dominant_stage: string;
+    target_width: number;
+    target_height: number;
+    target_fps: number;
+    target_bitrate_kbps: number;
+  }) => void;
   onPadStats?: (hz: number, name: string) => void;
   /** Full getStats-derived telemetry snapshot, ~2s tick. */
   onTelemetry?: (t: PlayerTelemetry) => void;
@@ -856,6 +872,9 @@ export class CouchlinkPlayer {
       case "stream_info":
         clog("stream_info", msg);
         this.cb.onStreamInfo?.(msg);
+        break;
+      case "host_stats":
+        this.cb.onHostStats?.(msg);
         break;
       case "peer_left":
         this.cb.onState("waiting_host", "Host disconnected");

@@ -590,12 +590,14 @@ async fn main() -> Result<()> {
                         if keyframe {
                             last_idr = std::time::Instant::now();
                         }
+                        let t_push = std::time::Instant::now();
                         match push_bounded(&host, nal, per_frame, keyframe).await {
                             Err(e) => warn!("push h264: {e}"),
                             Ok(true) => dropped_frames += 1,
                             Ok(false) => {
                             frames_out += 1;
                             stage_capture += ms_capture;
+                            stage_push += t_push.elapsed();
 if rate_window.elapsed() >= Duration::from_secs(5) {
                                 let window_frames = frames_out - rate_mark;
                                 let fps =
@@ -631,11 +633,25 @@ if rate_window.elapsed() >= Duration::from_secs(5) {
                                     (stage_capture / window_frames.max(1) as u32).as_secs_f64()
                                         * 1000.0
                                 );
+                                let _ = signal_out.send(host_stats_message(
+                                    fps,
+                                    window_frames,
+                                    dropped_frames,
+                                    drop_pct as u32,
+                                    stage_capture,
+                                    stage_scale,
+                                    stage_encode,
+                                    stage_push,
+                                    &commanded_target,
+                                ));
                                 rate_window = std::time::Instant::now();
                                 rate_mark = frames_out;
                                 idle_frames = 0;
                                 dropped_frames = 0;
                                 stage_capture = Duration::ZERO;
+                                stage_scale = Duration::ZERO;
+                                stage_encode = Duration::ZERO;
+                                stage_push = Duration::ZERO;
                             }
                             }
                         }
@@ -799,6 +815,22 @@ if rate_window.elapsed() >= Duration::from_secs(5) {
                                 (stage_push / per).as_secs_f64() * 1000.0,
                                 dominant_stage(&stages),
                             );
+                            let _ = signal_out.send(host_stats_message(
+                                fps,
+                                window_frames,
+                                dropped_frames,
+                                drop_pct as u32,
+                                stage_capture,
+                                stage_scale,
+                                stage_encode,
+                                stage_push,
+                                &couchlink_capture_bridge::EncodeTarget {
+                                    width: preset.width,
+                                    height: preset.height,
+                                    fps: preset.fps,
+                                    bitrate_kbps: preset.bitrate_kbps,
+                                },
+                            ));
                             stage_capture = Duration::ZERO;
                             stage_scale = Duration::ZERO;
                             stage_encode = Duration::ZERO;
@@ -843,5 +875,45 @@ fn stream_info_message(
         codec: "H264".into(),
         capture_ok,
         capture_hint,
+    }
+}
+
+/// Per-window host pipeline telemetry for the debug panel. `target_*` is the
+/// encoder target currently commanded (the governor's current rung), so the
+/// panel can show the host stepping down on a saturated link rather than
+/// silently starving.
+fn host_stats_message(
+    fps: f64,
+    frames_out: u64,
+    dropped_frames: u64,
+    drop_pct: u32,
+    capture: Duration,
+    scale: Duration,
+    encode: Duration,
+    push: Duration,
+    target: &couchlink_capture_bridge::EncodeTarget,
+) -> SignalMessage {
+    let per = frames_out.max(1) as u32;
+    let avg = |d: Duration| (d / per).as_secs_f64() * 1000.0;
+    let stages: [(&str, Duration); 4] = [
+        ("capture", capture / per),
+        ("scale", scale / per),
+        ("encode", encode / per),
+        ("push", push / per),
+    ];
+    SignalMessage::HostStats {
+        fps,
+        frames_out,
+        dropped_frames,
+        drop_pct,
+        capture_ms: avg(capture),
+        scale_ms: avg(scale),
+        encode_ms: avg(encode),
+        push_ms: avg(push),
+        dominant_stage: dominant_stage(&stages).into(),
+        target_width: target.width,
+        target_height: target.height,
+        target_fps: target.fps,
+        target_bitrate_kbps: target.bitrate_kbps,
     }
 }

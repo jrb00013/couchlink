@@ -61,6 +61,21 @@ export default function App() {
   const [presentMode, setPresentMode] = useState<"webcodecs" | "canvas" | "video" | "—">("—");
   const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
   const [telemetry, setTelemetry] = useState<PlayerTelemetry | null>(null);
+  const [hostStats, setHostStats] = useState<{
+    fps: number;
+    frames_out: number;
+    dropped_frames: number;
+    drop_pct: number;
+    capture_ms: number;
+    scale_ms: number;
+    encode_ms: number;
+    push_ms: number;
+    dominant_stage: string;
+    target_width: number;
+    target_height: number;
+    target_fps: number;
+    target_bitrate_kbps: number;
+  } | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
 
@@ -317,6 +332,7 @@ export default function App() {
       setPadMeta(`${hz} Hz · ${name}`);
     },
     onTelemetry: (t) => setTelemetry(t),
+    onHostStats: (s) => setHostStats(s),
   });
 
   useEffect(() => {
@@ -478,6 +494,7 @@ export default function App() {
 
       <DebugDrawer
         telemetry={telemetry}
+        hostStats={hostStats}
         present={present}
         streamInfo={streamMeta}
         presentMode={presentMode}
