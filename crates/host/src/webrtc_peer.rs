@@ -449,16 +449,23 @@ impl WebRtcHost {
         Ok(())
     }
 
+    /// Push one H.264 frame to the viewer(s).
+    ///
+    /// Returns `Ok(true)` when the frame was deliberately shed because the
+    /// video DataChannel is congested — it was *not* delivered on the active
+    /// path, so the caller must count it as dropped, not sent. `Ok(false)`
+    /// means at least the path the viewer paints from actually carried it.
     pub async fn push_h264(
         &self,
         annex_b: Vec<u8>,
         duration: Duration,
         keyframe: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
         use rtp::extension::HeaderExtension;
 
         let (send_rtp, send_dc) = path_flags(self.present_path.load(Ordering::Relaxed));
+        let mut delivered = false;
 
         // RTP first when sent at all. It is the only path every browser can
         // decode: Safari has no WebCodecs here, so it falls back to the media
@@ -483,6 +490,7 @@ impl WebRtcHost {
                     ..Default::default()
                 })
                 .await?;
+            delivered = true;
         }
 
         // Accelerated path, second: browser WebCodecs paints without waiting on
@@ -490,34 +498,46 @@ impl WebRtcHost {
         // A keyframe is never shed — dropping it was a death spiral: skip, ask
         // for an IDR, then skip the IDR too because it is the largest frame of
         // all, and the viewer's canvas froze while RTP kept decoding beside it.
-        if send_dc
-            && self.video_dc.ready_state()
-            == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-            && (keyframe || !self.video_dc_congested().await)
-        {
-            let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
-            let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
-            let h = self.video_h.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
-            let au = VideoAccessUnit {
-                seq,
-                width: w,
-                height: h,
-                keyframe,
-                annex_b,
-            };
-            let fragments = if self.fec_enabled {
-                au.encode_fragments_with_fec()
-            } else {
-                au.encode_fragments()
-            };
-            for frag in fragments {
-                if let Err(e) = self.video_dc.send(&Bytes::from(frag)).await {
-                    warn!("video datachannel send: {e}");
-                    break;
+        if send_dc {
+            if self.video_dc.ready_state()
+                == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                && (keyframe || !self.video_dc_congested().await)
+            {
+                let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
+                let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
+                let h = self.video_h.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
+                let au = VideoAccessUnit {
+                    seq,
+                    width: w,
+                    height: h,
+                    keyframe,
+                    annex_b,
+                };
+                let fragments = if self.fec_enabled {
+                    au.encode_fragments_with_fec()
+                } else {
+                    au.encode_fragments()
+                };
+                for frag in fragments {
+                    if let Err(e) = self.video_dc.send(&Bytes::from(frag)).await {
+                        warn!("video datachannel send: {e}");
+                        break;
+                    }
                 }
+                delivered = true;
+            } else if !keyframe {
+                // The channel exists and is the one this viewer paints from, but
+                // its SCTP buffer is too deep — SCTP backpressure would park the
+                // whole capture drain. Shed it, and report the shed back so the
+                // link governor counts it as a drop and steps the encoder down.
+                //
+                // A shed non-keyframe leaves the viewer's decoder referencing a
+                // frame it never got, so request an IDR just like the push-budget
+                // timeout does — otherwise the canvas waits out the whole GOP.
+                self.request_keyframe();
             }
         }
-        Ok(())
+        Ok(!delivered)
     }
 }
 

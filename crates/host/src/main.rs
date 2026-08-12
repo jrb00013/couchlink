@@ -42,12 +42,15 @@ const PUSH_BUDGET: Duration = Duration::from_millis(50);
 /// Guarding the individual awaits is whack-a-mole — the invariant is that
 /// nothing here may block indefinitely, so the budget is enforced at the edge
 /// and covers any await added inside later.
-/// `Ok(true)` means the frame was dropped by the budget, not sent.
+/// `Ok(true)` means the frame was dropped (budget timeout, or shed by SCTP
+/// congestion in `push_h264`), not sent.
 ///
 /// The caller must not count a dropped frame as delivered — this used to
 /// return `Ok(())` on both a real send and a timeout indistinguishably, so
 /// the periodic fps/stage diagnostics silently over-counted during exactly
-/// the congestion they exist to reveal.
+/// the congestion they exist to reveal. The same blind spot also shed
+/// congestion-stalled frames as "sent", so the link governor never stepped
+/// the encoder down on a saturated path.
 async fn push_bounded(
     host: &webrtc_peer::WebRtcHost,
     nal: Vec<u8>,
@@ -55,7 +58,8 @@ async fn push_bounded(
     keyframe: bool,
 ) -> Result<bool> {
     match tokio::time::timeout(PUSH_BUDGET, host.push_h264(nal, dur, keyframe)).await {
-        Ok(r) => r.map(|()| false),
+        Ok(Ok(shed)) => Ok(shed),
+        Ok(Err(e)) => Err(e),
         Err(_) => {
             // Dropped H.264 leaves the decoder referencing frames it never got.
             host.request_keyframe();
