@@ -20,8 +20,9 @@ use tracing::{info, warn};
 /// every Windows emulator build and needs no vendor driver.
 fn backend_for(kind: &str) -> &'static str {
     match kind {
-        "dualsense" => "ds4",
-        "xbox" | "generic" => "xbox360",
+        // Real DualSense or keyboard+mouse (CLPD frames are DualSense-shaped either way)
+        "dualsense" | "dualshock4" | "ds4" => "ds4",
+        // Xbox / generic / anything else → XInput (universal emulator support)
         _ => "xbox360",
     }
 }

@@ -822,6 +822,15 @@ export class CouchlinkPlayer {
       const kbmState = kbm.sample(this.seq);
       this.padDc.send(encodeClpd(kbmState));
       this.padSent += 1;
+      // Tell the host this is keyboard+mouse so it picks a DualSense virtual pad
+      // (CLPD frames from kbm are DualSense-shaped, same as a real pad).
+      if (this.padInfoSent !== "keyboard") {
+        this.padInfoSent = "keyboard";
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          send(this.ws, { type: "pad_info", kind: "dualsense", id: "keyboard+mouse" });
+        }
+      }
+      this.padName = "keyboard+mouse";
       const now = performance.now();
       if (now - this.padWindowStart >= 1000) {
         this.lastPadHz = this.padSent;
