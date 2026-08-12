@@ -525,17 +525,25 @@ impl WebRtcHost {
                     }
                 }
                 delivered = true;
-            } else if !keyframe {
-                // The channel exists and is the one this viewer paints from, but
-                // its SCTP buffer is too deep — SCTP backpressure would park the
-                // whole capture drain. Shed it, and report the shed back so the
-                // link governor counts it as a drop and steps the encoder down.
-                //
-                // A shed non-keyframe leaves the viewer's decoder referencing a
-                // frame it never got, so request an IDR just like the push-budget
-                // timeout does — otherwise the canvas waits out the whole GOP.
+            } else if keyframe {
+                // A keyframe is never shed — dropping it was a death spiral:
+                // skip, ask for an IDR, then skip the IDR too. Say it was
+                // delivered so nobody counts a non-send as congestion.
+            } else if self.video_dc.ready_state()
+                == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+            {
+                // The channel is open and this viewer paints from it, but its
+                // SCTP buffer is too deep — SCTP backpressure would park the
+                // whole capture drain. Shed it, and report the shed back so
+                // the link governor counts it as a drop and steps the encoder
+                // down. A shed non-keyframe leaves the viewer's decoder
+                // referencing a frame it never got, so request an IDR just
+                // like the push-budget timeout does.
                 self.request_keyframe();
             }
+            // Channel not open → no viewer yet: skip silently. Not a shed, no
+            // keyframe request — forcing IDRs here degenerates the encoder
+            // into emitting nothing but IDRs before anyone joins.
         }
         Ok(!delivered)
     }
