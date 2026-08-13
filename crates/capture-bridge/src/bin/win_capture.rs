@@ -783,32 +783,53 @@ mod run {
             }
             CaptureSource::Picker => {
                 info!("open the Windows capture picker and choose a window or monitor…");
-                let item = GraphicsCapturePicker::pick_item().context("capture picker")?;
-                let Some(item) = item else {
-                    bail!("no capture target selected");
-                };
-                let picked = item
-                    .item
-                    .DisplayName()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|_| "<unknown>".into());
-                let (pw, ph) = item.size().unwrap_or((0, 0));
-                info!(
-                    "picker selection accepted: '{picked}' {pw}x{ph} → {}",
-                    args.connect
-                );
-                spawn_tcp_writer(args.connect.clone(), rx);
-                let settings = Settings::new(
-                    item,
-                    CursorCaptureSettings::WithCursor,
-                    DrawBorderSettings::Default,
-                    SecondaryWindowSettings::Default,
-                    MinimumUpdateIntervalSettings::Custom(frame_dur),
-                    DirtyRegionSettings::Default,
-                    ColorFormat::Bgra8,
-                    flags,
-                );
-                BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"))?;
+                match GraphicsCapturePicker::pick_item().context("capture picker") {
+                    Ok(Some(item)) => {
+                        let picked = item
+                            .item
+                            .DisplayName()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|_| "<unknown>".into());
+                        let (pw, ph) = item.size().unwrap_or((0, 0));
+                        info!(
+                            "picker selection accepted: '{picked}' {pw}x{ph} → {}",
+                            args.connect
+                        );
+                        spawn_tcp_writer(args.connect.clone(), rx);
+                        let settings = Settings::new(
+                            item,
+                            CursorCaptureSettings::WithCursor,
+                            DrawBorderSettings::Default,
+                            SecondaryWindowSettings::Default,
+                            MinimumUpdateIntervalSettings::Custom(frame_dur),
+                            DirtyRegionSettings::Default,
+                            ColorFormat::Bgra8,
+                            flags,
+                        );
+                        BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    }
+                    Ok(None) => {
+                        warn!(
+                            "capture picker dismissed — falling back to primary monitor \
+                             (no window chosen)"
+                        );
+                        spawn_tcp_writer(args.connect.clone(), rx);
+                        let m = Monitor::primary().context("primary monitor")?;
+                        info!("capturing primary monitor → {}", args.connect);
+                        let settings = Settings::new(
+                            m,
+                            CursorCaptureSettings::WithCursor,
+                            DrawBorderSettings::Default,
+                            SecondaryWindowSettings::Default,
+                            MinimumUpdateIntervalSettings::Custom(frame_dur),
+                            DirtyRegionSettings::Default,
+                            ColorFormat::Bgra8,
+                            flags,
+                        );
+                        BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    }
+                    Err(e) => bail!("capture picker failed: {e:#}"),
+                }
             }
             CaptureSource::Window => {
                 if args.window.trim().is_empty() {
