@@ -1,5 +1,6 @@
 import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
 import { KeyboardMouseInput } from "./keyboardMouse";
+import { TouchGamepadInput } from "./touchPad";
 import {
   ClvdAssembler,
   decodeClvdFragment,
@@ -142,6 +143,8 @@ export class CouchlinkPlayer {
   private lastPathKey = "";
   /** Keyboard+mouse input source — injected by the UI, null if not active. */
   private kbm: KeyboardMouseInput | null = null;
+  /** Touch-screen controller — injected by the UI on mobile, null otherwise. */
+  private touch: TouchGamepadInput | null = null;
   /** Previous inbound-rtp sample, for bitrate + loss deltas. */
   private lastInbound:
     | { bytes: number; lost: number; count: number; at: number }
@@ -167,6 +170,11 @@ export class CouchlinkPlayer {
   /** Attach or detach a keyboard/mouse input source. Call with null to disable. */
   setKbm(kbm: KeyboardMouseInput | null) {
     this.kbm = kbm;
+  }
+
+  /** Attach or detach the mobile touch controller. Call with null to disable. */
+  setTouchInput(touch: TouchGamepadInput | null) {
+    this.touch = touch;
   }
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
@@ -865,6 +873,32 @@ export class CouchlinkPlayer {
       }
     }
     if (!gp) {
+      // No gamepad — fall back to the touch controller (mobile), else
+      // keyboard/mouse.
+      const touch = this.touch;
+      if (touch) {
+        this.seq = (this.seq + 1) >>> 0;
+        const state = touch.sample(this.seq);
+        this.padDc.send(encodeClpd(state));
+        this.padSent += 1;
+        // Tell the host this is a touch controller so it picks a DualSense
+        // virtual pad (CLPD frames are DualSense-shaped, same as kbm/pad).
+        if (this.padInfoSent !== "touch") {
+          this.padInfoSent = "touch";
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            send(this.ws, { type: "pad_info", kind: "dualsense", id: "touch" });
+          }
+        }
+        this.padName = "touch";
+        const now = performance.now();
+        if (now - this.padWindowStart >= 1000) {
+          this.lastPadHz = this.padSent;
+          this.cb.onPadStats?.(this.padSent, "touch");
+          this.padSent = 0;
+          this.padWindowStart = now;
+        }
+        return;
+      }
       // No gamepad — fall back to keyboard/mouse if active
       const kbm = this.kbm;
       if (!kbm) return;

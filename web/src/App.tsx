@@ -13,6 +13,9 @@ import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
 import { KeyboardMouseInput } from "./keyboardMouse";
+import { detectMobile } from "./mobile";
+import { TouchGamepadInput } from "./touchPad";
+import { TouchOverlay } from "./TouchOverlay";
 import type { PlayerTelemetry } from "./player";
 import "./App.css";
 
@@ -82,6 +85,8 @@ export default function App() {
   const [kbmActive, setKbmActive] = useState(false);
   const [pointerLocked, setPointerLocked] = useState(false);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
+  const [isMobile, setIsMobile] = useState(() => detectMobile());
+  const touchInputRef = useRef<TouchGamepadInput | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -89,6 +94,10 @@ export default function App() {
    * RTP can stay on screen as a safety net while WebCodecs warms up. */
   const wcCanvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  /** Fullscreen target on mobile — wraps the stage + touch controller so both
+   * are visible (controller overlays the video) in fullscreen. Desktop keeps
+   * fullscreening the stage element exactly as before. */
+  const mobileFsRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<CouchlinkPlayer | null>(null);
   const viewRef = useRef<LowLatencyCanvasView | null>(null);
   const wcRef = useRef<WebCodecsCanvasView | null>(null);
@@ -427,11 +436,40 @@ export default function App() {
     }
   }, [kbmActive]);
 
+  // Re-detect mobile on resize/orientation so the layout follows the device.
+  useEffect(() => {
+    const onResize = () => setIsMobile(detectMobile());
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+    };
+  }, []);
+
+  // Touch controller: one shared input for the mobile layout, live for the
+  // lifetime of the page. Desktop is unaffected — setTouchInput(null) when the
+  // device is not mobile, and the overlay is only rendered on mobile.
+  useEffect(() => {
+    const input = new TouchGamepadInput();
+    touchInputRef.current = input;
+    if (isMobile) {
+      playerRef.current?.setTouchInput(input);
+    } else {
+      playerRef.current?.setTouchInput(null);
+    }
+    return () => {
+      input.detach();
+      touchInputRef.current = null;
+      playerRef.current?.setTouchInput(null);
+    };
+  }, [isMobile]);
+
   const connected = state === "connected" || state === "negotiating";
   const livePads = useLivePads(true);
 
   return (
-    <div className={`shell ${fullscreen ? "is-fullscreen" : ""}`}>
+    <div className={`shell ${fullscreen ? "is-fullscreen" : ""} ${isMobile ? "is-mobile" : ""}`}>
       <header className="top">
         <div className="brand">
           <img className="brand-logo" src="/logo.png" alt="" width={56} height={56} />
@@ -505,32 +543,43 @@ export default function App() {
       )}
 
       <div className="broadcast">
-        <div className="stage-wrap" ref={stageRef}>
-          <canvas ref={canvasRef} className="stage is-hidden" aria-label="Game stream (RTP)" />
-          <canvas
-            ref={wcCanvasRef}
-            className="stage is-hidden"
-            aria-label="Game stream (WebCodecs)"
-          />
-          <video ref={videoRef} className="stage" playsInline muted autoPlay />
-          {state !== "connected" && (
-            <div className="overlay">
-              <span>{detail || "Waiting for video…"}</span>
-            </div>
-          )}
-          {state === "connected" && videoDiag.includes("?×?") && (
-            <div className="overlay overlay-dim">
-              <span>{detail || "Connected — waiting for first video frame…"}</span>
-            </div>
-          )}
-          {state === "connected" && captureHint && (
-            <div className="overlay overlay-dim">
-              <span>{captureHint}</span>
+        <div
+          className={`mobile-game${isMobile ? " is-mobile" : ""}${fullscreen ? " is-fullscreen" : ""}`}
+          ref={mobileFsRef}
+        >
+          <div className="stage-wrap" ref={stageRef}>
+            <canvas ref={canvasRef} className="stage is-hidden" aria-label="Game stream (RTP)" />
+            <canvas
+              ref={wcCanvasRef}
+              className="stage is-hidden"
+              aria-label="Game stream (WebCodecs)"
+            />
+            <video ref={videoRef} className="stage" playsInline muted autoPlay />
+            {state !== "connected" && (
+              <div className="overlay">
+                <span>{detail || "Waiting for video…"}</span>
+              </div>
+            )}
+            {state === "connected" && videoDiag.includes("?×?") && (
+              <div className="overlay overlay-dim">
+                <span>{detail || "Connected — waiting for first video frame…"}</span>
+              </div>
+            )}
+            {state === "connected" && captureHint && (
+              <div className="overlay overlay-dim">
+                <span>{captureHint}</span>
+              </div>
+            )}
+          </div>
+
+          {isMobile && connected && touchInputRef.current && (
+            <div className="touch-dock">
+              <TouchOverlay input={touchInputRef.current} />
             </div>
           )}
         </div>
 
-        {livePads.length > 0 && (
+        {!isMobile && livePads.length > 0 && (
           <section className="pads" aria-live="polite">
             <div className="pads-head">
               <span className="pads-count">
@@ -549,7 +598,7 @@ export default function App() {
             </div>
           </section>
         )}
-        {connected && livePads.length === 0 && (
+        {connected && !isMobile && livePads.length === 0 && (
           <section className="pads" aria-live="polite">
             <p className="pads-empty">
               Pair a pad, then press any button so the browser unlocks it.
@@ -593,7 +642,10 @@ export default function App() {
           type="button"
           className="ghost"
           onClick={() => {
-            const el = stageRef.current;
+            // On mobile the fullscreen target wraps stage + touch controller so
+            // the controller overlays the video at low opacity; desktop keeps
+            // fullscreening the stage element as before.
+            const el = isMobile ? mobileFsRef.current : stageRef.current;
             if (!document.fullscreenElement && el) {
               void el.requestFullscreen();
               setFullscreen(true);
