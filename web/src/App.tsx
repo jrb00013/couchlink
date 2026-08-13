@@ -85,11 +85,16 @@ export default function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  /** Canvas the WebCodecs path paints to, kept separate from the RTP canvas so
+   * RTP can stay on screen as a safety net while WebCodecs warms up. */
+  const wcCanvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<CouchlinkPlayer | null>(null);
   const viewRef = useRef<LowLatencyCanvasView | null>(null);
   const wcRef = useRef<WebCodecsCanvasView | null>(null);
   const webcodecsActiveRef = useRef(false);
+  /** WebCodecs has painted and owns the visible canvas (RTP no longer on screen). */
+  const promotedRef = useRef(false);
   const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
@@ -113,27 +118,31 @@ export default function App() {
     }
   }
 
-  /** If WebCodecs never paints, fall back to the RTP media track. */
+  /** If WebCodecs never paints, fall back to the RTP media track.
+   *
+   * RTP has been painting the whole warm-up, so the fallback just hides the
+   * empty WebCodecs canvas and keeps the RTP canvas — no re-attach needed. */
   function armWebCodecsFallback() {
     clearRtpFallbackTimer();
     rtpFallbackTimer.current = window.setTimeout(() => {
       rtpFallbackTimer.current = null;
       if (!webcodecsActiveRef.current) return;
       if (wcRef.current?.hasPainted()) return;
-      const stream = heldStreamRef.current;
       cwarn("WebCodecs produced no frames — falling back to RTP canvas");
       webcodecsActiveRef.current = false;
+      promotedRef.current = false;
       playerRef.current?.preferRtpPresent();
       wcRef.current?.stop();
+      wcCanvasRef.current?.classList.add("is-hidden");
+      canvasRef.current?.classList.remove("is-hidden");
       setVideoDiag("webcodecs: no frames — RTP fallback");
-      if (stream) attachStream(stream);
     }, 2500);
   }
 
   function ensureWebCodecs(): boolean {
-    if (preferLegacyVideo() || !canUseWebCodecs() || !canvasRef.current) return false;
+    if (preferLegacyVideo() || !canUseWebCodecs() || !wcCanvasRef.current) return false;
     if (!wcRef.current) {
-      wcRef.current = new WebCodecsCanvasView(canvasRef.current);
+      wcRef.current = new WebCodecsCanvasView(wcCanvasRef.current);
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
         setVideoDiag(
@@ -145,26 +154,43 @@ export default function App() {
       wcRef.current.setKeyframeHandler(() => {
         playerRef.current?.requestVideoKeyframe();
       });
+      // Hand the visible canvas over to WebCodecs only once it has actually
+      // painted — until then RTP stays on screen as the safety net.
+      wcRef.current.setFirstPaintHandler(() => {
+        promoteWebcodecsPresent();
+      });
     }
     // Don't tear down a live decoder on every callback.
     if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
     webcodecsActiveRef.current = true;
+    clog("webcodecs decoder warming — RTP stays live until first paint");
+    armWebCodecsFallback();
+    return true;
+  }
+
+  /** WebCodecs painted its first frame — take over the canvas and cut RTP. */
+  function promoteWebcodecsPresent() {
+    if (promotedRef.current) return;
+    promotedRef.current = true;
+    clearRtpFallbackTimer();
     viewRef.current?.stop();
     if (videoRef.current) {
       videoRef.current.srcObject = null;
       videoRef.current.classList.add("is-hidden");
     }
-    canvasRef.current.classList.remove("is-hidden");
+    canvasRef.current?.classList.add("is-hidden");
+    wcCanvasRef.current?.classList.remove("is-hidden");
     setPresentMode("webcodecs");
-    clog("present mode: WebCodecs + CLVD");
-    armWebCodecsFallback();
-    return true;
+    clog("present mode: WebCodecs + CLVD (promoted after first paint)");
+    playerRef.current?.promoteWebcodecs();
   }
 
   function attachStream(stream: MediaStream) {
     heldStreamRef.current = stream;
-    // WebCodecs path owns the canvas — keep the RTP stream for fallback only.
-    if (webcodecsActiveRef.current) {
+    // WebCodecs owns the canvas once promoted — keep the RTP stream for
+    // fallback only. During warm-up it is NOT promoted, so RTP keeps painting
+    // as the visible safety net while the WebCodecs decoder warms up.
+    if (promotedRef.current) {
       if (heldLoggedRef.current !== stream) {
         heldLoggedRef.current = stream;
         clog("RTP stream held for fallback — WebCodecs present active");
@@ -172,7 +198,11 @@ export default function App() {
       return;
     }
     clearRtpFallbackTimer();
-    wcRef.current?.stop();
+    // Don't tear down a warming WebCodecs decoder — this is the safety-net
+    // RTP delivery, not a switch away from an active WebCodecs present.
+    if (!webcodecsActiveRef.current) {
+      wcRef.current?.stop();
+    }
     const track = stream.getVideoTracks()[0];
     const wantCanvas =
       !preferLegacyVideo() && !!track && canUseLowLatencyCanvas() && !!canvasRef.current;
@@ -302,6 +332,7 @@ export default function App() {
         viewRef.current?.stop();
         wcRef.current?.stop();
         webcodecsActiveRef.current = false;
+        promotedRef.current = false;
         setPresent(null);
       }
     },
@@ -348,6 +379,7 @@ export default function App() {
       viewRef.current?.stop();
       wcRef.current?.stop();
       webcodecsActiveRef.current = false;
+      promotedRef.current = false;
       player.disconnect();
     };
     window.addEventListener("pagehide", onPageHide);
@@ -357,6 +389,7 @@ export default function App() {
       viewRef.current?.stop();
       wcRef.current?.stop();
       webcodecsActiveRef.current = false;
+      promotedRef.current = false;
     };
     // playerCallbacks identity is stable for the lifetime of the tab
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional singleton player
@@ -473,7 +506,12 @@ export default function App() {
 
       <div className="broadcast">
         <div className="stage-wrap" ref={stageRef}>
-          <canvas ref={canvasRef} className="stage is-hidden" aria-label="Game stream" />
+          <canvas ref={canvasRef} className="stage is-hidden" aria-label="Game stream (RTP)" />
+          <canvas
+            ref={wcCanvasRef}
+            className="stage is-hidden"
+            aria-label="Game stream (WebCodecs)"
+          />
           <video ref={videoRef} className="stage" playsInline muted autoPlay />
           {state !== "connected" && (
             <div className="overlay">

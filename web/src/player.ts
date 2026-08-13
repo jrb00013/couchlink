@@ -22,7 +22,7 @@ export type ConnectionState =
   | "connected"
   | "error";
 
-export type PresentPath = "webcodecs" | "rtp";
+export type PresentPath = "webcodecs" | "rtp" | "warmup";
 
 export interface PlayerCallbacks {
   onState: (s: ConnectionState, detail?: string) => void;
@@ -702,7 +702,7 @@ export class CouchlinkPlayer {
       this.cb.onState("connected", "video track");
       // Always deliver the stream so the UI can fall back if WebCodecs never paints.
       if (this.webcodecsPath) {
-        clog("RTP track received — held for fallback (WebCodecs/CLVD preferred)");
+        clog("RTP track received — painted as safety net until WebCodecs paints");
         this.cb.onVideo(stream);
         return;
       }
@@ -760,9 +760,15 @@ export class CouchlinkPlayer {
       });
       if (useWc) {
         this.webcodecsPath = true;
+        // Warm-up: tell the host to keep BOTH paths live. Announcing
+        // "webcodecs" now would make it cut RTP while this fresh DataChannel
+        // is still in SCTP slow-start — RTP stops, the keyframe stalls, the
+        // decoder never configures, and the 2.5s fallback lands the viewer on
+        // RTP-with-jitter-buffer for the rest of the session. Stay "warmup"
+        // (both paths) until the first frame actually paints, then promote.
         this.notifyPresentPath(
-          "webcodecs",
-          "CLVD DataChannel + WebCodecs (no RTP jitter buffer)"
+          "warmup",
+          "CLVD DataChannel + WebCodecs warming — RTP stays live as safety net"
         );
         this.cb.onState("connected", "webcodecs video");
         this.gotVideoTrack = true;
@@ -814,6 +820,21 @@ export class CouchlinkPlayer {
   preferRtpPresent() {
     this.webcodecsPath = false;
     this.notifyPresentPath("rtp", "WebCodecs fallback");
+  }
+
+  /**
+   * WebCodecs has painted its first frame — cut RTP and go DataChannel-only.
+   *
+   * Called by the App when the WebCodecs canvas reports its first paint, so
+   * the host stops writing the RTP track nobody is looking at. The pre-paint
+   * state is "warmup", which keeps both paths live as a safety net.
+   */
+  promoteWebcodecs() {
+    if (!this.webcodecsPath) return;
+    this.notifyPresentPath(
+      "webcodecs",
+      "CLVD DataChannel + WebCodecs (no RTP jitter buffer)"
+    );
   }
 
   /**

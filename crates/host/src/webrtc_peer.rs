@@ -142,6 +142,9 @@ fn parse_present_path(path: &str) -> u8 {
     match path {
         "webcodecs" => PATH_WEBCODECS,
         "rtp" => PATH_RTP,
+        // "warmup": the viewer is bringing up WebCodecs and will switch once it
+        // paints its first frame — until then keep both paths live so RTP is a
+        // safety net and the DataChannel warms the decoder in parallel.
         _ => PATH_UNKNOWN,
     }
 }

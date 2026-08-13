@@ -79,6 +79,7 @@ export class WebCodecsCanvasView {
   private lastH = 0;
   private onStats: ((s: WebCodecsStats) => void) | null = null;
   private onNeedKeyframe: (() => void) | null = null;
+  private onFirstPaint: (() => void) | null = null;
   private lastPli = 0;
   private description: Uint8Array | null = null;
   private codec = "avc1.4D0028";
@@ -92,6 +93,11 @@ export class WebCodecsCanvasView {
 
   setKeyframeHandler(cb: (() => void) | null) {
     this.onNeedKeyframe = cb;
+  }
+
+  /** Fired once, the first time a decoded frame is painted on screen. */
+  setFirstPaintHandler(cb: (() => void) | null) {
+    this.onFirstPaint = cb;
   }
 
   /** True once at least one frame has been painted. */
@@ -280,6 +286,9 @@ export class WebCodecsCanvasView {
     ctx.drawImage(frame, 0, 0);
     this.painted += 1;
     this.paintedTotal += 1;
+    if (this.paintedTotal === 1) {
+      this.onFirstPaint?.();
+    }
 
     const now = performance.now();
     if (now - this.windowStart >= 1000) {

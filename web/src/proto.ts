@@ -37,8 +37,10 @@ export type SignalMessage =
    * so the host cannot tell an Xbox pad from a DualSense without being told. */
   | { type: "pad_info"; kind: string; id: string }
   /** Player → host: which video path it is actually presenting from, so the
-   * host can stop writing the path nobody is painting from. */
-  | { type: "present_path"; path: "webcodecs" | "rtp" }
+   * host can stop writing the path nobody is painting from. "warmup" means
+   * WebCodecs is starting on the DataChannel — keep both paths live as a
+   * safety net until it paints, then it reports "webcodecs". */
+  | { type: "present_path"; path: "webcodecs" | "rtp" | "warmup" }
   | {
       type: "stream_info";
       width: number;

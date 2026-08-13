@@ -30,6 +30,20 @@ const IDR_INTERVAL: Duration = Duration::from_secs(2);
 /// frame is already too old to be worth showing.
 const PUSH_BUDGET: Duration = Duration::from_millis(50);
 
+/// Longest a *keyframe* push may hold the loop.
+///
+/// A keyframe is the only thing that lets a viewer who joined mid-GOP start
+/// painting — the browser's WebCodecs path literally refuses to configure its
+/// decoder until an IDR arrives. On a fresh SCTP DataChannel the send is in
+/// slow-start, so the very first keyframe is also the most likely to blow the
+/// normal 50ms budget. Drop it and the viewer waits for the next scheduled
+/// IDR (up to `IDR_INTERVAL` away) — and if the channel is still ramping that
+/// one goes too, the browser's fallback timer fires, and the session settles
+/// on RTP with its jitter buffer for its entire duration. Keyframes are rare
+/// (at most one per `IDR_INTERVAL`), so a generous budget costs nothing in
+/// steady state while making the join reliable.
+const KEYFRAME_PUSH_BUDGET: Duration = Duration::from_secs(1);
+
 /// Push one frame, but never let it park the caller.
 ///
 /// `push_h264` awaits twice — the SCTP DataChannel and the RTP sample writer —
@@ -57,13 +71,18 @@ async fn push_bounded(
     dur: Duration,
     keyframe: bool,
 ) -> Result<bool> {
-    match tokio::time::timeout(PUSH_BUDGET, host.push_h264(nal, dur, keyframe)).await {
+    match tokio::time::timeout(
+        if keyframe { KEYFRAME_PUSH_BUDGET } else { PUSH_BUDGET },
+        host.push_h264(nal, dur, keyframe),
+    )
+    .await
+    {
         Ok(Ok(shed)) => Ok(shed),
         Ok(Err(e)) => Err(e),
         Err(_) => {
             // Dropped H.264 leaves the decoder referencing frames it never got.
             host.request_keyframe();
-            warn!("frame push exceeded {PUSH_BUDGET:?} — dropped, asked for a keyframe");
+            warn!("frame push exceeded budget — dropped, asked for a keyframe");
             Ok(true)
         }
     }
