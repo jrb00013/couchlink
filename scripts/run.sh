@@ -24,7 +24,7 @@ source "$ROOT/scripts/lib-mesh.sh"
 
 usage() {
   cat <<EOF
-usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall]
+usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall] [--force-cloudflare]
 
   host    start signaling + (optional TURN) + couchlink-host
   client  start couchlink-client (friend/player)
@@ -35,6 +35,10 @@ usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall]
             portproxy; then Cloudflare HTTPS + IPv6 / bore if the router blocks UPnP.
             Client: prompts for the host join URL if unset; auto-joins Headscale
             when the invite has hs= + tskey=.
+  --force-cloudflare
+            Host: skip mesh + UPnP entirely and always bring up a cloudflared
+            HTTPS invite (https://*.trycloudflare.com). Use when the mesh or a
+            direct public IP can't reach the friend. Requires --online.
   --verbose
             Chatty bring-up logs, QR code, TRACE-level-ish Rust logs (RUST_LOG).
             Default is quiet — join URL is still printed.
@@ -52,12 +56,14 @@ EOF
 ROLE="host"
 MODE="local"
 UNBLOCK_FIREWALL=0
+FORCE_CLOUDFLARE=0
 COUCHLINK_VERBOSE="${COUCHLINK_VERBOSE:-0}"
 for arg in "$@"; do
   case "$arg" in
     host|client) ROLE="$arg" ;;
     --local) MODE="local" ;;
     --online) MODE="online" ;;
+    --force-cloudflare) FORCE_CLOUDFLARE=1 ;;
     --verbose|-v) COUCHLINK_VERBOSE=1 ;;
     --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -69,6 +75,16 @@ for arg in "$@"; do
   esac
 done
 export COUCHLINK_VERBOSE
+
+if [[ "$FORCE_CLOUDFLARE" == "1" && "$MODE" != "online" ]]; then
+  echo "error: --force-cloudflare requires --online" >&2
+  usage >&2
+  exit 1
+fi
+if [[ "$FORCE_CLOUDFLARE" == "1" ]]; then
+  couchlink_say "==> --force-cloudflare: skipping mesh + UPnP, forcing cloudflared HTTPS invite"
+  export COUCHLINK_FORCE_CLOUDFLARE=1 COUCHLINK_SKIP_MESH=1 COUCHLINK_SKIP_UPNP=1
+fi
 
 # Quiet Rust crates unless the user opted in or already set RUST_LOG.
 if ! couchlink_verbose && [[ -z "${RUST_LOG:-}" ]]; then
@@ -135,6 +151,7 @@ COUCHLINK_USING_MESH=0
 # Scheduled Task; else COUCHLINK_ALLOW_UAC=1.
 couchlink_try_upnp_online() {
   [[ "${COUCHLINK_SKIP_UPNP_PREP:-}" == "1" ]] && return 0
+  [[ "${COUCHLINK_FORCE_CLOUDFLARE:-0}" == "1" ]] && return 1
   local ok=0
   if [[ "$PLATFORM" == "wsl" || "$PLATFORM" == "windows" ]] && command -v powershell.exe >/dev/null 2>&1; then
     couchlink_vlog "==> --online: Windows prep (Helper / task / firewall + WSL portproxy + UPnP)"
