@@ -195,13 +195,70 @@ mod linux {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::time::{Duration, Instant};
     use tracing::warn;
 
     pub enum Inner {
-        Vhid(VhidClient),
+        Vhid(ReconnectingVhid),
         Uhid(crate::linux_uhid::LinuxUhid),
         UInput(LinuxUInput),
         Noop,
+    }
+
+    // The companion is a separate process and is restarted whenever the player's
+    // controller family changes (ensure-ds-vhid.sh taskkills + relaunches it),
+    // which breaks our socket mid-session. Without reconnecting, every later
+    // frame returns "Broken pipe" and the player's input is dead for good while
+    // video keeps flowing — the failure looks like the pad, not the pipe.
+    pub(super) struct ReconnectingVhid {
+        client: VhidClient,
+        last_attempt: Option<Instant>,
+    }
+
+    impl ReconnectingVhid {
+        pub(super) fn new(client: VhidClient) -> Self {
+            Self {
+                client,
+                last_attempt: None,
+            }
+        }
+
+        fn apply(&mut self, frame: &PadFrame) -> Result<()> {
+            match self.client.apply(frame) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // Throttle reconnect attempts: the apply path runs at the
+                    // pad rate (~250 Hz) and each connect() can block for the
+                    // 200ms timeout per host — a missing companion would
+                    // otherwise wedge the whole pad loop.
+                    let now = Instant::now();
+                    let due = self
+                        .last_attempt
+                        .map(|t| now.duration_since(t) >= Duration::from_millis(250))
+                        .unwrap_or(true);
+                    if !due {
+                        return Err(e);
+                    }
+                    self.last_attempt = Some(now);
+                    match VhidClient::connect() {
+                        Ok(fresh) => {
+                            info!("DualSense VHID companion reconnected after {e}");
+                            self.client = fresh;
+                            // Retry the frame that failed on the dead socket.
+                            self.client.apply(frame)
+                        }
+                        Err(re) => {
+                            warn!("VHID companion reconnect failed: {re:#}");
+                            Err(e)
+                        }
+                    }
+                }
+            }
+        }
+
+        fn poll_feedback(&mut self) -> Result<Vec<PadFeedback>> {
+            self.client.poll_feedback()
+        }
     }
 
     impl Inner {
@@ -220,7 +277,7 @@ mod linux {
                 match VhidClient::connect() {
                     Ok(c) => {
                         info!("Linux/WSL virtual pad: DualSense VHID companion (TCP/pipe)");
-                        return Ok(Self::Vhid(c));
+                        return Ok(Self::Vhid(ReconnectingVhid::new(c)));
                     }
                     Err(e) if matches!(cfg.backend, VirtualPadBackend::DualSense) && likely_wsl() => {
                         return Err(e).context("DualSense VHID companion required under WSL");

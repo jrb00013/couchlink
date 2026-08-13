@@ -35,6 +35,14 @@ fi
 
 build_ps1="$(wslpath -w "$ROOT/scripts/build-win-ds-vhid.ps1")"
 
+# Kill any stale companion FIRST: a running couchlink-ds-vhid.exe locks its own
+# exe on Windows, so `cargo build` below fails with "Access is denied" trying to
+# overwrite it — and the old process then never gets replaced, leaving the host
+# video-only. (taskkill is idempotent; missing process is fine.)
+if command -v taskkill.exe >/dev/null 2>&1; then
+  taskkill.exe /IM couchlink-ds-vhid.exe /F >/dev/null 2>&1 || true
+fi
+
 echo "==> ensuring DualSense VHID companion is built…"
 if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1"
@@ -68,7 +76,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -Windo
 
 # Start-Process returns before the companion binds, and the host probes once at
 # startup — without this wait it loses the race and falls back to video-only.
-gw="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+# (awk '...exit' closes the pipe early → `ip route` gets SIGPIPE → pipefail +
+# set -e kills the script right here, skipping the readiness wait below. The
+# `|| true` keeps the gateway probe from becoming a silent 141.)
+gw="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}' || true)"
 for _ in $(seq 1 50); do
   for target in 127.0.0.1 ${gw:-}; do
     if timeout 1 bash -c "cat < /dev/null > /dev/tcp/$target/39251" 2>/dev/null; then
