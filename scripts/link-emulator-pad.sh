@@ -36,18 +36,21 @@ find_rpcs3_config() {
     echo "${COUCHLINK_RPCS3_CONFIG}"
     return
   fi
-  local win_user candidates=()
+  # Don't assume Documents lives where it normally does — OneDrive (or a
+  # portable/custom install dir) redirects it, and a hardcoded guess just
+  # silently misses the config every time that's true. Search for the file
+  # itself instead, under the user's actual home and common install roots.
+  local win_user
   win_user="$(powershell.exe -NoProfile -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
-  if [[ -n "$win_user" ]]; then
-    candidates+=("/mnt/c/Users/$win_user/RPCS3/config/input_configs/global/Default.yml")
+  local hit
+  if [[ -n "$win_user" ]] && [[ -d "/mnt/c/Users/$win_user" ]]; then
+    hit="$(find "/mnt/c/Users/$win_user" -maxdepth 6 -ipath '*/rpcs3/config/input_configs/global/Default.yml' 2>/dev/null | head -1)"
+    [[ -n "$hit" ]] && { echo "$hit"; return; }
   fi
-  candidates+=(
-    "$HOME/.config/rpcs3/input_configs/global/Default.yml"
-  )
-  local c
-  for c in "${candidates[@]}"; do
-    [[ -f "$c" ]] && { echo "$c"; return; }
-  done
+  [[ -f "$HOME/.config/rpcs3/input_configs/global/Default.yml" ]] && {
+    echo "$HOME/.config/rpcs3/input_configs/global/Default.yml"
+    return
+  }
 }
 
 link_rpcs3() {
@@ -114,19 +117,27 @@ find_pcsx2_config() {
     echo "${COUCHLINK_PCSX2_CONFIG}"
     return
   fi
-  local win_user candidates=()
+  # Same reasoning as RPCS3 above: don't assume Documents, search for the
+  # file itself. A system can have more than one PCSX2.ini lying around
+  # (an unused portable-install default alongside the real one) — when
+  # several turn up, the one PCSX2 actually writes to is the newest, so
+  # pick by mtime rather than by search order.
+  local win_user
   win_user="$(powershell.exe -NoProfile -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
-  if [[ -n "$win_user" ]]; then
-    candidates+=(
-      "/mnt/c/Users/$win_user/Documents/PCSX2/inis/PCSX2.ini"
-      "/mnt/c/Program Files/PCSX2/inis/PCSX2.ini"
-    )
+  local roots=()
+  [[ -n "$win_user" ]] && [[ -d "/mnt/c/Users/$win_user" ]] && roots+=("/mnt/c/Users/$win_user")
+  [[ -d "/mnt/c/Program Files/PCSX2" ]] && roots+=("/mnt/c/Program Files/PCSX2")
+  [[ -d "/mnt/c/Program Files (x86)/PCSX2" ]] && roots+=("/mnt/c/Program Files (x86)/PCSX2")
+  if [[ ${#roots[@]} -gt 0 ]]; then
+    local hit
+    hit="$(find "${roots[@]}" -maxdepth 8 -iname 'PCSX2.ini' -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn | head -1 | cut -d' ' -f2-)"
+    [[ -n "$hit" ]] && { echo "$hit"; return; }
   fi
-  candidates+=("$HOME/.config/PCSX2/inis/PCSX2.ini")
-  local c
-  for c in "${candidates[@]}"; do
-    [[ -f "$c" ]] && { echo "$c"; return; }
-  done
+  [[ -f "$HOME/.config/PCSX2/inis/PCSX2.ini" ]] && {
+    echo "$HOME/.config/PCSX2/inis/PCSX2.ini"
+    return
+  }
 }
 
 link_pcsx2() {
