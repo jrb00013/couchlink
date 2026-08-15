@@ -898,8 +898,14 @@ export class CouchlinkPlayer {
         const state = touch.sample(this.seq);
         this.padDc.send(encodeClpd(state));
         this.padSent += 1;
-        // Tell the host this is a touch controller so it picks a DualSense
-        // virtual pad (CLPD frames are DualSense-shaped, same as kbm/pad).
+        // "generic" selects the emulator-side virtual pad *backend*
+        // (backend_for()'s catch-all, XInput), not the wire format — CLPD
+        // frames are the same shape regardless of source. Touch has no real
+        // controller identity to report, so "generic" is the honest kind —
+        // and it matters which backend that maps to: the ViGEm DS4 backend
+        // (what "dualsense" used to route to) is DirectInput-shaped, and
+        // plenty of co-op games — Marvel Ultimate Alliance 3 among them —
+        // simply never see it as a joinable local player. XInput does.
         if (
           this.padInfoSent !== "touch" ||
           performance.now() - this.padInfoLastSentAt > CouchlinkPlayer.PAD_INFO_HEARTBEAT_MS
@@ -907,7 +913,7 @@ export class CouchlinkPlayer {
           this.padInfoSent = "touch";
           this.padInfoLastSentAt = performance.now();
           if (this.ws?.readyState === WebSocket.OPEN) {
-            send(this.ws, { type: "pad_info", kind: "dualsense", id: "touch" });
+            send(this.ws, { type: "pad_info", kind: "generic", id: "touch" });
           }
         }
         this.padName = "touch";
@@ -927,8 +933,10 @@ export class CouchlinkPlayer {
       const kbmState = kbm.sample(this.seq);
       this.padDc.send(encodeClpd(kbmState));
       this.padSent += 1;
-      // Tell the host this is keyboard+mouse so it picks a DualSense virtual pad
-      // (CLPD frames from kbm are DualSense-shaped, same as a real pad).
+      // See the touch branch above for why this is "generic" and not
+      // "dualsense": no real controller identity to report, and the
+      // backend that maps to (XInput) is what actually gets recognized as
+      // a joinable player in most co-op games.
       if (
         this.padInfoSent !== "keyboard" ||
         performance.now() - this.padInfoLastSentAt > CouchlinkPlayer.PAD_INFO_HEARTBEAT_MS
@@ -936,7 +944,7 @@ export class CouchlinkPlayer {
         this.padInfoSent = "keyboard";
         this.padInfoLastSentAt = performance.now();
         if (this.ws?.readyState === WebSocket.OPEN) {
-          send(this.ws, { type: "pad_info", kind: "dualsense", id: "keyboard+mouse" });
+          send(this.ws, { type: "pad_info", kind: "generic", id: "keyboard+mouse" });
         }
       }
       this.padName = "keyboard+mouse";
