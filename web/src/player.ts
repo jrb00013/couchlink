@@ -898,8 +898,15 @@ export class CouchlinkPlayer {
         const state = touch.sample(this.seq);
         this.padDc.send(encodeClpd(state));
         this.padSent += 1;
-        // Tell the host this is a touch controller so it picks a DualSense
-        // virtual pad (CLPD frames are DualSense-shaped, same as kbm/pad).
+        // "xbox" here selects the emulator-side virtual pad *backend*
+        // (XInput), not the wire format — CLPD frames are the same shape
+        // regardless of source. XInput is what most co-op games actually
+        // scan for local players; the ViGEm DS4 backend (what "dualsense"
+        // used to route to) is DirectInput-shaped and plenty of games
+        // — Marvel Ultimate Alliance 3 among them — simply never see it as
+        // a joinable player. A touch player has no real controller
+        // identity to preserve, so there's no reason to pick the backend
+        // with worse compatibility.
         if (
           this.padInfoSent !== "touch" ||
           performance.now() - this.padInfoLastSentAt > CouchlinkPlayer.PAD_INFO_HEARTBEAT_MS
@@ -907,7 +914,7 @@ export class CouchlinkPlayer {
           this.padInfoSent = "touch";
           this.padInfoLastSentAt = performance.now();
           if (this.ws?.readyState === WebSocket.OPEN) {
-            send(this.ws, { type: "pad_info", kind: "dualsense", id: "touch" });
+            send(this.ws, { type: "pad_info", kind: "xbox", id: "touch" });
           }
         }
         this.padName = "touch";
@@ -927,8 +934,11 @@ export class CouchlinkPlayer {
       const kbmState = kbm.sample(this.seq);
       this.padDc.send(encodeClpd(kbmState));
       this.padSent += 1;
-      // Tell the host this is keyboard+mouse so it picks a DualSense virtual pad
-      // (CLPD frames from kbm are DualSense-shaped, same as a real pad).
+      // See the touch branch above for why this is "xbox" and not
+      // "dualsense": that selects the ViGEm backend (XInput vs. DS4), and
+      // XInput is what actually gets recognized as a joinable player in
+      // most co-op games. A keyboard+mouse player has no real controller
+      // identity to preserve either.
       if (
         this.padInfoSent !== "keyboard" ||
         performance.now() - this.padInfoLastSentAt > CouchlinkPlayer.PAD_INFO_HEARTBEAT_MS
@@ -936,7 +946,7 @@ export class CouchlinkPlayer {
         this.padInfoSent = "keyboard";
         this.padInfoLastSentAt = performance.now();
         if (this.ws?.readyState === WebSocket.OPEN) {
-          send(this.ws, { type: "pad_info", kind: "dualsense", id: "keyboard+mouse" });
+          send(this.ws, { type: "pad_info", kind: "xbox", id: "keyboard+mouse" });
         }
       }
       this.padName = "keyboard+mouse";
