@@ -109,6 +109,23 @@ pub enum SignalMessage {
         #[serde(default)]
         slot: u8,
     },
+    /// Player reports its keyboard/mouse control → key bindings, so the host can
+    /// write matching keyboard binds into the emulator config for that slot.
+    ///
+    /// Frames from a keyboard/mouse player are DualSense-shaped CLPD, which the
+    /// host plays through the virtual pad like any other. But the friend asked
+    /// for the emulator to *also* be bound to their actual keyboard keys — the
+    /// value here is a JSON object mapping a control name (`"cross"`, `"l1"`,
+    /// `"dpad_up"`, …) to a browser `KeyboardEvent.code` (e.g. `"Space"`,
+    /// `"KeyW"`). The host translates codes into PCSX2 `Keyboard/Key_*` and
+    /// RPCS3 SDL-style names and rewrites the emulator config for `slot + 1`.
+    KeyMap {
+        /// JSON string: `{ "<control>": "<event.code>", … }`.
+        keymap: String,
+        /// Player slot reporting its keymap (stamped by the signaling server).
+        #[serde(default)]
+        slot: u8,
+    },
     /// Player reports which video path it is actually presenting from.
     ///
     /// The host otherwise writes every frame to both the RTP track and the
@@ -252,6 +269,26 @@ mod tests {
     }
 
     #[test]
+    fn key_map_round_trips() {
+        let m = SignalMessage::KeyMap {
+            keymap: r#"{"cross":"Space","triangle":"KeyE","l1":"ShiftLeft"}"#.into(),
+            slot: 2,
+        };
+        let s = m.to_json().unwrap();
+        assert!(s.contains("\"type\":\"key_map\""));
+        assert!(s.contains("\"keymap\":\""));
+        assert!(s.contains("\"slot\":2"));
+        let back = SignalMessage::from_json(&s).unwrap();
+        match back {
+            SignalMessage::KeyMap { keymap, slot } => {
+                assert!(keymap.contains("KeyE"));
+                assert_eq!(slot, 2);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn missing_slot_fields_default_to_zero() {
         // Older clients/hosts that predate slots still parse.
         for raw in [
@@ -271,6 +308,7 @@ mod tests {
                     | SignalMessage::Answer { slot: 0, .. }
                     | SignalMessage::IceCandidate { slot: 0, .. }
                     | SignalMessage::PadInfo { slot: 0, .. }
+                    | SignalMessage::KeyMap { slot: 0, .. }
                     | SignalMessage::PresentPath { slot: 0, .. }
                     | SignalMessage::RequestOffer { slot: 0 }
                     | SignalMessage::PeerJoined { slot: 0, .. }
