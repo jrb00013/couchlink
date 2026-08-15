@@ -57,8 +57,17 @@ export interface PlayerCallbacks {
     target_bitrate_kbps: number;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
+  /** This browser's own assigned slot (1-based), so it can label itself
+   * correctly in a per-player display instead of guessing. */
+  onRegistered?: (slot: number) => void;
   /** Session occupancy ("N/3 players connected") broadcast on join/leave. */
   onPlayersStatus?: (occupied: number, max: number) => void;
+  /** Every seated player's controller family — broadcast so a controller
+   * debug view can show everyone's pad, not just this browser's own. */
+  onPlayerPadInfo?: (slot: number, kind: string, id: string) => void;
+  /** A fellow player (not the host) left — drop their entry from any
+   * per-player display instead of leaving a stale "connected" row. */
+  onPlayerLeft?: (slot: number) => void;
   /** Full getStats-derived telemetry snapshot, ~2s tick. */
   onTelemetry?: (t: PlayerTelemetry) => void;
 }
@@ -139,8 +148,14 @@ export class CouchlinkPlayer {
   private padName = "none";
   /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
   private lastPadHz = 0;
-  /** Last Gamepad.id announced to the host, so pad_info is sent only on change. */
+  /** Last Gamepad.id announced to the host, so pad_info is sent on change… */
   private padInfoSent = "";
+  /** …and re-sent on this cadence regardless, so `player_pad_info` doubles as
+   * a "still linked and actually sending input" heartbeat other players can
+   * see — a one-time report on connect can't tell anyone the controller is
+   * still alive an hour later. */
+  private padInfoLastSentAt = 0;
+  private static readonly PAD_INFO_HEARTBEAT_MS = 3000;
   /** Last logged media-path summary, so the line prints only on change. */
   private lastPathKey = "";
   /** Keyboard+mouse input source — injected by the UI, null if not active. */
@@ -885,8 +900,12 @@ export class CouchlinkPlayer {
         this.padSent += 1;
         // Tell the host this is a touch controller so it picks a DualSense
         // virtual pad (CLPD frames are DualSense-shaped, same as kbm/pad).
-        if (this.padInfoSent !== "touch") {
+        if (
+          this.padInfoSent !== "touch" ||
+          performance.now() - this.padInfoLastSentAt > CouchlinkPlayer.PAD_INFO_HEARTBEAT_MS
+        ) {
           this.padInfoSent = "touch";
+          this.padInfoLastSentAt = performance.now();
           if (this.ws?.readyState === WebSocket.OPEN) {
             send(this.ws, { type: "pad_info", kind: "dualsense", id: "touch" });
           }
@@ -910,8 +929,12 @@ export class CouchlinkPlayer {
       this.padSent += 1;
       // Tell the host this is keyboard+mouse so it picks a DualSense virtual pad
       // (CLPD frames from kbm are DualSense-shaped, same as a real pad).
-      if (this.padInfoSent !== "keyboard") {
+      if (
+        this.padInfoSent !== "keyboard" ||
+        performance.now() - this.padInfoLastSentAt > CouchlinkPlayer.PAD_INFO_HEARTBEAT_MS
+      ) {
         this.padInfoSent = "keyboard";
+        this.padInfoLastSentAt = performance.now();
         if (this.ws?.readyState === WebSocket.OPEN) {
           send(this.ws, { type: "pad_info", kind: "dualsense", id: "keyboard+mouse" });
         }
@@ -930,8 +953,12 @@ export class CouchlinkPlayer {
     // Gamepad API, so the host cannot infer it from input — without this it
     // binds the emulator to whatever was configured last, which drops every
     // button when that device is not the one in the player's hands.
-    if (gp.id !== this.padInfoSent) {
+    if (
+      gp.id !== this.padInfoSent ||
+      performance.now() - this.padInfoLastSentAt > CouchlinkPlayer.PAD_INFO_HEARTBEAT_MS
+    ) {
       this.padInfoSent = gp.id;
+      this.padInfoLastSentAt = performance.now();
       const kind = controllerKind(gp.id);
       if (this.ws?.readyState === WebSocket.OPEN) {
         send(this.ws, { type: "pad_info", kind, id: gp.id });
@@ -957,6 +984,7 @@ export class CouchlinkPlayer {
       case "registered":
         this.sessionRetries = 0;
         this.cb.onState("waiting_host", "Waiting for host offer…");
+        if (msg.slot) this.cb.onRegistered?.(msg.slot);
         break;
       case "error": {
         const text = msg.message || "";
@@ -1019,8 +1047,19 @@ export class CouchlinkPlayer {
         this.cb.onPlayersStatus?.(msg.occupied, msg.max);
         break;
       case "peer_left":
-        this.cb.onState("waiting_host", "Host disconnected");
-        this.resetPeer();
+        // slot 0 means the host itself left; any other slot is a fellow
+        // player leaving, now also broadcast here so a controller debug view
+        // can drop their pad info — that must NOT be treated as our own host
+        // connection dying.
+        if (!msg.slot) {
+          this.cb.onState("waiting_host", "Host disconnected");
+          this.resetPeer();
+        } else {
+          this.cb.onPlayerLeft?.(msg.slot);
+        }
+        break;
+      case "player_pad_info":
+        this.cb.onPlayerPadInfo?.(msg.slot, msg.kind, msg.id ?? "");
         break;
       case "pong":
         break;

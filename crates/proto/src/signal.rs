@@ -109,6 +109,16 @@ pub enum SignalMessage {
         #[serde(default)]
         slot: u8,
     },
+    /// Broadcast echo of a player's `PadInfo`, sent to the host *and every
+    /// player* (not just relayed to the host) so a controller debug view can
+    /// show every seated player's controller, not only your own — the browser
+    /// otherwise has no way to see what anyone else in the session is holding.
+    PlayerPadInfo {
+        slot: u8,
+        kind: String,
+        #[serde(default)]
+        id: String,
+    },
     /// Player reports which video path it is actually presenting from.
     ///
     /// The host otherwise writes every frame to both the RTP track and the
@@ -336,6 +346,26 @@ mod tests {
         let back = SignalMessage::from_json(&s).unwrap();
         match back {
             SignalMessage::PeerLeft { slot } => assert_eq!(slot, 2),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn player_pad_info_round_trips() {
+        let m = SignalMessage::PlayerPadInfo {
+            slot: 2,
+            kind: "dualsense".into(),
+            id: "DualSense Wireless Controller".into(),
+        };
+        let s = m.to_json().unwrap();
+        assert!(s.contains("\"type\":\"player_pad_info\""));
+        let back = SignalMessage::from_json(&s).unwrap();
+        match back {
+            SignalMessage::PlayerPadInfo { slot, kind, id } => {
+                assert_eq!(slot, 2);
+                assert_eq!(kind, "dualsense");
+                assert_eq!(id, "DualSense Wireless Controller");
+            }
             other => panic!("wrong variant: {other:?}"),
         }
     }
