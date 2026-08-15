@@ -56,8 +56,10 @@ find_rpcs3_config() {
 link_rpcs3() {
 local CONFIG current want tmp
 CONFIG="$(find_rpcs3_config)"
+RPCS3_CONFIG_PATH="$CONFIG"
 if [[ -z "$CONFIG" ]]; then
   echo "==> RPCS3 pad config not found — skipping (set COUCHLINK_RPCS3_CONFIG)" >&2
+  RPCS3_STATUS=skipped
   return 0
 fi
 
@@ -76,6 +78,7 @@ current="$(awk -v p="Player $PLAYER Input:" '
 want="${HANDLER}|\"${DEVICE}\""
 if [[ "$current" == "$want" ]]; then
   echo "==> RPCS3 Player $PLAYER already linked to $HANDLER / $DEVICE"
+  RPCS3_STATUS=already
   return 0
 fi
 
@@ -97,6 +100,7 @@ awk -v p="Player $PLAYER Input:" -v h="$HANDLER" -v d="$DEVICE" '
 if [[ ! -s "$tmp" ]] || ! grep -q "^Player $PLAYER Input:" "$tmp"; then
   rm -f "$tmp"
   echo "==> refusing to write malformed RPCS3 config — left unchanged" >&2
+  RPCS3_STATUS=failed
   return 1
 fi
 
@@ -104,9 +108,11 @@ cat "$tmp" > "$CONFIG"
 rm -f "$tmp"
 echo "==> RPCS3 Player $PLAYER linked to $HANDLER / $DEVICE (was ${current%%|*})"
 echo "    backup: $CONFIG.couchlink.bak"
+RPCS3_STATUS=linked
 
 }
 
+RPCS3_STATUS=skipped
 link_rpcs3 || true
 
 # ---------------------------------------------------------------- PCSX2 -----
@@ -143,9 +149,11 @@ find_pcsx2_config() {
 link_pcsx2() {
   local cfg
   cfg="$(find_pcsx2_config)"
+  PCSX2_CONFIG_PATH="$cfg"
   if [[ -z "$cfg" ]]; then
     # Not an error: PCSX2 writes its ini on first launch.
     echo "==> PCSX2 config not found — skipping (launch PCSX2 once, or set COUCHLINK_PCSX2_CONFIG)"
+    PCSX2_STATUS=skipped
     return 0
   fi
 
@@ -153,6 +161,7 @@ link_pcsx2() {
   # with an index we cannot predict without reading PCSX2's own device list.
   if [[ "${COUCHLINK_DS_VHID_BACKEND:-xbox360}" != "xbox360" ]]; then
     echo "==> PCSX2: backend ${COUCHLINK_DS_VHID_BACKEND:-} is not xbox360 — leaving Pad${PLAYER} alone"
+    PCSX2_STATUS=skipped
     return 0
   fi
 
@@ -173,6 +182,7 @@ link_pcsx2() {
       END { exit found ? 0 : 1 }
     ' "$cfg" 2>/dev/null; then
     echo "==> PCSX2 ${section} already bound to ${dev}"
+    PCSX2_STATUS=already
     return 0
   fi
 
@@ -236,12 +246,25 @@ link_pcsx2() {
   if [[ ! -s "$tmp" ]] || ! grep -q "^\[$section\]" "$tmp"; then
     rm -f "$tmp"
     echo "==> refusing to write malformed PCSX2 config — left unchanged" >&2
+    PCSX2_STATUS=failed
     return 1
   fi
 
   cat "$tmp" > "$cfg"
   rm -f "$tmp"
   echo "==> PCSX2 ${section} bound to ${dev} (backup: $cfg.couchlink.bak)"
+  PCSX2_STATUS=linked
 }
 
+PCSX2_STATUS=skipped
+PCSX2_CONFIG_PATH=""
+
 link_pcsx2 || true
+
+# A single machine-parseable summary line so the host can surface real
+# per-player status (not just "linked"/"skipped") up to the debug UI instead
+# of only ever knowing "the script exited 0". backend/device/handler describe
+# what was actually configured; the two config paths (blank when not found)
+# say exactly which file the binding did or didn't touch, since "skipped"
+# alone gives the player nothing to act on when their controller doesn't work.
+echo "RESULT player=$PLAYER backend=${COUCHLINK_DS_VHID_BACKEND:-xbox360} handler=$HANDLER device=\"$DEVICE\" rpcs3=$RPCS3_STATUS rpcs3_config=\"$RPCS3_CONFIG_PATH\" pcsx2=$PCSX2_STATUS pcsx2_config=\"$PCSX2_CONFIG_PATH\""
