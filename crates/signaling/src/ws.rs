@@ -90,7 +90,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 player_name: _,
             } => {
                 match store.register_player(sid.clone(), pin, tx.clone()) {
-                    Ok(player_epoch) => {
+                    Ok((player_epoch, displaced)) => {
                         session_id = Some(sid.clone());
                         role = Some(Role::Player);
                         let _ = tx.send(
@@ -101,6 +101,21 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                             .to_json()
                             .unwrap(),
                         );
+                        if let Some(old_tx) = displaced {
+                            // Someone else just took this session's single player
+                            // slot. Tell the displaced socket outright instead of
+                            // letting them watch the stream silently stall and
+                            // never learn why — a reload's old socket is torn
+                            // down by the browser anyway, so this is a no-op there.
+                            let _ = old_tx.send(
+                                SignalMessage::Error {
+                                    message: "Another device joined this session and took over the connection.".into(),
+                                }
+                                .to_json()
+                                .unwrap(),
+                            );
+                            warn!("player session {sid} taken over by a new socket (epoch {player_epoch})");
+                        }
                         // Always notify the host: a reload leaves a stale player tx
                         // behind, and suppressing PeerJoined would strand the browser
                         // waiting for an offer that never comes.
