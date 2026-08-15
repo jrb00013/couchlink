@@ -20,6 +20,19 @@ $Bin = & $BuildScript
 if (-not $Bin) { throw "build-win-capture.ps1 returned no binary path" }
 $Bin = "$Bin".Trim()
 
+# $Root resolves through the \\wsl.localhost\... UNC share this script was
+# invoked from, so $Bin does too — and Windows shows a blocking "Open File -
+# Security Warning" for an unsigned .exe run from a network location, with
+# nobody there to click it since this runs from a background-spawned
+# PowerShell. Every capture-picker-never-appeared symptom traced back to this:
+# the exe never even started. Stage it to a real local NTFS path first so it's
+# never in that zone to begin with — the fix, not a prompt-suppression hack.
+$LocalDir = Join-Path $env:LOCALAPPDATA "couchlink\bin"
+New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
+$LocalBin = Join-Path $LocalDir "couchlink-win-capture.exe"
+Copy-Item -Path $Bin -Destination $LocalBin -Force
+$Bin = $LocalBin
+
 if ($BuildOnly) { exit 0 }
 
 if ($ListWindows) {
