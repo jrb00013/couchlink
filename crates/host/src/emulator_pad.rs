@@ -41,37 +41,53 @@ fn repo_root() -> Option<PathBuf> {
     root.join("scripts").is_dir().then_some(root)
 }
 
-/// Reconcile the virtual pad + emulator binding with `kind`.
+/// Reconcile the virtual pad + emulator binding with `kind` for `slot`.
+///
+/// `slot` is the couchlink player slot (1-based). The host's own physical pad
+/// owns emulator P1, so remote slot `s` drives the emulator's P`slot + 1`.
 ///
 /// Best-effort by design: every failure here still leaves video streaming, so
 /// nothing in this path is allowed to take the session down.
-pub fn apply(kind: &str, id: &str) {
+pub fn apply(kind: &str, id: &str, slot: u8) {
     let backend = backend_for(kind);
     let Some(root) = repo_root() else {
         warn!("pad_info {kind}: repo root not found — emulator binding unchanged");
         return;
     };
 
-    info!("player pad is {kind} ({id}) — virtual pad backend {backend}");
+    info!(
+        "player pad is {kind} ({id}) for emulator P{} — virtual pad backend {backend}",
+        slot + 1
+    );
 
     // Companion first: the emulator binding names the device the companion
-    // presents, so rebinding before it exists would point at nothing.
-    run(&root, "scripts/ensure-ds-vhid.sh", backend);
-    run(&root, "scripts/link-emulator-pad.sh", backend);
+    // presents, so rebinding before it exists would point at nothing. The
+    // companion is a single process that presents every slot's pad.
+    run(&root, "scripts/ensure-ds-vhid.sh", backend, None);
+    // Each slot binds a different emulator player port so a second/third
+    // controller never overwrites an already-seated player's binding.
+    run(
+        &root,
+        "scripts/link-emulator-pad.sh",
+        backend,
+        Some(slot + 1),
+    );
 }
 
-fn run(root: &PathBuf, script: &str, backend: &str) {
+fn run(root: &PathBuf, script: &str, backend: &str, emulator_player: Option<u8>) {
     let path = root.join(script);
     if !path.is_file() {
         warn!("{script} missing — skipped");
         return;
     }
-    match Command::new("bash")
-        .arg(&path)
+    let mut cmd = Command::new("bash");
+    cmd.arg(&path)
         .current_dir(root)
-        .env("COUCHLINK_DS_VHID_BACKEND", backend)
-        .output()
-    {
+        .env("COUCHLINK_DS_VHID_BACKEND", backend);
+    if let Some(player) = emulator_player {
+        cmd.env("COUCHLINK_EMU_PLAYER", player.to_string());
+    }
+    match cmd.output() {
         Ok(out) if out.status.success() => {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 if !line.trim().is_empty() {

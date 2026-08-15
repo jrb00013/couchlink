@@ -57,6 +57,8 @@ export interface PlayerCallbacks {
     target_bitrate_kbps: number;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
+  /** Session occupancy ("N/3 players connected") broadcast on join/leave. */
+  onPlayersStatus?: (occupied: number, max: number) => void;
   /** Full getStats-derived telemetry snapshot, ~2s tick. */
   onTelemetry?: (t: PlayerTelemetry) => void;
 }
@@ -1012,6 +1014,9 @@ export class CouchlinkPlayer {
         break;
       case "host_stats":
         this.cb.onHostStats?.(msg);
+        break;
+      case "players_status":
+        this.cb.onPlayersStatus?.(msg.occupied, msg.max);
         break;
       case "peer_left":
         this.cb.onState("waiting_host", "Host disconnected");

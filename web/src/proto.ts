@@ -30,8 +30,9 @@ export type SignalMessage =
   | { type: "heartbeat" }
   | { type: "pong" }
   | { type: "request_offer" }
-  | { type: "peer_joined"; role: Role; epoch?: number }
-  | { type: "peer_left" }
+  | { type: "peer_joined"; role: Role; epoch?: number; slot?: number }
+  | { type: "peer_left"; slot?: number }
+  | { type: "players_status"; occupied: number; max: number }
   /** Player → host: which controller family this pad is, so the host can match
    * the virtual device and emulator binding. The Gamepad API normalises input,
    * so the host cannot tell an Xbox pad from a DualSense without being told. */

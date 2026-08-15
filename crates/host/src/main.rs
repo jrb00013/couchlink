@@ -13,8 +13,10 @@ mod webrtc_peer;
 use anyhow::Result;
 use clap::Parser;
 use config::HostArgs;
-use couchlink_proto::{PadFeedback, SignalMessage};
-use std::sync::atomic::AtomicU64;
+use couchlink_pad::VirtualPad;
+use couchlink_proto::SignalMessage;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -86,6 +88,285 @@ async fn push_bounded(
             Ok(true)
         }
     }
+}
+
+/// One remote player's peer connection, virtual controller, and feedback loop.
+///
+/// The host's own physical pad owns emulator P1, so a `PlayerConn` for slot `s`
+/// drives the emulator's P2–P4. Everything here is per-player — only capture,
+/// encode, and the fan-out share the single H.264 bitstream.
+struct PlayerConn {
+    host: Arc<webrtc_peer::WebRtcHost>,
+    /// Player epoch this peer was built for; a stale `PeerJoined` for this slot
+    /// (epoch older than what is already seated) is ignored.
+    attached_player_epoch: u64,
+    /// Last controller family this player reported, so the emulator rebind (a
+    /// process spawn) only runs when the answer actually changes.
+    last_pad_kind: Option<String>,
+    /// Rumble/adaptive-trigger feedback loop for this player's pad, aborted on
+    /// leave/rebuild so a dead peer stops polling its (dropped) virtual pad.
+    pad_feedback_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Close a departing/rebuilding player's peer off the critical path.
+///
+/// Awaiting `pc.close()` inline could hang indefinitely, and this is the same
+/// loop that relays video and services signaling — a hang stops everything, for
+/// every player, not just the one leaving.
+fn close_conn(conn: PlayerConn) {
+    if let Some(task) = conn.pad_feedback_task {
+        task.abort();
+    }
+    let old_pc = Arc::clone(&conn.host.pc);
+    tokio::spawn(async move {
+        if tokio::time::timeout(Duration::from_secs(5), old_pc.close())
+            .await
+            .is_err()
+        {
+            warn!("previous peer connection did not close within 5s");
+        }
+    });
+}
+
+/// Build the WebRTC peer + virtual controller for one slot.
+///
+/// Each slot gets its own `VirtualPad` device (a separate controller on the
+/// emulator's P2–P4 port), its own offer epoch, and its own feedback loop —
+/// the function signature already supported this; it just never had a caller
+/// that used more than one instance.
+async fn build_player_conn(
+    args: &HostArgs,
+    preset: couchlink_proto::StreamPreset,
+    signal_out: &tokio::sync::mpsc::UnboundedSender<SignalMessage>,
+    slot: u8,
+    epoch: u64,
+) -> Result<PlayerConn> {
+    let offer_epoch = Arc::new(AtomicU64::new(0));
+    let player_slot = Arc::new(AtomicU8::new(slot));
+    let pad = Arc::new(Mutex::new(webrtc_peer::create_virtual_pad(
+        args.bluetooth_pad,
+    )?));
+    let (host, _pad_rx) = webrtc_peer::WebRtcHost::new(
+        signal_out.clone(),
+        Arc::clone(&pad),
+        args.bluetooth_pad,
+        args.turn_url.clone(),
+        args.turn_user.clone(),
+        args.turn_pass.clone(),
+        args.ice_ips.clone(),
+        Arc::clone(&offer_epoch),
+        Arc::clone(&player_slot),
+    )
+    .await?;
+    host.set_video_size(preset.width, preset.height);
+    let host = Arc::new(host);
+    let pad_feedback_task = Some(spawn_pad_feedback(Arc::clone(&host), pad));
+    Ok(PlayerConn {
+        host,
+        attached_player_epoch: epoch,
+        last_pad_kind: None,
+        pad_feedback_task,
+    })
+}
+
+/// Poll this slot's virtual pad for game HID output (rumble / adaptive
+/// triggers from the DualSense VHID companion) and relay it to the player.
+///
+/// Runs on its own task so a congested feedback send can never park the main
+/// loop that also relays video and services signaling.
+fn spawn_pad_feedback(
+    host: Arc<webrtc_peer::WebRtcHost>,
+    pad: Arc<Mutex<VirtualPad>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(8));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let outs = {
+                let mut guard = pad.lock().await;
+                guard.poll_feedback().unwrap_or_default()
+            };
+            for fb in outs {
+                if host.send_feedback(&fb).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+}
+
+/// Push one frame to every currently-connected slot, concurrently.
+///
+/// Sequential awaits would be wrong: `push_bounded`'s own budget is up to 50ms
+/// per peer (1s for keyframes), and the cadence tick can be as tight as 2ms on
+/// the pre-encoded path — four sequential 50ms awaits would stall the whole
+/// capture loop. Returns `(received_by_any, dropped_total)`: the caller counts
+/// a produced frame once (when at least one viewer took it) and feeds the link
+/// governor the *sum* of every slot's sheds — one shared governor commands the
+/// one shared encoder knob, so N per-slot governors would fight over it.
+async fn push_to_all(
+    slots: &Arc<Mutex<HashMap<u8, PlayerConn>>>,
+    nal: Vec<u8>,
+    dur: Duration,
+    keyframe: bool,
+) -> (bool, u64) {
+    let guard = slots.lock().await;
+    if guard.is_empty() {
+        return (false, 0);
+    }
+    let results = futures_util::future::join_all(guard.iter().map(|(_, conn)| {
+        push_bounded(&conn.host, nal.clone(), dur, keyframe)
+    }))
+    .await;
+    let mut any = false;
+    let mut dropped = 0u64;
+    for r in results {
+        match r {
+            Ok(true) => dropped += 1,
+            Ok(false) => any = true,
+            Err(e) => warn!("push h264 (fan-out): {e}"),
+        }
+    }
+    (any, dropped)
+}
+
+/// Drain a rejoin burst from the inbound queue. One reload (or a double-tab /
+/// rapid reload) can enqueue several `PeerJoined`s back-to-back; rebuild once
+/// per slot for the newest epoch, and keep every non-join message that arrived
+/// during the drain for a deferred replay once the rebuilds are done.
+fn take_queued_joins(
+    inbound: &mut tokio::sync::mpsc::UnboundedReceiver<SignalMessage>,
+    slot: u8,
+    epoch: u64,
+) -> (Vec<(u8, u64)>, Vec<SignalMessage>) {
+    let mut joins: HashMap<u8, u64> = HashMap::new();
+    let mut deferred: Vec<SignalMessage> = Vec::new();
+    joins.insert(slot, epoch);
+    while let Ok(extra) = inbound.try_recv() {
+        match extra {
+            SignalMessage::PeerJoined { epoch: e, slot: s, .. } => {
+                match joins.get(&s) {
+                    Some(&existing) if existing >= e => {
+                        warn!("dropping older PeerJoined epoch={e} during coalesce (slot {s})");
+                    }
+                    _ => {
+                        joins.insert(s, e);
+                    }
+                }
+            }
+            other => deferred.push(other),
+        }
+    }
+    // Deterministic rebuild order (slot 1 first) so logs read the same every run.
+    let mut joins: Vec<(u8, u64)> = joins.into_iter().collect();
+    joins.sort_by_key(|(s, _)| *s);
+    (joins, deferred)
+}
+
+/// Route a slot-stamped message (Answer / IceCandidate / RequestOffer) to that
+/// slot's peer. Shared by the main signaling branch and the deferred replay
+/// after a join burst, so a burst can't interleave with a fresh message.
+async fn route_slot_msg(
+    msg: SignalMessage,
+    slots: &Arc<Mutex<HashMap<u8, PlayerConn>>>,
+    signal_out: &tokio::sync::mpsc::UnboundedSender<SignalMessage>,
+    force_idr: &mut bool,
+) {
+    match msg {
+        SignalMessage::Answer { sdp, epoch, slot } => {
+            if let Some(conn) = slots.lock().await.get(&slot) {
+                match conn.host.handle_answer(sdp, epoch).await {
+                    Ok(true) => {
+                        info!("remote answer set (slot {slot}) — forcing IDR for browser decoder");
+                        *force_idr = true;
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("answer failed (continuing): {e:#}"),
+                }
+            } else {
+                warn!("answer for unknown slot {slot} dropped");
+            }
+        }
+        SignalMessage::IceCandidate {
+            candidate,
+            sdp_mid,
+            sdp_mline_index,
+            slot,
+        } => {
+            if let Some(conn) = slots.lock().await.get(&slot) {
+                let _ = conn.host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
+            } else {
+                warn!("ice candidate for unknown slot {slot} dropped");
+            }
+        }
+        SignalMessage::RequestOffer { slot } => {
+            if let Some(conn) = slots.lock().await.get(&slot) {
+                info!("player requested offer (slot {slot}, renegotiate, no peer rebuild)");
+                *force_idr = true;
+                if let Err(e) = conn.host.create_and_send_offer(signal_out).await {
+                    warn!("request_offer failed: {e}");
+                }
+            } else {
+                warn!("request_offer for unknown slot {slot} dropped");
+            }
+        }
+        other => warn!("deferred signal ignored after rejoin coalesce: {other:?}"),
+    }
+}
+
+/// Build (or rebuild, for a reload) the peer for `slot`, then offer.
+///
+/// Only this slot's peer and virtual pad are touched — every other player's
+/// connection keeps streaming untouched, which is what lets players join and
+/// leave without disturbing the ones already seated.
+async fn handle_slot_join(
+    slot: u8,
+    epoch: u64,
+    args: &HostArgs,
+    preset: couchlink_proto::StreamPreset,
+    signal_out: &tokio::sync::mpsc::UnboundedSender<SignalMessage>,
+    slots: &Arc<Mutex<HashMap<u8, PlayerConn>>>,
+    capturer: &mut capture::FrameCapture,
+    capture_ok_announced: Option<bool>,
+    force_idr: &mut bool,
+) -> Result<()> {
+    {
+        let guard = slots.lock().await;
+        if let Some(existing) = guard.get(&slot) {
+            if existing.attached_player_epoch >= epoch {
+                warn!(
+                    "ignoring stale PeerJoined epoch={epoch} (attached={}) for slot {slot}",
+                    existing.attached_player_epoch
+                );
+                return Ok(());
+            }
+        }
+    }
+    info!("player joined slot {slot} (player epoch {epoch}) — building WebRTC peer + offer");
+    let conn = build_player_conn(args, preset, signal_out, slot, epoch).await?;
+    capturer.resync();
+    {
+        let mut guard = slots.lock().await;
+        if let Some(old) = guard.insert(slot, conn) {
+            close_conn(old);
+        }
+    }
+    *force_idr = true;
+    let _ = signal_out.send(stream_info_message(
+        &preset,
+        capture_ok_announced,
+        None,
+    ));
+    // Offer with the lock released: `create_and_send_offer` awaits WebRTC, and
+    // nothing else needs the map while it runs.
+    let host = slots.lock().await.get(&slot).map(|c| Arc::clone(&c.host));
+    if let Some(host) = host {
+        if let Err(e) = host.create_and_send_offer(signal_out).await {
+            warn!("offer failed for slot {slot}: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// One stage's share of a frame's total processing time, for naming the
@@ -232,10 +513,6 @@ async fn main() -> Result<()> {
         eprintln!("(QR + detailed logs: pass --verbose / COUCHLINK_VERBOSE=1)");
     }
 
-    let pad = Arc::new(Mutex::new(webrtc_peer::create_virtual_pad(
-        args.bluetooth_pad,
-    )?));
-
     // The supervisor owns the socket and re-registers on every reconnect, so a
     // transient signaling failure can no longer orphan the host from its session.
     let mut signaling = signaling_client::SignalingClient::connect_and_register(
@@ -251,43 +528,9 @@ async fn main() -> Result<()> {
     .await?;
 
     let signal_out = signaling.outbound.clone();
-    let offer_epoch = Arc::new(AtomicU64::new(0));
-    let mut host = webrtc_peer::WebRtcHost::new(
-        signal_out.clone(),
-        Arc::clone(&pad),
-        args.bluetooth_pad,
-        args.turn_url.clone(),
-        args.turn_user.clone(),
-        args.turn_pass.clone(),
-        args.ice_ips.clone(),
-        Arc::clone(&offer_epoch),
-    )
-    .await?
-    .0;
-    host.set_video_size(preset.width, preset.height);
-    let mut attached_player_epoch: u64 = 0;
-
-    // Forward game HID output (from DualSense VHID companion) to the friend's pad.
-    let (pad_feedback_tx, mut pad_feedback_rx) = tokio::sync::mpsc::unbounded_channel::<PadFeedback>();
-    {
-        let pad_poll = Arc::clone(&pad);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(8));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                let outs = {
-                    let mut guard = pad_poll.lock().await;
-                    guard.poll_feedback().unwrap_or_default()
-                };
-                for fb in outs {
-                    if pad_feedback_tx.send(fb).is_err() {
-                        return;
-                    }
-                }
-            }
-        });
-    }
+    // One peer + one virtual controller per remote slot. The host's own pad owns
+    // emulator P1; slots 1-3 fill P2-P4.
+    let slots: Arc<Mutex<HashMap<u8, PlayerConn>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Open capture before the first player so Windows win-capture can connect immediately.
     // Blocking accept is fine here — we are still in startup, before the select loop.
@@ -344,9 +587,6 @@ async fn main() -> Result<()> {
         (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO);
     let mut force_idr = true;
     let mut idr_burst: u32 = 0;
-    // Last controller family reported by the player — reconciling is a process
-    // spawn, so only do it when the answer actually changes.
-    let mut last_pad_kind: Option<String> = None;
     let mut last_idr = std::time::Instant::now();
     let mut capture_ok_announced: Option<bool> = None;
 
@@ -367,13 +607,19 @@ async fn main() -> Result<()> {
             }
         };
         match msg {
-            SignalMessage::PeerJoined { epoch, .. } => {
-                info!("player joined — sending offer (player epoch {epoch})");
-                attached_player_epoch = epoch;
-                // Frames have been piling up in the capture socket while nobody was
-                // watching. Start from what is on screen now, not from the backlog.
-                capturer.resync();
-                host.create_and_send_offer(&signal_out).await?;
+            SignalMessage::PeerJoined { epoch, slot, .. } => {
+                handle_slot_join(
+                    slot,
+                    epoch,
+                    &args,
+                    preset,
+                    &signal_out,
+                    &slots,
+                    &mut capturer,
+                    capture_ok_announced,
+                    &mut force_idr,
+                )
+                .await?;
                 break;
             }
             SignalMessage::Error { message } => warn!("signal error: {message}"),
@@ -410,152 +656,99 @@ async fn main() -> Result<()> {
             _ = heartbeat.tick() => {
                 let _ = signal_out.send(SignalMessage::Heartbeat);
             }
-            fb = pad_feedback_rx.recv() => {
-                if let Some(fb) = fb {
-                    if let Err(e) = host.send_feedback(&fb).await {
-                        warn!("pad feedback send: {e}");
-                    }
-                }
-            }
             msg = signaling.inbound.recv() => {
                 match msg {
-                    Some(SignalMessage::Answer { sdp, epoch }) => {
-                        match host.handle_answer(sdp, epoch).await {
-                            Ok(true) => {
-                                info!("remote answer set — forcing IDR for browser decoder");
-                                force_idr = true;
-                            }
-                            Ok(false) => {}
-                            Err(e) => warn!("answer failed (continuing): {e:#}"),
-                        }
-                    }
-                    Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
-                        let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
-                    }
-                    Some(SignalMessage::PeerLeft) => {
-                        warn!("player left");
-                    }
-                    Some(SignalMessage::RequestOffer) => {
-                        info!("player requested offer (renegotiate, no peer rebuild)");
-                        force_idr = true;
-                        if let Err(e) = host.create_and_send_offer(&signal_out).await {
-                            warn!("request_offer failed: {e}");
-                        }
-                    }
-                    Some(SignalMessage::PeerJoined { epoch, .. }) => {
-                        if epoch < attached_player_epoch {
-                            warn!("ignoring stale PeerJoined epoch={epoch} (attached={attached_player_epoch})");
-                            continue;
-                        }
-                        // Coalesce a rejoin burst (double-tab / rapid reload): only
-                        // rebuild once for the newest epoch already queued.
-                        let mut epoch = epoch;
-                        let mut deferred: Vec<SignalMessage> = Vec::new();
-                        while let Ok(extra) = signaling.inbound.try_recv() {
-                            match extra {
-                                SignalMessage::PeerJoined { epoch: e, .. } => {
-                                    if e >= epoch {
-                                        epoch = e;
-                                    } else {
-                                        warn!("dropping older PeerJoined epoch={e} during coalesce");
-                                    }
-                                }
-                                other => deferred.push(other),
-                            }
-                        }
-                        attached_player_epoch = epoch;
-                        info!("player rejoined (epoch {epoch}) — rebuilding WebRTC peer + offer");
-                        capturer.resync();
-                        // Close the previous peer off the critical path.
-                        //
-                        // Awaiting close() here could hang indefinitely, and because
-                        // this is the same select! loop that relays video and services
-                        // signaling, a hang stopped *everything*: no offer for this
-                        // player, no frames, and no reaction to anyone joining later.
-                        // The first player never hit it (no peer to close yet), so it
-                        // looked like "only one player can ever connect".
-                        let old_pc = Arc::clone(&host.pc);
-                        tokio::spawn(async move {
-                            if tokio::time::timeout(Duration::from_secs(5), old_pc.close())
-                                .await
-                                .is_err()
-                            {
-                                warn!("previous peer connection did not close within 5s");
-                            }
-                        });
-                        host = webrtc_peer::WebRtcHost::new(
-                            signal_out.clone(),
-                            Arc::clone(&pad),
-                            args.bluetooth_pad,
-                            args.turn_url.clone(),
-                            args.turn_user.clone(),
-                            args.turn_pass.clone(),
-                            args.ice_ips.clone(),
-                            Arc::clone(&offer_epoch),
-                        )
-                        .await?
-                        .0;
-                        if let Err(e) = host.create_and_send_offer(&signal_out).await {
-                            warn!("offer on rejoin failed: {e}");
-                        }
-                        force_idr = true;
-                        let _ = signal_out.send(stream_info_message(
-                            &preset,
-                            capture_ok_announced,
-                            None,
-                        ));
-                        // Re-handle non-join messages that arrived during coalesce
-                        // (answers for the *old* peer are dropped by epoch/state checks).
-                        for msg in deferred {
-                            match msg {
-                                SignalMessage::Answer { sdp, epoch } => {
-                                    match host.handle_answer(sdp, epoch).await {
-                                        Ok(true) => {
-                                            info!("remote answer set — forcing IDR for browser decoder");
-                                            force_idr = true;
-                                        }
-                                        Ok(false) => {}
-                                        Err(e) => warn!("answer failed (continuing): {e:#}"),
-                                    }
-                                }
-                                SignalMessage::IceCandidate {
-                                    candidate,
-                                    sdp_mid,
-                                    sdp_mline_index,
-                                } => {
-                                    let _ = host.add_ice(candidate, sdp_mid, sdp_mline_index).await;
-                                }
-                                SignalMessage::RequestOffer => {
-                                    force_idr = true;
-                                    if let Err(e) = host.create_and_send_offer(&signal_out).await {
-                                        warn!("request_offer failed: {e}");
-                                    }
-                                }
-                                other => {
-                                    warn!("deferred signal ignored after rejoin coalesce: {other:?}");
-                                }
-                            }
-                        }
-                    }
-                    Some(SignalMessage::PadInfo { kind, id }) => {
-                        // Reconcile off the loop: this shells out to the
-                        // companion + emulator config, and this same branch
-                        // relays video.
-                        if last_pad_kind.as_deref() != Some(kind.as_str()) {
-                            last_pad_kind = Some(kind.clone());
-                            tokio::task::spawn_blocking(move || {
-                                emulator_pad::apply(&kind, &id)
-                            });
-                        }
-                    }
-                    Some(SignalMessage::PresentPath { path }) => {
-                        host.set_present_path(&path);
-                    }
-                    Some(SignalMessage::Heartbeat) => {
-                        let _ = signal_out.send(SignalMessage::Pong);
-                    }
                     None => break,
-                    _ => {}
+                    Some(m) => match m {
+                        SignalMessage::Answer { .. }
+                        | SignalMessage::IceCandidate { .. }
+                        | SignalMessage::RequestOffer { .. } => {
+                            route_slot_msg(m, &slots, &signal_out, &mut force_idr).await;
+                        }
+                        SignalMessage::PeerLeft { slot } => {
+                            if slot == 0 {
+                                // Pre-slot server broadcast: drop a lone connection,
+                                // otherwise don't guess which slot left.
+                                let mut guard = slots.lock().await;
+                                if guard.len() == 1 {
+                                    let only = *guard.keys().next().unwrap();
+                                    let old = guard.remove(&only).unwrap();
+                                    drop(guard);
+                                    info!("player left (slot {only})");
+                                    close_conn(old);
+                                } else {
+                                    let n = guard.len();
+                                    drop(guard);
+                                    warn!(
+                                        "PeerLeft without a slot while {n} players connected — ignoring"
+                                    );
+                                }
+                            } else if let Some(old) = slots.lock().await.remove(&slot) {
+                                info!("player left (slot {slot})");
+                                close_conn(old);
+                            } else {
+                                warn!("PeerLeft for unoccupied slot {slot}");
+                            }
+                        }
+                        SignalMessage::PlayersStatus { occupied, max } => {
+                            info!("players: {occupied}/{max}");
+                        }
+                        SignalMessage::PeerJoined { epoch, slot, .. } => {
+                            // Coalesce a rejoin burst (double-tab / rapid reload):
+                            // rebuild each slot that joined at most once, for the
+                            // newest epoch already queued, and replay everything
+                            // else that arrived during the drain.
+                            let (joins, deferred) =
+                                take_queued_joins(&mut signaling.inbound, slot, epoch);
+                            for (slot, epoch) in joins {
+                                handle_slot_join(
+                                    slot,
+                                    epoch,
+                                    &args,
+                                    preset,
+                                    &signal_out,
+                                    &slots,
+                                    &mut capturer,
+                                    capture_ok_announced,
+                                    &mut force_idr,
+                                )
+                                .await?;
+                            }
+                            // Re-handle non-join messages that arrived during the
+                            // drain (answers for a *replaced* peer are dropped by
+                            // epoch/state checks in the peer itself).
+                            for msg in deferred {
+                                route_slot_msg(msg, &slots, &signal_out, &mut force_idr).await;
+                            }
+                        }
+                        SignalMessage::PadInfo { kind, id, slot } => {
+                            let mut guard = slots.lock().await;
+                            let Some(conn) = guard.get_mut(&slot) else {
+                                warn!("pad_info for unknown slot {slot} dropped");
+                                continue;
+                            };
+                            if conn.last_pad_kind.as_deref() != Some(kind.as_str()) {
+                                conn.last_pad_kind = Some(kind.clone());
+                                // Reconcile off the loop: this shells out to the
+                                // companion + emulator config, and this same branch
+                                // relays video.
+                                tokio::task::spawn_blocking(move || {
+                                    emulator_pad::apply(&kind, &id, slot)
+                                });
+                            }
+                        }
+                        SignalMessage::PresentPath { path, slot } => {
+                            if let Some(conn) = slots.lock().await.get(&slot) {
+                                conn.host.set_present_path(&path);
+                            } else {
+                                warn!("present_path for unknown slot {slot} dropped");
+                            }
+                        }
+                        SignalMessage::Heartbeat => {
+                            let _ = signal_out.send(SignalMessage::Pong);
+                        }
+                        _ => {}
+                    },
                 }
             }
             // Fixed cadence, deliberately NOT driven by frame arrival. WGC hands over
@@ -564,10 +757,19 @@ async fn main() -> Result<()> {
             // wobble, and measured buffer grew to ~100ms during motion. Encoding on a
             // metronome makes delivery uniform, which is what lets the buffer stay small.
             _ = cadence.tick() => {
-                // A viewer that lost sync asks for a keyframe over RTCP. Answering
-                // immediately turns a multi-second glitch into a single frame.
-                if host.take_keyframe_request() {
-                    force_idr = true;
+                // Any viewer that lost sync asks for a keyframe over RTCP.
+                // Answering immediately turns a multi-second glitch into a single
+                // frame. An IDR is decodable by every viewer, so a freshly-joined
+                // slot requesting one costs already-connected slots a harmless
+                // extra keyframe, not a correctness problem — one shared flag is
+                // enough.
+                {
+                    let guard = slots.lock().await;
+                    for (_, conn) in guard.iter() {
+                        if conn.host.take_keyframe_request() {
+                            force_idr = true;
+                        }
+                    }
                 }
                 let t_capture = std::time::Instant::now();
                 let Some(frame) = capturer.capture()? else { continue };
@@ -578,10 +780,13 @@ async fn main() -> Result<()> {
                 // encode. Everything below this block exists only for raw pixels.
                 let bgra = match frame {
                     capture::Captured::H264 { nal, keyframe } => {
-                        host.set_video_size(
-                            capturer.width() as u32,
-                            capturer.height() as u32,
-                        );
+                        let (w, h) = (capturer.width() as u32, capturer.height() as u32);
+                        {
+                            let guard = slots.lock().await;
+                            for (_, conn) in guard.iter() {
+                                conn.host.set_video_size(w, h);
+                            }
+                        }
                         // Relay every encoded frame that has arrived, not one per
                         // tick. The encoder's cadence is set on the Windows side; a
                         // backlog here would be shown late, and H.264 frames cannot
@@ -606,74 +811,82 @@ async fn main() -> Result<()> {
                         let per_frame = burst_gap / queue.len().max(1) as u32;
                         last_push = std::time::Instant::now();
                         for (nal, keyframe) in queue {
-                        if keyframe {
-                            last_idr = std::time::Instant::now();
-                        }
-                        let t_push = std::time::Instant::now();
-                        match push_bounded(&host, nal, per_frame, keyframe).await {
-                            Err(e) => warn!("push h264: {e}"),
-                            Ok(true) => dropped_frames += 1,
-                            Ok(false) => {
-                            frames_out += 1;
-                            stage_capture += ms_capture;
-                            stage_push += t_push.elapsed();
-if rate_window.elapsed() >= Duration::from_secs(5) {
-                                let window_frames = frames_out - rate_mark;
-                                let fps =
-                                    window_frames as f64 / rate_window.elapsed().as_secs_f64();
-                                let sent = window_frames + dropped_frames;
-                                let drop_pct = if sent > 0 { dropped_frames * 100 / sent } else { 0 };
-                                // The pre-encoded encoder is the only component the
-                                // link cannot throttle by itself. If sheds persist,
-                                // step the commanded target down so the player gets
-                                // every frame the link can carry.
-                                let decided =
-                                    link_gov.on_window(dropped_frames as u32, window_frames as u32);
-                                if decided != commanded_target {
-                                    commanded_target = decided;
-                                    capturer.set_target(decided.clone());
-                                    info!(
-                                        "link governor: commanded encoder {}x{}@{} ({} kbps) after {}% sheds",
-                                        decided.width, decided.height, decided.fps,
-                                        decided.bitrate_kbps, drop_pct
-                                    );
-                                }
-                                eprintln!(
-                                    "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
-                                     | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",
-                                    if dropped_frames == 0 {
-                                        "link keeping up".to_string()
+                            if keyframe {
+                                last_idr = std::time::Instant::now();
+                            }
+                            let t_push = std::time::Instant::now();
+                            let (any, dropped) =
+                                push_to_all(&slots, nal, per_frame, keyframe).await;
+                            dropped_frames += dropped;
+                            if any {
+                                frames_out += 1;
+                                stage_capture += ms_capture;
+                                stage_push += t_push.elapsed();
+                                if rate_window.elapsed() >= Duration::from_secs(5) {
+                                    let window_frames = frames_out - rate_mark;
+                                    let fps =
+                                        window_frames as f64 / rate_window.elapsed().as_secs_f64();
+                                    let sent = window_frames + dropped_frames;
+                                    let drop_pct = if sent > 0 {
+                                        dropped_frames * 100 / sent
                                     } else {
-                                        format!(
-                                            "bottleneck: peer/network can't consume at {:.0} Mbps",
-                                            preset.bitrate_kbps as f64 / 1000.0
-                                        )
-                                    },
-                                    (stage_capture / window_frames.max(1) as u32).as_secs_f64()
-                                        * 1000.0
-                                );
-                                let _ = signal_out.send(host_stats_message(
-                                    fps,
-                                    window_frames,
-                                    dropped_frames,
-                                    drop_pct as u32,
-                                    stage_capture,
-                                    stage_scale,
-                                    stage_encode,
-                                    stage_push,
-                                    &commanded_target,
-                                ));
-                                rate_window = std::time::Instant::now();
-                                rate_mark = frames_out;
-                                idle_frames = 0;
-                                dropped_frames = 0;
-                                stage_capture = Duration::ZERO;
-                                stage_scale = Duration::ZERO;
-                                stage_encode = Duration::ZERO;
-                                stage_push = Duration::ZERO;
+                                        0
+                                    };
+                                    // The pre-encoded encoder is the only component the
+                                    // link cannot throttle by itself. If sheds persist,
+                                    // step the commanded target down so the player gets
+                                    // every frame the link can carry. Drops are summed
+                                    // across slots so the single shared governor sees
+                                    // the whole vector — N per-slot governors would
+                                    // fight over the one encoder knob.
+                                    let decided = link_gov.on_window(
+                                        dropped_frames as u32,
+                                        window_frames as u32,
+                                    );
+                                    if decided != commanded_target {
+                                        commanded_target = decided;
+                                        capturer.set_target(decided.clone());
+                                        info!(
+                                            "link governor: commanded encoder {}x{}@{} ({} kbps) after {}% sheds",
+                                            decided.width, decided.height, decided.fps,
+                                            decided.bitrate_kbps, drop_pct
+                                        );
+                                    }
+                                    eprintln!(
+                                        "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
+                                         | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",
+                                        if dropped_frames == 0 {
+                                            "link keeping up".to_string()
+                                        } else {
+                                            format!(
+                                                "bottleneck: peer/network can't consume at {:.0} Mbps",
+                                                preset.bitrate_kbps as f64 / 1000.0
+                                            )
+                                        },
+                                        (stage_capture / window_frames.max(1) as u32).as_secs_f64()
+                                            * 1000.0
+                                    );
+                                    let _ = signal_out.send(host_stats_message(
+                                        fps,
+                                        window_frames,
+                                        dropped_frames,
+                                        drop_pct as u32,
+                                        stage_capture,
+                                        stage_scale,
+                                        stage_encode,
+                                        stage_push,
+                                        &commanded_target,
+                                    ));
+                                    rate_window = std::time::Instant::now();
+                                    rate_mark = frames_out;
+                                    idle_frames = 0;
+                                    dropped_frames = 0;
+                                    stage_capture = Duration::ZERO;
+                                    stage_scale = Duration::ZERO;
+                                    stage_encode = Duration::ZERO;
+                                    stage_push = Duration::ZERO;
+                                }
                             }
-                            }
-                        }
                         }
                         // Keyframe control lives on the Windows side here, so ask for
                         // one rather than pretending we own the GOP.
@@ -788,16 +1001,15 @@ if rate_window.elapsed() >= Duration::from_secs(5) {
                         .elapsed()
                         .clamp(Duration::from_millis(1), Duration::from_millis(500));
                     last_push = std::time::Instant::now();
-                    match push_bounded(
-                        &host,
+                    let (any, dropped) = push_to_all(
+                        &slots,
                         nal.clone(),
                         real_gap,
                         couchlink_proto::annex_b_is_keyframe(&nal),
                     )
-                    .await {
-                        Err(e) => warn!("push h264: {e}"),
-                        Ok(true) => dropped_frames += 1,
-                        Ok(false) => {
+                    .await;
+                    dropped_frames += dropped;
+                    if any {
                         frames_out += 1;
                         stage_capture += ms_capture;
                         stage_scale += ms_scale;
@@ -817,7 +1029,11 @@ if rate_window.elapsed() >= Duration::from_secs(5) {
                             };
                             let per = window_frames.max(1) as u32;
                             let sent = window_frames + dropped_frames;
-                            let drop_pct = if sent > 0 { dropped_frames * 100 / sent } else { 0 };
+                            let drop_pct = if sent > 0 {
+                                dropped_frames * 100 / sent
+                            } else {
+                                0
+                            };
                             let stages: [(&str, Duration); 4] = [
                                 ("capture", stage_capture / per),
                                 ("scale", stage_scale / per),
@@ -858,7 +1074,6 @@ if rate_window.elapsed() >= Duration::from_secs(5) {
                             rate_mark = frames_out;
                             idle_frames = 0;
                             dropped_frames = 0;
-                        }
                         }
                     }
                 }

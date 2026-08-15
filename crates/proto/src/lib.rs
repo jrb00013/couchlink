@@ -38,7 +38,7 @@ mod tests {
     fn answer_without_epoch_deserializes_as_zero() {
         let back = SignalMessage::from_json(r#"{"type":"answer","sdp":"v=0"}"#).unwrap();
         match back {
-            SignalMessage::Answer { sdp, epoch } => {
+            SignalMessage::Answer { sdp, epoch, .. } => {
                 assert_eq!(sdp, "v=0");
                 assert_eq!(epoch, 0);
             }
@@ -51,6 +51,7 @@ mod tests {
         let msg = SignalMessage::Answer {
             sdp: "v=0".into(),
             epoch: 7,
+            slot: 0,
         };
         let back = SignalMessage::from_json(&msg.to_json().unwrap()).unwrap();
         match back {

@@ -16,6 +16,7 @@ export function usePlayerCallbacks(handlers: {
   onStreamInfo?: PlayerCallbacks["onStreamInfo"];
   onHostStats?: PlayerCallbacks["onHostStats"];
   onPadStats?: PlayerCallbacks["onPadStats"];
+  onPlayersStatus?: PlayerCallbacks["onPlayersStatus"];
   onTelemetry?: (t: PlayerTelemetry) => void;
 }): PlayerCallbacks {
   const handlersRef = useRef(handlers);
@@ -32,6 +33,8 @@ export function usePlayerCallbacks(handlers: {
       onStreamInfo: (info) => handlersRef.current.onStreamInfo?.(info),
       onHostStats: (stats) => handlersRef.current.onHostStats?.(stats),
       onPadStats: (hz, name) => handlersRef.current.onPadStats?.(hz, name),
+      onPlayersStatus: (occupied, max) =>
+        handlersRef.current.onPlayersStatus?.(occupied, max),
       onTelemetry: (t) => handlersRef.current.onTelemetry?.(t),
     };
   }
