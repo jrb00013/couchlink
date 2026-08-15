@@ -653,6 +653,12 @@ impl ApplicationHandler for App {
                 }
                 self.request_redraw();
             }
+            WindowEvent::Focused(false) => {
+                // No key-up will ever arrive for whatever is held once the
+                // window loses focus (alt-tab, clicking another app) — release
+                // everything so input doesn't stick "on" in the emulator.
+                self.keyboard_pad.lock().unwrap().clear_all();
+            }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
