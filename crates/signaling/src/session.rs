@@ -143,12 +143,22 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Registers a player socket, returning the fresh epoch plus the tx of
+    /// whichever player socket this one just displaced (if any and different).
+    ///
+    /// This session supports exactly one player slot. We cannot tell a
+    /// legitimate reload apart from a second person clicking the same invite
+    /// link — both look identical here (a fresh socket registering while an
+    /// old tx is still present and not yet closed) — so we still allow the
+    /// takeover rather than stranding a reloading browser. The caller uses
+    /// the returned tx to warn whoever just got silently evicted, instead of
+    /// leaving them to watch their stream freeze and never learn why.
     pub fn register_player(
         &self,
         session_id: String,
         pin: String,
         tx: WsSender,
-    ) -> Result<u64, String> {
+    ) -> Result<(u64, Option<WsSender>), String> {
         let Some(mut entry) = self.sessions.get_mut(&session_id) else {
             return Err("unknown session".into());
         };
@@ -162,6 +172,11 @@ impl SessionStore {
         // so always bump the epoch and let the caller notify the host. A stale tx
         // from a dead socket must never suppress the PeerJoined that triggers the offer.
         entry.player_epoch = entry.player_epoch.saturating_add(1);
+        let displaced = entry
+            .player
+            .tx
+            .take()
+            .filter(|old| !old.same_channel(&tx));
         entry.player.tx = Some(tx);
         entry.last_activity = Utc::now();
         self.metrics
@@ -169,7 +184,7 @@ impl SessionStore {
             .fetch_add(1, Ordering::Relaxed);
         self.audit
             .record(&session_id, AuditEventKind::PlayerRegistered, None);
-        Ok(entry.player_epoch)
+        Ok((entry.player_epoch, displaced))
     }
 
     pub fn peer_tx(&self, session_id: &str, role: Role) -> Option<WsSender> {
@@ -291,11 +306,11 @@ mod tests {
         s.register_host("sid".into(), "pin".into(), None, None, None, chan())
             .expect("host registers");
 
-        let first = s
+        let (first, _) = s
             .register_player("sid".into(), "pin".into(), chan())
             .expect("first player");
         // Second registration without any unregister — exactly the reload case.
-        let second = s
+        let (second, displaced) = s
             .register_player("sid".into(), "pin".into(), chan())
             .expect("player reloads");
 
@@ -303,6 +318,7 @@ mod tests {
             second > first,
             "reload must bump the epoch (got {first} then {second})"
         );
+        assert!(displaced.is_some(), "the stale reload tx must be reported so it can be notified");
     }
 
     /// Regression: a reconnecting host races itself. The old socket's close can be
@@ -343,6 +359,8 @@ mod tests {
         let second = chan();
         s.register_player("sid".into(), "pin".into(), second.clone())
             .expect("player reconnects");
+        // the displaced tx from that second call is exactly `first` — checked
+        // by the dedicated `displaced tx` assertion in the reload-epoch test.
 
         s.unregister("sid", Role::Player, Some(&first));
 
