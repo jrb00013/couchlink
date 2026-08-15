@@ -17,6 +17,7 @@ import { detectMobile } from "./mobile";
 import { TouchGamepadInput } from "./touchPad";
 import { TouchOverlay } from "./TouchOverlay";
 import type { PlayerTelemetry } from "./player";
+import { parseInviteString } from "./invite";
 import "./App.css";
 
 const DEFAULT_WS =
@@ -56,6 +57,9 @@ export default function App() {
   const [signalingUrl, setSignalingUrl] = useState(invite.signalingUrl ?? DEFAULT_WS);
   const [sessionId, setSessionId] = useState(invite.sessionId);
   const [pin, setPin] = useState(invite.pin);
+  const [pasteLink, setPasteLink] = useState("");
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [pastedTurn, setPastedTurn] = useState(invite.turn);
   const [state, setState] = useState<ConnectionState>("disconnected");
   const [detail, setDetail] = useState("");
   const [streamMeta, setStreamMeta] = useState("—");
@@ -468,6 +472,19 @@ export default function App() {
   const connected = state === "connected" || state === "negotiating";
   const livePads = useLivePads(true);
 
+  const applyPastedLink = () => {
+    try {
+      const parsed = parseInviteString(pasteLink);
+      setSessionId(parsed.sessionId);
+      setPin(parsed.pin);
+      if (parsed.signalingUrl) setSignalingUrl(parsed.signalingUrl);
+      setPastedTurn(parsed.turn);
+      setPasteError(null);
+    } catch (e) {
+      setPasteError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   return (
     <div className={`shell ${fullscreen ? "is-fullscreen" : ""} ${isMobile ? "is-mobile" : ""}`}>
       <header className="top">
@@ -483,6 +500,27 @@ export default function App() {
 
       {!connected && (
         <section className="join">
+          <label>
+            Join link
+            <input
+              value={pasteLink}
+              onChange={(e) => {
+                setPasteLink(e.target.value);
+                if (pasteError) setPasteError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") applyPastedLink();
+              }}
+              placeholder="paste the link your host sent — or session:pin"
+              spellCheck={false}
+            />
+          </label>
+          <div className="actions">
+            <button type="button" onClick={applyPastedLink}>
+              Fill in from link
+            </button>
+          </div>
+          {pasteError && <p className="error">{pasteError}</p>}
           <label>
             Signaling
             <input
@@ -514,7 +552,7 @@ export default function App() {
               type="button"
               className="primary"
               onClick={() => {
-                playerRef.current?.setTurn(invite.turn);
+                playerRef.current?.setTurn(pastedTurn);
                 playerRef.current?.connect(signalingUrl, sessionId, pin);
               }}
             >
