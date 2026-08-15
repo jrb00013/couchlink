@@ -12,7 +12,7 @@ import { ControllerViz, useLivePads } from "./ControllerViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
-import { KeyboardMouseInput } from "./keyboardMouse";
+import { KeyboardMouseInput, KEYBIND_LIST } from "./keyboardMouse";
 import { detectMobile } from "./mobile";
 import { TouchGamepadInput } from "./touchPad";
 import { TouchOverlay } from "./TouchOverlay";
@@ -102,6 +102,7 @@ export default function App() {
   const [present, setPresent] = useState<PresentSummary | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
+  const [keybindsOpen, setKeybindsOpen] = useState(false);
   const [pointerLocked, setPointerLocked] = useState(false);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
   const [isMobile, setIsMobile] = useState(() => detectMobile());
@@ -716,11 +717,42 @@ export default function App() {
                       : "click stream to lock mouse · WASD=move · LMB=R2 · RMB=L2 · Space=✕ · E=△ · Q=□ · F=○"}
                   </span>
                 )}
+                {kbmActive && (
+                  <button
+                    type="button"
+                    className="kbm-keybinds-btn"
+                    onClick={() => setKeybindsOpen(true)}
+                  >
+                    ⌨ keybinds
+                  </button>
+                )}
               </div>
             )}
           </section>
         )}
       </div>
+
+      {keybindsOpen && (
+        <div className="modal-backdrop" onClick={() => setKeybindsOpen(false)}>
+          <div className="modal keybinds-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h2>Keyboard + Mouse keybinds</h2>
+              <button type="button" className="modal-close" onClick={() => setKeybindsOpen(false)} aria-label="Close">
+                ✕
+              </button>
+            </div>
+            <p className="modal-hint">Fixed layout for now — not remappable yet.</p>
+            <div className="keybinds-list">
+              {KEYBIND_LIST.map((b) => (
+                <div key={b.key} className="keybinds-row">
+                  <span className="keybinds-key">{b.key}</span>
+                  <span className="keybinds-action">{b.action}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <DebugDrawer
         telemetry={telemetry}

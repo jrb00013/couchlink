@@ -191,7 +191,19 @@ const PAD_STALE_MS = 8000;
 
 export type PlayerPadEntry = { kind: string; id: string; lastSeenAt: number };
 
-function padKindLabel(kind: string): string {
+/**
+ * `kind` is what gets sent to the *emulator* — keyboard+mouse and touch both
+ * report "dualsense" there because CLPD frames from either source are
+ * DualSense-shaped, same as a real pad, and that's what makes the emulator
+ * pick the right virtual device. A human reading this debug view doesn't
+ * care what the emulator was told; showing "DualSense" for someone playing
+ * on a keyboard is just wrong, not merely imprecise — the actual input
+ * source lives in `id` instead ("keyboard+mouse" / "touch"), so check that
+ * first.
+ */
+export function padKindLabel(kind: string, id: string): string {
+  if (id === "keyboard+mouse") return "⌨ Keyboard + Mouse";
+  if (id === "touch") return "📱 Touch controls";
   switch (kind) {
     case "dualsense":
       return "DualSense";
@@ -232,8 +244,8 @@ function ControllerRow({
       <span className="dt-label">{label}</span>
       <span className="dt-value">
         <span className={`dt-pad-dot ${stale ? "" : "dt-pad-dot-live"}`} />
-        {kind ? padKindLabel(kind) : id || "—"}
-        {kind && id ? ` (${id})` : ""}
+        {kind || id ? padKindLabel(kind, id) : "—"}
+        {kind && id && id !== "keyboard+mouse" && id !== "touch" ? ` (${id})` : ""}
         {typeof hz === "number" && hz > 0 ? ` · ${hz}Hz` : ""} — {status}
       </span>
     </div>
