@@ -1,19 +1,30 @@
 //! Fan-out hub for companion→host HID output (DSVO) and session I/O.
+//!
+//! One virtual controller per couchlink player *slot*, not per connection.
+//! Every connection here starts with a `DSVS` slot-hello frame declaring
+//! which slot it's driving; the first connection for a slot plugs in a
+//! fresh ViGEm target, and every later connection for that same slot (a
+//! reconnect after a network blip, a rejoin) reuses it. Without this, a
+//! target got created in whatever order connections happened to arrive —
+//! fine for one player, but a second/third player's reconnect could land on
+//! a *different* slot's target than the one they'd been using, silently
+//! taking over another seated player's controller.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use couchlink_pad::vhid_proto::{decode_input, encode_output, DSVH_MAGIC, DS_USB_INPUT_LEN};
+use couchlink_pad::vhid_proto::{decode_input, decode_slot_hello, encode_output, DSVH_MAGIC, DS_USB_INPUT_LEN};
 use tracing::{info, warn};
 
-use crate::backend::PadBackend;
+use crate::backend::{self, PadBackend};
 
 type DynBackend = Arc<Mutex<dyn PadBackend>>;
 
-/// Broadcasts output reports to all active host sessions.
+/// Broadcasts output reports to all active host sessions for one slot.
 #[derive(Clone, Default)]
 pub struct OutputHub {
     inner: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>>,
@@ -36,13 +47,52 @@ impl OutputHub {
     }
 }
 
-pub fn serve_tcp(stream: TcpStream, backend: DynBackend, hub: OutputHub) -> Result<()> {
+/// Per-slot virtual controllers, created lazily on first connect and kept
+/// for the life of the companion process — never created up front (a
+/// session with 1 friend must not leave 2 idle "connected" controllers
+/// sitting in PCSX2/RPCS3), never re-created on reconnect (that's exactly
+/// the arrival-order bug this module exists to avoid).
+#[derive(Clone, Default)]
+pub struct SlotRegistry {
+    inner: Arc<Mutex<HashMap<u8, (DynBackend, OutputHub)>>>,
+}
+
+impl SlotRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The slot's existing controller, or a freshly created one on first use.
+    pub(crate) fn get_or_create(&self, slot: u8, kind: crate::BackendKind) -> Result<(DynBackend, OutputHub)> {
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(entry) = guard.get(&slot) {
+            return Ok(entry.clone());
+        }
+        let hub = OutputHub::new();
+        let backend = backend::create(kind, hub.clone())
+            .with_context(|| format!("create virtual controller for slot {slot}"))?;
+        info!("slot {slot}: plugged in a new virtual controller");
+        guard.insert(slot, (backend.clone(), hub.clone()));
+        Ok((backend, hub))
+    }
+}
+
+pub(crate) fn read_slot_hello<R: Read>(reader: &mut R) -> Result<u8> {
+    let mut buf = [0u8; 6];
+    reader.read_exact(&mut buf).context("read slot hello")?;
+    decode_slot_hello(&buf).context("decode slot hello")
+}
+
+pub fn serve_tcp(mut stream: TcpStream, registry: SlotRegistry, kind: crate::BackendKind) -> Result<()> {
     stream.set_nodelay(true)?;
-    info!("TCP client {}", stream.peer_addr()?);
+    let slot = read_slot_hello(&mut stream)
+        .with_context(|| format!("TCP client {}", stream.peer_addr().map(|a| a.to_string()).unwrap_or_default()))?;
+    info!("TCP client {} (slot {slot})", stream.peer_addr()?);
+    let (backend, hub) = registry.get_or_create(slot, kind)?;
     // Split into owned halves via try_clone for reader/writer threads.
     let writer = stream.try_clone().context("clone TCP stream")?;
     let reader = stream;
-    serve_duplex(reader, writer, backend, hub)
+    serve_duplex(reader, writer, backend, hub, slot)
 }
 
 pub fn serve_duplex<R, W>(
@@ -50,6 +100,7 @@ pub fn serve_duplex<R, W>(
     mut writer: W,
     backend: DynBackend,
     hub: OutputHub,
+    slot: u8,
 ) -> Result<()>
 where
     R: Read + Send + 'static,
@@ -70,16 +121,16 @@ where
         match reader.read_exact(&mut buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                info!("host disconnected");
+                info!("host disconnected (slot {slot})");
                 break;
             }
             Err(e) => {
-                warn!("read: {e}");
+                warn!("read (slot {slot}): {e}");
                 break;
             }
         }
         if &buf[0..4] != DSVH_MAGIC {
-            warn!("bad DSVH magic");
+            warn!("bad DSVH magic (slot {slot})");
             break;
         }
         let report = decode_input(&buf)?;
@@ -97,4 +148,52 @@ where
     // Give writer a moment if blocked
     let _ = Duration::from_millis(1);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct NoopBackend;
+    impl PadBackend for NoopBackend {
+        fn apply_ds_report(&mut self, _report: &[u8; DS_USB_INPUT_LEN]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn read_slot_hello_parses_the_announced_slot() {
+        let hello = couchlink_pad::vhid_proto::encode_slot_hello(2);
+        let mut cursor = Cursor::new(hello);
+        assert_eq!(read_slot_hello(&mut cursor).unwrap(), 2);
+    }
+
+    #[test]
+    fn read_slot_hello_rejects_a_dsvh_frame_where_a_hello_was_expected() {
+        let mut r = [0u8; DS_USB_INPUT_LEN];
+        r[0] = 1;
+        let frame = couchlink_pad::vhid_proto::encode_input(&r);
+        let mut cursor = Cursor::new(frame);
+        assert!(read_slot_hello(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn registry_reuses_the_same_backend_for_repeat_connects_of_one_slot() {
+        let registry = SlotRegistry::default();
+        let inner: DynBackend = Arc::new(Mutex::new(NoopBackend));
+        registry
+            .inner
+            .lock()
+            .unwrap()
+            .insert(3, (inner.clone(), OutputHub::new()));
+        let (got, _) = registry
+            .inner
+            .lock()
+            .unwrap()
+            .get(&3)
+            .cloned()
+            .expect("slot 3 present");
+        assert!(Arc::ptr_eq(&got, &inner));
+    }
 }

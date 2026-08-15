@@ -15,10 +15,20 @@ PLAYER="${COUCHLINK_EMU_PLAYER:-2}"
 
 # ViGEm's virtual pad always enumerates through XInput, and the host's real
 # DualSense uses the SDL handler — so XInput slot 1 is unambiguous for the
-# first remote player. The companion now plugs in one target per connected
-# player, in join order (PLAYER-1 = that slot's 1-based index among remote
-# pads), so a 2nd/3rd player needs a distinct device name too — otherwise
-# every remote slot binds RPCS3's Player N to the SAME device as slot 1.
+# first remote player. The companion now plugs in exactly one target per
+# couchlink player *slot* — created once, the first time that slot ever
+# connects, and reused (never re-created) on every reconnect after that, so
+# a second/third player's controller can never get silently swapped for a
+# different seated player's mid-session anymore.
+#
+# What is NOT guaranteed: which XInput index a slot lands on. That's driver
+# assignment order, decided by which slot connects to the companion FIRST
+# in its lifetime — normally slot order, but if players connect out of
+# order on a freshly (re)started companion, slot 2 could grab XInput-0
+# before slot 1 ever has. PLAYER-1 below is therefore a working assumption,
+# not a guarantee; if a player's binding looks wrong at the start of a
+# session, check the companion's own log for "slot N: plugged in a new
+# virtual controller" lines to see the real connect order.
 # NOTE: the numeric suffix RPCS3 assigns a repeated device name has not been
 # verified live for 2+ simultaneous virtual pads — confirm this against
 # RPCS3's own Controller Settings before trusting it past the first slot.
@@ -165,10 +175,12 @@ link_pcsx2() {
     return 0
   fi
 
-  # The companion now plugs in one ViGEm target per connected player, in join
-  # order, so it fills XInput-0, XInput-1, XInput-2… as remote slots 1, 2, 3
-  # connect. PLAYER is the emulator port (P2, P3, P4…), so PLAYER-2 is that
-  # slot's XInput index — every player gets its own device, not slot 2's.
+  # The companion plugs in exactly one ViGEm target per couchlink player
+  # slot (created once ever, reused on every reconnect — see the RPCS3
+  # comment above for the full reasoning and its one caveat: this assumes
+  # slots connected in order the first time each one ever did).
+  # PLAYER is the emulator port (P2, P3, P4…), so PLAYER-2 is that slot's
+  # assumed XInput index — every player gets its own device, not slot 2's.
   local dev="${COUCHLINK_PCSX2_DEVICE:-XInput-$((PLAYER - 2))}"
   local section="Pad${PLAYER}"
 

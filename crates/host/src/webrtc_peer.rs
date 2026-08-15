@@ -613,9 +613,14 @@ async fn setup_pad_channel(
     }));
 }
 
-pub fn create_virtual_pad(as_bluetooth: bool) -> Result<VirtualPad> {
+/// `slot` is this couchlink player slot (1-based) — announced to the
+/// DualSense VHID companion so a reconnect always lands back on this same
+/// slot's own virtual controller instead of whichever one the companion
+/// happens to hand out next.
+pub fn create_virtual_pad(as_bluetooth: bool, slot: u8) -> Result<VirtualPad> {
     let mut cfg = VirtualPadConfig::default();
     cfg.as_bluetooth = as_bluetooth;
+    cfg.companion_slot = slot;
     #[cfg(any(target_os = "linux", windows))]
     {
         match VirtualPad::create(cfg.clone()) {
