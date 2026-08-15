@@ -267,4 +267,18 @@ link_pcsx2 || true
 # what was actually configured; the two config paths (blank when not found)
 # say exactly which file the binding did or didn't touch, since "skipped"
 # alone gives the player nothing to act on when their controller doesn't work.
-echo "RESULT player=$PLAYER backend=${COUCHLINK_DS_VHID_BACKEND:-xbox360} handler=$HANDLER device=\"$DEVICE\" rpcs3=$RPCS3_STATUS rpcs3_config=\"$RPCS3_CONFIG_PATH\" pcsx2=$PCSX2_STATUS pcsx2_config=\"$PCSX2_CONFIG_PATH\""
+# JSON via jq rather than hand-quoted key=value text: device names and config
+# paths can contain spaces (they already do — "XInput Pad #1", OneDrive
+# paths), and jq handles that escaping correctly instead of a fragile ad hoc
+# `key="$value"` format the Rust side would have to hand-parse.
+echo "RESULT $(jq -nc \
+  --arg player "$PLAYER" \
+  --arg backend "${COUCHLINK_DS_VHID_BACKEND:-xbox360}" \
+  --arg handler "$HANDLER" \
+  --arg device "$DEVICE" \
+  --arg rpcs3 "$RPCS3_STATUS" \
+  --arg rpcs3_config "$RPCS3_CONFIG_PATH" \
+  --arg pcsx2 "$PCSX2_STATUS" \
+  --arg pcsx2_config "$PCSX2_CONFIG_PATH" \
+  '{player: ($player | tonumber), backend: $backend, handler: $handler, device: $device,
+    rpcs3: $rpcs3, rpcs3_config: $rpcs3_config, pcsx2: $pcsx2, pcsx2_config: $pcsx2_config}')"

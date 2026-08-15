@@ -226,7 +226,12 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
             },
             SignalMessage::PadInfo { kind, id, .. } => {
                 if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
-                    relay_to_host(&store, sid, &SignalMessage::PadInfo { kind, id, slot });
+                    relay_to_host(&store, sid, &SignalMessage::PadInfo { kind: kind.clone(), id: id.clone(), slot });
+                    // Every player also gets to see it — a controller debug
+                    // view needs every seated player's pad, not just its own.
+                    if let Ok(json) = (SignalMessage::PlayerPadInfo { slot, kind, id }).to_json() {
+                        store.broadcast(sid, &json);
+                    }
                 }
             }
             SignalMessage::PresentPath { path, .. } => {

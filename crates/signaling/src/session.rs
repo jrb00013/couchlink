@@ -304,12 +304,16 @@ impl SessionStore {
             WhoLeft::Player(slot) => {
                 // Name the slot so the host can tear down exactly that peer
                 // connection instead of guessing when more than one is up.
+                // Also reaches every other player (not just the host) so a
+                // controller debug view can drop that slot's pad info instead
+                // of showing a stale "connected" for someone who just left.
                 let peer_left = couchlink_proto::SignalMessage::PeerLeft { slot }
                     .to_json()
                     .unwrap_or_default();
                 if let Some(tx) = self.peer_tx(session_id, Role::Host) {
-                    let _ = tx.send(peer_left);
+                    let _ = tx.send(peer_left.clone());
                 }
+                self.broadcast_to_players(session_id, &peer_left);
             }
         }
         self.audit

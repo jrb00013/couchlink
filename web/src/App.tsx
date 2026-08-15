@@ -89,6 +89,16 @@ export default function App() {
     occupied: number;
     max: number;
   } | null>(null);
+  /** Per-slot controller status for the debug drawer's Controller tab — kind,
+   * raw device id, and when we last heard a pad_info heartbeat from them
+   * (player.ts re-announces every 3s while actually sending input), so a
+   * stale entry visibly ages instead of silently claiming "connected"
+   * forever after someone's controller stops working. */
+  const [playerPads, setPlayerPads] = useState<
+    Record<number, { kind: string; id: string; lastSeenAt: number }>
+  >({});
+  /** This browser's own player slot, assigned by the session on registration. */
+  const [mySlot, setMySlot] = useState<number | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
@@ -386,7 +396,18 @@ export default function App() {
     },
     onTelemetry: (t) => setTelemetry(t),
     onHostStats: (s) => setHostStats(s),
+    onRegistered: (slot) => setMySlot(slot),
     onPlayersStatus: (occupied, max) => setPlayersStatus({ occupied, max }),
+    onPlayerPadInfo: (slot, kind, id) => {
+      setPlayerPads((prev) => ({ ...prev, [slot]: { kind, id, lastSeenAt: Date.now() } }));
+    },
+    onPlayerLeft: (slot) => {
+      setPlayerPads((prev) => {
+        const next = { ...prev };
+        delete next[slot];
+        return next;
+      });
+    },
   });
 
   useEffect(() => {
@@ -707,6 +728,10 @@ export default function App() {
         present={present}
         streamInfo={streamMeta}
         presentMode={presentMode}
+        playerPads={playerPads}
+        mySlot={mySlot}
+        myPadName={telemetry?.padName ?? null}
+        myPadHz={telemetry?.padHz ?? 0}
         open={debugOpen}
         onToggle={() => setDebugOpen((o) => !o)}
       />

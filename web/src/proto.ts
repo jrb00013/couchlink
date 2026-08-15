@@ -17,7 +17,7 @@ export type SignalMessage =
       pin: string;
       player_name?: string;
     }
-  | { type: "registered"; role: Role; session_id: string }
+  | { type: "registered"; role: Role; session_id: string; slot?: number }
   | { type: "error"; message: string }
   | { type: "offer"; sdp: string; epoch?: number }
   | { type: "answer"; sdp: string; epoch?: number }
@@ -37,6 +37,10 @@ export type SignalMessage =
    * the virtual device and emulator binding. The Gamepad API normalises input,
    * so the host cannot tell an Xbox pad from a DualSense without being told. */
   | { type: "pad_info"; kind: string; id: string }
+  /** Broadcast echo of every seated player's pad_info — sent to host AND every
+   * player, not just relayed to the host, so a controller debug view can show
+   * everyone's controller, not only your own. */
+  | { type: "player_pad_info"; slot: number; kind: string; id?: string }
   /** Player → host: which video path it is actually presenting from, so the
    * host can stop writing the path nobody is painting from. "warmup" means
    * WebCodecs is starting on the DataChannel — keep both paths live as a
