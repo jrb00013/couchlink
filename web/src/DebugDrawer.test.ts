@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   bottleneckChecks,
   bottleneckSummary,
+  padKindLabel,
   type PresentSummary,
 } from "./DebugDrawer";
 import type { InboundVideoStats, MediaPathStats } from "./player";
@@ -120,5 +121,25 @@ describe("bottleneckSummary", () => {
       { label: "b", ok: false },
     ]);
     expect(s.verdict).toBe("warn");
+  });
+});
+
+describe("padKindLabel", () => {
+  it("shows a keyboard label for keyboard+mouse input, not the spoofed emulator kind", () => {
+    // player.ts reports kind="dualsense" for kbm so the emulator picks the
+    // right virtual device — the debug view must not repeat that to a human.
+    expect(padKindLabel("dualsense", "keyboard+mouse")).toBe("⌨ Keyboard + Mouse");
+  });
+
+  it("shows a touch label for touch input, same reasoning", () => {
+    expect(padKindLabel("dualsense", "touch")).toBe("📱 Touch controls");
+  });
+
+  it("shows the real pad name for an actual controller", () => {
+    expect(padKindLabel("xbox", "Xbox One Game Controller")).toBe("Xbox");
+  });
+
+  it("falls back to the raw kind for an unrecognised value", () => {
+    expect(padKindLabel("ps3", "Some Pad")).toBe("ps3");
   });
 });

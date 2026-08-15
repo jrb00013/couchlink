@@ -22,6 +22,28 @@
 
 import { BTN, type PadState } from "./clpd";
 
+/** Structured mirror of the mapping above, for a UI to render — kept next to
+ * `sample()` so the two can't quietly drift apart. Fixed layout, not
+ * user-remappable yet; this is what a "keybinds" panel shows today. */
+export const KEYBIND_LIST: ReadonlyArray<{ key: string; action: string }> = [
+  { key: "W A S D / Arrows", action: "Move (left stick)" },
+  { key: "Mouse (click stream to lock)", action: "Look (right stick)" },
+  { key: "Left click", action: "R2 — shoot / confirm" },
+  { key: "Right click", action: "L2 — aim / alternate" },
+  { key: "Middle click / C", action: "L3 — sprint / crouch" },
+  { key: "Space", action: "✕ Cross — jump" },
+  { key: "E", action: "△ Triangle — interact" },
+  { key: "Q", action: "□ Square — reload / alt" },
+  { key: "F", action: "○ Circle — cancel / dodge" },
+  { key: "R", action: "R1" },
+  { key: "Shift", action: "L1" },
+  { key: "V", action: "R3 — melee" },
+  { key: "Tab", action: "Options" },
+  { key: "G", action: "Create" },
+  { key: "I J K L / Numpad 8 4 2 6", action: "D-Pad" },
+  { key: "Esc", action: "Release mouse lock" },
+];
+
 export type KbmOptions = {
   /** Sensitivity scalar for mouse → right stick. Default 0.5. */
   mouseSensitivity?: number;
