@@ -21,7 +21,7 @@ use tracing::{info, warn};
 fn backend_for(kind: &str) -> &'static str {
     match kind {
         // Real DualSense/DualShock4 hardware only — kbm and touch report
-        // "xbox" instead (web/src/player.ts), since they have no real
+        // "generic" instead (web/src/player.ts), since they have no real
         // controller identity to preserve and XInput has far better game
         // compatibility than this DirectInput-shaped ViGEm backend.
         "dualsense" | "dualshock4" | "ds4" => "ds4",
