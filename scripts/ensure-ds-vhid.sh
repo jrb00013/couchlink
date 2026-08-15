@@ -64,12 +64,34 @@ bind="${COUCHLINK_DS_VHID_BIND:-0.0.0.0}"
 backend="${COUCHLINK_DS_VHID_BACKEND:-auto}"
 exe_w="$(wslpath -w "$ROOT/target/release/couchlink-ds-vhid.exe")"
 
+# Running an unsigned .exe straight off the \\wsl.localhost\... UNC share puts
+# it in Windows' "network location" zone, and Explorer/Start-Process throws up
+# a blocking "Open File - Security Warning" dialog for that — every single
+# launch, with nobody there in a background-spawned process to click it. The
+# companion silently never starts; every symptom (no controller, connection
+# refused later, a pile of orphaned prompt windows) traces back to this one
+# dialog. Copying the binary to a real local NTFS path first means Windows
+# never puts it in that zone, so the prompt never fires — this is the actual
+# fix, not a workaround around the dialog (registry zone trust, SmartScreen
+# policy changes) that would also loosen security for everything else.
+exe_local_w="$(powershell.exe -NoProfile -Command "
+  \$dst = Join-Path \$env:LOCALAPPDATA 'couchlink\bin'
+  New-Item -ItemType Directory -Force -Path \$dst | Out-Null
+  \$dstExe = Join-Path \$dst 'couchlink-ds-vhid.exe'
+  Copy-Item -Path '$exe_w' -Destination \$dstExe -Force
+  Write-Output \$dstExe
+" 2>/dev/null | tr -d '\r')"
+if [[ -z "$exe_local_w" ]]; then
+  echo "==> could not stage DualSense companion to a local path — host will run video-only" >&2
+  exit 0
+fi
+
 # Inbound from the WSL vSwitch is still inbound as far as Windows is concerned.
 # Note: no PowerShell backtick continuations here — inside a double-quoted bash
 # string a backtick starts command substitution and silently eats the line.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -DisplayName 'couchlink-ds-vhid-39251' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName 'couchlink-ds-vhid-39251' -Direction Inbound -Protocol TCP -LocalPort 39251 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null }" >/dev/null 2>&1 || true
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Minimized -FilePath '$exe_w' -ArgumentList '--bind','$bind','--backend','$backend'" >/dev/null 2>&1 || {
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Minimized -FilePath '$exe_local_w' -ArgumentList '--bind','$bind','--backend','$backend'" >/dev/null 2>&1 || {
   echo "==> could not start DualSense companion — host will run video-only" >&2
   exit 0
 }
