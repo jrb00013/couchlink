@@ -62,6 +62,8 @@ export class KeyboardMouseInput {
     window.addEventListener("mouseup", this.onMouseUp);
     window.addEventListener("mousemove", this.onMouseMove);
     window.addEventListener("contextmenu", this.onContextMenu);
+    window.addEventListener("blur", this.onBlur);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
     if (this.lockTarget) {
       this.lockTarget.addEventListener("click", this.onLockTargetClick);
     }
@@ -76,6 +78,8 @@ export class KeyboardMouseInput {
     window.removeEventListener("mouseup", this.onMouseUp);
     window.removeEventListener("mousemove", this.onMouseMove);
     window.removeEventListener("contextmenu", this.onContextMenu);
+    window.removeEventListener("blur", this.onBlur);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
     if (this.lockTarget) {
       this.lockTarget.removeEventListener("click", this.onLockTargetClick);
     }
@@ -176,6 +180,16 @@ export class KeyboardMouseInput {
 
   private onContextMenu = (e: Event) => {
     if (document.pointerLockElement) e.preventDefault();
+  };
+
+  /** Window/tab losing focus means no keyup will ever arrive for held keys — release them all. */
+  private onBlur = () => {
+    this.keys.clear();
+    this.mouseButtons = 0;
+  };
+
+  private onVisibilityChange = () => {
+    if (document.hidden) this.onBlur();
   };
 
   private onLockTargetClick = () => {
