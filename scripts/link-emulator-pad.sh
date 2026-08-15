@@ -14,11 +14,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLAYER="${COUCHLINK_EMU_PLAYER:-2}"
 
 # ViGEm's virtual pad always enumerates through XInput, and the host's real
-# DualSense uses the SDL handler — so XInput slot 1 is unambiguous.
+# DualSense uses the SDL handler — so XInput slot 1 is unambiguous for the
+# first remote player. The companion now plugs in one target per connected
+# player, in join order (PLAYER-1 = that slot's 1-based index among remote
+# pads), so a 2nd/3rd player needs a distinct device name too — otherwise
+# every remote slot binds RPCS3's Player N to the SAME device as slot 1.
+# NOTE: the numeric suffix RPCS3 assigns a repeated device name has not been
+# verified live for 2+ simultaneous virtual pads — confirm this against
+# RPCS3's own Controller Settings before trusting it past the first slot.
+pad_index=$((PLAYER - 1))
 case "${COUCHLINK_DS_VHID_BACKEND:-xbox360}" in
-  xbox360) HANDLER="XInput"; DEVICE="XInput Pad #1" ;;
-  ds4)     HANDLER="SDL";    DEVICE="Wireless Controller 1" ;;
-  *)       HANDLER="SDL";    DEVICE="DualSense Wireless Controller 1" ;;
+  xbox360) HANDLER="XInput"; DEVICE="XInput Pad #${pad_index}" ;;
+  ds4)     HANDLER="SDL";    DEVICE="Wireless Controller ${pad_index}" ;;
+  *)       HANDLER="SDL";    DEVICE="DualSense Wireless Controller ${pad_index}" ;;
 esac
 HANDLER="${COUCHLINK_EMU_HANDLER:-$HANDLER}"
 DEVICE="${COUCHLINK_EMU_DEVICE:-$DEVICE}"
@@ -137,7 +145,11 @@ link_pcsx2() {
     return 0
   fi
 
-  local dev="${COUCHLINK_PCSX2_DEVICE:-XInput-0}"
+  # The companion now plugs in one ViGEm target per connected player, in join
+  # order, so it fills XInput-0, XInput-1, XInput-2… as remote slots 1, 2, 3
+  # connect. PLAYER is the emulator port (P2, P3, P4…), so PLAYER-2 is that
+  # slot's XInput index — every player gets its own device, not slot 2's.
+  local dev="${COUCHLINK_PCSX2_DEVICE:-XInput-$((PLAYER - 2))}"
   local section="Pad${PLAYER}"
 
   # Bindings read "Up = XInput-0/DPadUp", so match the value side. Matching the

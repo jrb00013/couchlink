@@ -67,11 +67,8 @@ fn main() -> Result<()> {
 fn run_windows(args: Args) -> Result<()> {
     use anyhow::Context;
     use std::net::TcpListener;
-    use std::sync::Arc;
     use tracing::{info, warn};
 
-    let hub = session::OutputHub::new();
-    let backend = backend::create(args.backend, hub.clone())?;
     info!(
         "DualSense VHID companion ready (backend={:?}). TCP={}:{} pipe={}",
         args.backend,
@@ -79,10 +76,9 @@ fn run_windows(args: Args) -> Result<()> {
         args.port,
         couchlink_pad::vhid_proto::VHID_PIPE_NAME
     );
-    info!("Emulator: P1 = host DualSense; P2 = this virtual pad");
+    info!("Emulator: P1 = host's own pad; each connection here plugs in one more (P2, P3, P4…)");
 
-    let tcp_backend = Arc::clone(&backend);
-    let tcp_hub = hub.clone();
+    let tcp_backend_kind = args.backend;
     let bind = format!("{}:{}", args.bind, args.port);
     std::thread::spawn(move || {
         let listener = match TcpListener::bind(&bind) {
@@ -93,14 +89,27 @@ fn run_windows(args: Args) -> Result<()> {
             }
         };
         info!("listening TCP {bind}");
+        let mut next_player: u32 = 1;
         for conn in listener.incoming() {
             match conn {
                 Ok(stream) => {
-                    let backend = Arc::clone(&tcp_backend);
-                    let hub = tcp_hub.clone();
+                    let player = next_player;
+                    next_player += 1;
+                    // Each connection is one player's pad. A fresh backend means a
+                    // fresh ViGEm target — ViGEmBus assigns the next free XInput/DS4
+                    // slot on plugin() — and a fresh hub means this player only ever
+                    // hears its own rumble feedback, never another player's.
+                    let hub = session::OutputHub::new();
+                    let backend = match backend::create(tcp_backend_kind, hub.clone()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("player {player}: virtual pad create failed: {e:#}");
+                            continue;
+                        }
+                    };
                     std::thread::spawn(move || {
                         if let Err(e) = session::serve_tcp(stream, backend, hub) {
-                            warn!("TCP session: {e:#}");
+                            warn!("TCP session (player {player}): {e:#}");
                         }
                     });
                 }
@@ -109,8 +118,7 @@ fn run_windows(args: Args) -> Result<()> {
         }
     });
 
-    let pipe_backend = Arc::clone(&backend);
-    pipe_win::serve_pipe(pipe_backend, hub).context("named pipe server")?;
+    pipe_win::serve_pipe(args.backend).context("named pipe server")?;
     Ok(())
 }
 
