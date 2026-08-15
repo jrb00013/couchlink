@@ -128,6 +128,9 @@ impl WebRtcPlayer {
                             candidate: init.candidate,
                             sdp_mid: init.sdp_mid,
                             sdp_mline_index: init.sdp_mline_index,
+                            // The signaling server stamps our registered slot; a client
+                            // never knows it until after registration, so 0 is fine.
+                            slot: 0,
                         });
                     }
                 }
@@ -309,6 +312,7 @@ impl WebRtcPlayer {
         signal_out.send(SignalMessage::Answer {
             sdp: local.sdp,
             epoch: offer_epoch,
+            slot: 0, // stamped by the signaling server
         })?;
         Ok(())
     }

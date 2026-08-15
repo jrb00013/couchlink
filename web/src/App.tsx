@@ -84,6 +84,11 @@ export default function App() {
     target_fps: number;
     target_bitrate_kbps: number;
   } | null>(null);
+  /** Session occupancy snapshot — "N/3 players connected". */
+  const [playersStatus, setPlayersStatus] = useState<{
+    occupied: number;
+    max: number;
+  } | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
@@ -381,6 +386,7 @@ export default function App() {
     },
     onTelemetry: (t) => setTelemetry(t),
     onHostStats: (s) => setHostStats(s),
+    onPlayersStatus: (occupied, max) => setPlayersStatus({ occupied, max }),
   });
 
   useEffect(() => {
@@ -495,7 +501,14 @@ export default function App() {
             <p>HD co-play · your DualSense → host Bluetooth pad</p>
           </div>
         </div>
-        <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
+        <div className="top-pills">
+          <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
+          {playersStatus && (
+            <div className="pill" title="players connected">
+              {playersStatus.occupied}/{playersStatus.max} players
+            </div>
+          )}
+        </div>
       </header>
 
       {!connected && (

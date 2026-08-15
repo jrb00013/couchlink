@@ -96,6 +96,9 @@ pub struct WebRtcHost {
     /// Pad DataChannel for host→player feedback (rumble / adaptive triggers).
     pad_dc: Arc<RTCDataChannel>,
     offer_epoch: Arc<AtomicU64>,
+    /// Player slot this peer answers — stamped into every Offer/IceCandidate so
+    /// the signaling server routes them to the right player.
+    player_slot: Arc<AtomicU8>,
     /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
     keyframe_wanted: Arc<AtomicBool>,
     /// Which path the viewer is actually painting from (`PATH_*` below).
@@ -192,6 +195,7 @@ impl WebRtcHost {
         turn_pass: Option<String>,
         ice_ips: Vec<String>,
         offer_epoch: Arc<AtomicU64>,
+        player_slot: Arc<AtomicU8>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<PadFrame>)> {
         let _ = as_bluetooth;
         let mut m = MediaEngine::default();
@@ -303,8 +307,10 @@ impl WebRtcHost {
 
         let pc2 = Arc::clone(&pc);
         let signal_ice = signal_out.clone();
+        let ice_player_slot = Arc::clone(&player_slot);
         pc.on_ice_candidate(Box::new(move |c| {
             let signal_ice = signal_ice.clone();
+            let ice_player_slot = ice_player_slot.clone();
             Box::pin(async move {
                 if let Some(c) = c {
                     if let Ok(init) = c.to_json() {
@@ -312,6 +318,7 @@ impl WebRtcHost {
                             candidate: init.candidate,
                             sdp_mid: init.sdp_mid,
                             sdp_mline_index: init.sdp_mline_index,
+                            slot: ice_player_slot.load(Ordering::Relaxed),
                         });
                     }
                 }
@@ -367,6 +374,7 @@ impl WebRtcHost {
                 pad_tx,
                 pad_dc,
                 offer_epoch,
+                player_slot,
                 keyframe_wanted,
                 present_path: Arc::new(AtomicU8::new(PATH_UNKNOWN)),
                 fec_enabled: matches!(
@@ -407,6 +415,7 @@ impl WebRtcHost {
         signal_out.send(SignalMessage::Offer {
             sdp: local.sdp,
             epoch,
+            slot: self.player_slot.load(Ordering::Relaxed),
         })?;
         Ok(())
     }

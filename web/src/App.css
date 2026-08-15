@@ -46,6 +46,12 @@ body {
   gap: 1rem;
 }
 
+.top-pills {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
 .brand {
   display: flex;
   align-items: center;
