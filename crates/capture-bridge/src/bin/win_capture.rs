@@ -782,6 +782,21 @@ mod run {
                 BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             CaptureSource::Picker => {
+                // This process is launched from a background chain (WSL → cmd →
+                // powershell → this exe), not from the user clicking something —
+                // Windows' foreground-lock timeout denies a window from a process
+                // like that the right to steal focus, so the picker's owner
+                // window (crates.io windows-capture already does the correct
+                // IInitializeWithWindow dance) can end up created but never
+                // actually brought to the front: it opens invisibly behind
+                // everything, and there is nothing to click. ASFW_ANY lifts that
+                // restriction for the next SetForegroundWindow call from any
+                // process, which is exactly what the picker's own window needs.
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+                        windows::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+                    );
+                }
                 info!("open the Windows capture picker and choose a window or monitor…");
                 match GraphicsCapturePicker::pick_item().context("capture picker") {
                     Ok(Some(item)) => {
