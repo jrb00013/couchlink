@@ -1,5 +1,6 @@
 mod capture;
 mod config;
+mod emulator_keymap;
 mod emulator_pad;
 mod encode;
 mod invite;
@@ -103,6 +104,9 @@ struct PlayerConn {
     /// Last controller family this player reported, so the emulator rebind (a
     /// process spawn) only runs when the answer actually changes.
     last_pad_kind: Option<String>,
+    /// Last keyboard keymap this player reported, so the emulator-config
+    /// rewrite (a file write) only runs when the binding actually changes.
+    last_keymap: Option<String>,
     /// Rumble/adaptive-trigger feedback loop for this player's pad, aborted on
     /// leave/rebuild so a dead peer stops polling its (dropped) virtual pad.
     pad_feedback_task: Option<tokio::task::JoinHandle<()>>,
@@ -165,6 +169,7 @@ async fn build_player_conn(
         host,
         attached_player_epoch: epoch,
         last_pad_kind: None,
+        last_keymap: None,
         pad_feedback_task,
     })
 }
@@ -734,6 +739,21 @@ async fn main() -> Result<()> {
                                 // relays video.
                                 tokio::task::spawn_blocking(move || {
                                     emulator_pad::apply(&kind, &id, slot)
+                                });
+                            }
+                        }
+                        SignalMessage::KeyMap { keymap, slot } => {
+                            let mut guard = slots.lock().await;
+                            let Some(conn) = guard.get_mut(&slot) else {
+                                warn!("key_map for unknown slot {slot} dropped");
+                                continue;
+                            };
+                            if conn.last_keymap.as_deref() != Some(keymap.as_str()) {
+                                conn.last_keymap = Some(keymap.clone());
+                                // Off the loop: this rewrites emulator config on
+                                // disk, and this same branch relays video.
+                                tokio::task::spawn_blocking(move || {
+                                    emulator_keymap::apply(&keymap, slot)
                                 });
                             }
                         }
