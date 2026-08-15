@@ -84,7 +84,7 @@ export default function App() {
     target_fps: number;
     target_bitrate_kbps: number;
   } | null>(null);
-  /** Session occupancy snapshot — "N/3 players connected". */
+  /** Session occupancy snapshot — "N/4 players connected" (host owns P1). */
   const [playersStatus, setPlayersStatus] = useState<{
     occupied: number;
     max: number;
@@ -505,11 +505,29 @@ export default function App() {
           <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
           {playersStatus && (
             <div className="pill" title="players connected">
-              {playersStatus.occupied}/{playersStatus.max} players
+              {playersStatus.occupied + 1}/{playersStatus.max + 1} players
             </div>
           )}
         </div>
       </header>
+
+      {playersStatus && (
+        <div className="roster" aria-label="player roster">
+          {Array.from({ length: playersStatus.max + 1 }, (_, i) => {
+            const isHost = i === 0;
+            const filled = isHost || i - 1 < playersStatus.occupied;
+            return (
+              <span
+                key={i}
+                className={`roster-slot${filled ? " is-filled" : ""}${isHost ? " is-host" : ""}`}
+              >
+                <span className="roster-num">P{i + 1}</span>
+                {isHost ? "host" : filled ? "player" : "open"}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {!connected && (
         <section className="join">
@@ -630,46 +648,55 @@ export default function App() {
           )}
         </div>
 
-        {!isMobile && livePads.length > 0 && (
+        {connected && !isMobile && (
           <section className="pads" aria-live="polite">
             <div className="pads-head">
               <span className="pads-count">
-                {livePads.length} controller{livePads.length === 1 ? "" : "s"}
+                {1 + livePads.length} controller{1 + livePads.length === 1 ? "" : "s"}
               </span>
-              <span className="pads-hint">first pad is sent to the host</span>
+              <span className="pads-hint">host owns P1 · friend pads land on P2–P4</span>
             </div>
             <div className="pads-viz">
+              <ControllerViz
+                key="host-p1"
+                pad={{
+                  index: 0,
+                  id: "host",
+                  label: "Host",
+                  kind: "dualsense",
+                  buttons: [],
+                  axes: [],
+                  l2: 0,
+                  r2: 0,
+                }}
+                active={livePads.length === 0}
+              />
               {livePads.map((pad, i) => (
                 <ControllerViz
                   key={`${pad.index}-${pad.id}`}
-                  pad={pad}
-                  active={i === 0}
+                  pad={{ ...pad, index: pad.index + 1 }}
+                  active={livePads.length === 0 ? false : i === 0}
                 />
               ))}
             </div>
-          </section>
-        )}
-        {connected && !isMobile && livePads.length === 0 && (
-          <section className="pads" aria-live="polite">
-            <p className="pads-empty">
-              Pair a pad, then press any button so the browser unlocks it.
-            </p>
-            <div className="kbm-row">
-              <button
-                type="button"
-                className={`kbm-toggle ${kbmActive ? "is-active" : ""}`}
-                onClick={() => setKbmActive((v) => !v)}
-              >
-                {kbmActive ? "⌨ keyboard+mouse ON" : "⌨ use keyboard+mouse"}
-              </button>
-              {kbmActive && (
-                <span className="kbm-hint">
-                  {pointerLocked
-                    ? "🔒 mouse locked — Esc to release"
-                    : "click stream to lock mouse · WASD=move · LMB=R2 · RMB=L2 · Space=✕ · E=△ · Q=□ · F=○"}
-                </span>
-              )}
-            </div>
+            {livePads.length === 0 && (
+              <div className="kbm-row">
+                <button
+                  type="button"
+                  className={`kbm-toggle ${kbmActive ? "is-active" : ""}`}
+                  onClick={() => setKbmActive((v) => !v)}
+                >
+                  {kbmActive ? "⌨ keyboard+mouse ON" : "⌨ use keyboard+mouse"}
+                </button>
+                {kbmActive && (
+                  <span className="kbm-hint">
+                    {pointerLocked
+                      ? "🔒 mouse locked — Esc to release"
+                      : "click stream to lock mouse · WASD=move · LMB=R2 · RMB=L2 · Space=✕ · E=△ · Q=□ · F=○"}
+                  </span>
+                )}
+              </div>
+            )}
           </section>
         )}
       </div>
