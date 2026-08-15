@@ -20,8 +20,7 @@ use windows::Win32::System::Pipes::{
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 
-use crate::backend;
-use crate::session::{self, OutputHub};
+use crate::session;
 
 const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
 
@@ -68,11 +67,10 @@ impl Drop for PipeSd {
     }
 }
 
-pub fn serve_pipe(backend_kind: crate::BackendKind) -> Result<()> {
+pub fn serve_pipe(registry: session::SlotRegistry, backend_kind: crate::BackendKind) -> Result<()> {
     let name = wide(VHID_PIPE_NAME);
     let pipe_sd = PipeSd::new()?;
     info!("listening named pipe {VHID_PIPE_NAME}");
-    let mut next_player: u32 = 1;
     loop {
         let mut sa = pipe_sd.attrs();
         let handle = unsafe {
@@ -107,24 +105,24 @@ pub fn serve_pipe(backend_kind: crate::BackendKind) -> Result<()> {
         }
 
         info!("pipe client connected");
-        let player = next_player;
-        next_player += 1;
-        // Each pipe client is one player's pad — a fresh backend/hub per
-        // connection, same reasoning as the TCP listener below.
-        let hub = OutputHub::new();
-        let backend = match backend::create(backend_kind, hub.clone()) {
-            Ok(b) => b,
+        // Move HANDLE into a std File for Read/Write.
+        let mut file = unsafe {
+            let owned = OwnedHandle::from_raw_handle(handle.0 as *mut _);
+            std::fs::File::from(owned)
+        };
+        let slot = match session::read_slot_hello(&mut file) {
+            Ok(s) => s,
             Err(e) => {
-                warn!("player {player}: virtual pad create failed: {e:#}");
-                let _ = unsafe { CloseHandle(handle) };
-                std::thread::sleep(Duration::from_millis(50));
+                warn!("pipe client: slot hello failed: {e:#}");
                 continue;
             }
         };
-        // Move HANDLE into a std File for Read/Write.
-        let file = unsafe {
-            let owned = OwnedHandle::from_raw_handle(handle.0 as *mut _);
-            std::fs::File::from(owned)
+        let (backend, hub) = match registry.get_or_create(slot, backend_kind) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("slot {slot}: virtual pad create failed: {e:#}");
+                continue;
+            }
         };
         std::thread::spawn(move || {
             let reader = match file.try_clone() {
@@ -135,8 +133,8 @@ pub fn serve_pipe(backend_kind: crate::BackendKind) -> Result<()> {
                 }
             };
             let writer = file;
-            if let Err(e) = session::serve_duplex(reader, writer, backend, hub) {
-                warn!("pipe session (player {player}): {e:#}");
+            if let Err(e) = session::serve_duplex(reader, writer, backend, hub, slot) {
+                warn!("pipe session (slot {slot}): {e:#}");
             }
             // File drop closes the pipe instance; parent loop creates the next one.
         });

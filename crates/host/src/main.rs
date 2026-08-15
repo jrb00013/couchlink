@@ -145,6 +145,7 @@ async fn build_player_conn(
     let player_slot = Arc::new(AtomicU8::new(slot));
     let pad = Arc::new(Mutex::new(webrtc_peer::create_virtual_pad(
         args.bluetooth_pad,
+        slot,
     )?));
     let (host, _pad_rx) = webrtc_peer::WebRtcHost::new(
         signal_out.clone(),

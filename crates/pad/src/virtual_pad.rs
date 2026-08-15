@@ -51,6 +51,12 @@ pub struct VirtualPadConfig {
     /// When true, set bus type to Bluetooth so udev/emulators treat it as wireless.
     pub as_bluetooth: bool,
     pub backend: VirtualPadBackend,
+    /// Couchlink player slot (1-based) this pad belongs to, announced to the
+    /// DualSense VHID companion so it routes into that slot's own
+    /// pre-existing virtual controller rather than whichever one happened to
+    /// connect first. 0 for anything that doesn't go through the companion
+    /// (native Linux/uinput, the host's own physical pad).
+    pub companion_slot: u8,
 }
 
 impl Default for VirtualPadConfig {
@@ -62,6 +68,7 @@ impl Default for VirtualPadConfig {
             version: 0x0111,
             as_bluetooth: true,
             backend: VirtualPadBackend::from_env(),
+            companion_slot: 0,
         }
     }
 }
@@ -212,13 +219,15 @@ mod linux {
     // video keeps flowing — the failure looks like the pad, not the pipe.
     pub(super) struct ReconnectingVhid {
         client: VhidClient,
+        slot: u8,
         last_attempt: Option<Instant>,
     }
 
     impl ReconnectingVhid {
-        pub(super) fn new(client: VhidClient) -> Self {
+        pub(super) fn new(client: VhidClient, slot: u8) -> Self {
             Self {
                 client,
+                slot,
                 last_attempt: None,
             }
         }
@@ -240,7 +249,7 @@ mod linux {
                         return Err(e);
                     }
                     self.last_attempt = Some(now);
-                    match VhidClient::connect() {
+                    match VhidClient::connect(self.slot) {
                         Ok(fresh) => {
                             info!("DualSense VHID companion reconnected after {e}");
                             self.client = fresh;
@@ -274,10 +283,10 @@ mod linux {
                 || (matches!(cfg.backend, VirtualPadBackend::Auto) && likely_wsl());
 
             if try_vhid {
-                match VhidClient::connect() {
+                match VhidClient::connect(cfg.companion_slot) {
                     Ok(c) => {
                         info!("Linux/WSL virtual pad: DualSense VHID companion (TCP/pipe)");
-                        return Ok(Self::Vhid(ReconnectingVhid::new(c)));
+                        return Ok(Self::Vhid(ReconnectingVhid::new(c, cfg.companion_slot)));
                     }
                     Err(e) if matches!(cfg.backend, VirtualPadBackend::DualSense) && likely_wsl() => {
                         return Err(e).context("DualSense VHID companion required under WSL");
