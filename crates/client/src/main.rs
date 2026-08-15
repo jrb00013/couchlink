@@ -183,7 +183,7 @@ fn main() -> Result<()> {
     }
 
     // Windowed: skip the OS dialog — the waiting screen has an editable join field.
-    let mut join_prefill = cli
+    let join_prefill = cli
         .join_url
         .clone()
         .or(cli.positional_join.clone())
@@ -192,29 +192,27 @@ fn main() -> Result<()> {
         .or_else(config_file::read_join_url_from_config)
         .unwrap_or_default();
 
-    loop {
-        let resolved = if join_prefill.trim().is_empty() {
-            None
-        } else {
-            match resolve_join_string(&join_prefill, &cli) {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    warn!("join prefill invalid ({e}) — edit the waiting-screen field");
-                    None
-                }
+    let resolved = if join_prefill.trim().is_empty() {
+        None
+    } else {
+        match resolve_join_string(&join_prefill, &cli) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                warn!("join prefill invalid ({e}) — edit the waiting-screen field");
+                None
             }
-        };
-        match run_windowed(resolved, join_prefill.clone())? {
-            view::ViewResult::Closed => return Ok(()),
-            view::ViewResult::Rejoin(url) => {
-                let _ = config_file::write_join_url(&url);
-                // winit allows exactly one EventLoop per process, so looping
-                // back into run_windowed fails with "EventLoop can't be
-                // recreated" and silently drops to headless — which renders no
-                // video at all, so the user sees the app do nothing. Re-exec
-                // instead: a fresh process gets a fresh EventLoop.
-                return rejoin_via_reexec(&url);
-            }
+        }
+    };
+    match run_windowed(resolved, join_prefill.clone())? {
+        view::ViewResult::Closed => Ok(()),
+        view::ViewResult::Rejoin(url) => {
+            let _ = config_file::write_join_url(&url);
+            // winit allows exactly one EventLoop per process, so looping back
+            // into run_windowed fails with "EventLoop can't be recreated" and
+            // silently drops to headless — which renders no video at all, so
+            // the user sees the app do nothing. Re-exec instead: a fresh
+            // process gets a fresh EventLoop.
+            rejoin_via_reexec(&url)
         }
     }
 }
