@@ -403,9 +403,13 @@ async fn main() -> Result<()> {
             Ok("1") | Ok("true") | Ok("yes") | Ok("on")
         );
     let default_filter = if verbose {
-        "couchlink_host=info,webrtc=info"
+        // couchlink_pad is where the VHID companion connect/reconnect
+        // attempts actually get logged (crates/pad/src/vhid_client.rs +
+        // virtual_pad.rs) — without it here, every controller-connect
+        // failure or reconnect attempt is invisible even in verbose mode.
+        "couchlink_host=info,couchlink_pad=info,webrtc=info"
     } else {
-        "warn,couchlink_host=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
+        "warn,couchlink_host=warn,couchlink_pad=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
     };
     tracing_subscriber::fmt()
         .with_env_filter(

@@ -63,14 +63,29 @@ impl SlotRegistry {
     }
 
     /// The slot's existing controller, or a freshly created one on first use.
+    ///
+    /// `backend::create()` talks to the ViGEmBus driver (plugin + wait_ready)
+    /// — real I/O that can stall. It must never run while holding the lock:
+    /// every *other* connection's slot lookup — for a completely different
+    /// player — would queue up behind that one stall and the whole companion
+    /// would look hung to every player, not just the one whose target is
+    /// slow to plug in. Create outside the lock; only hold it to check and
+    /// to insert.
     pub(crate) fn get_or_create(&self, slot: u8, kind: crate::BackendKind) -> Result<(DynBackend, OutputHub)> {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(entry) = guard.get(&slot) {
+        if let Some(entry) = self.inner.lock().unwrap().get(&slot) {
             return Ok(entry.clone());
         }
         let hub = OutputHub::new();
         let backend = backend::create(kind, hub.clone())
             .with_context(|| format!("create virtual controller for slot {slot}"))?;
+        // Someone else may have created this slot's controller while we were
+        // blocked on the driver above — keep whichever one is already
+        // registered rather than clobbering it, so a slot's controller
+        // identity never changes out from under an in-progress connection.
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(existing) = guard.get(&slot) {
+            return Ok(existing.clone());
+        }
         info!("slot {slot}: plugged in a new virtual controller");
         guard.insert(slot, (backend.clone(), hub.clone()));
         Ok((backend, hub))
