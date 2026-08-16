@@ -265,8 +265,13 @@ fn find_newest(root: &str, name: &str, max_depth: usize) -> Option<PathBuf> {
             if meta.is_dir() {
                 walk(&p, name, depth + 1, max, best);
             } else if meta.is_file() && p.file_name().and_then(|n| n.to_str()) == Some(name) {
-                if best.as_ref().is_none_or(|(t, _)| meta.modified().unwrap_or(t).ge(t)) {
-                    *best = Some((meta.modified().unwrap_or(std::time::UNIX_EPOCH), p));
+                let mtime = meta.modified().ok();
+                let newer = match best.as_ref() {
+                    None => true,
+                    Some((t, _)) => mtime.map_or(false, |m| m >= *t),
+                };
+                if newer {
+                    *best = Some((mtime.unwrap_or(std::time::UNIX_EPOCH), p));
                 }
             }
         }
@@ -292,6 +297,48 @@ pub fn apply(keymap_json: &str, slot: u8) {
     );
     apply_pcsx2(&keymap, player);
     apply_rpcs3(&keymap, player);
+}
+
+/// Lines under a `[Section]` header (PCSX2) until the next section line.
+fn extract_pcsx2_section(text: &str, section: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        if line == section {
+            in_block = true;
+            continue;
+        }
+        if in_block && line.starts_with('[') {
+            break;
+        }
+        if in_block {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Lines under a `Player N Input:` header (RPCS3) until the next Player header.
+fn extract_rpcs3_block(text: &str, header: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        if line == header {
+            in_block = true;
+            continue;
+        }
+        if in_block && line.starts_with("Player ") && line.ends_with(" Input:") {
+            break;
+        }
+        if in_block && line.starts_with(' ') {
+            out.push_str(line.trim_start());
+            out.push('\n');
+        } else if in_block && !line.is_empty() {
+            break;
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 // ---------------------------------------------------------------- PCSX2 -----
@@ -331,7 +378,7 @@ fn apply_pcsx2(keymap: &BTreeMap<String, String>, player: u8) {
     );
 
     // Drop the old [PadN] block, then append the fresh one.
-    let mut lines: Vec<&str> = text.split('\n').collect();
+    let lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<&str> = Vec::with_capacity(lines.len() + 8);
     let mut skip = false;
     for line in &lines {
@@ -363,7 +410,7 @@ fn apply_pcsx2(keymap: &BTreeMap<String, String>, player: u8) {
     if crlf {
         existing = existing.replace("\r\n", "\n");
     }
-    if existing.contains(&section) && existing.contains(" = Keyboard/") {
+    if extract_pcsx2_section(&existing, &section).is_some_and(|b| b.contains(" = Keyboard/")) {
         info!("PCSX2 {section} already carries keyboard bindings — left unchanged");
         return;
     }
@@ -410,7 +457,7 @@ fn apply_rpcs3(keymap: &BTreeMap<String, String>, player: u8) {
     }
 
     // Rebuild the file replacing the player's Input block, keeping CRLF.
-    let mut lines: Vec<&str> = text.split('\n').collect();
+    let lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<&str> = Vec::with_capacity(lines.len() + 16);
     let mut in_block = false;
     let mut replaced = false;
@@ -455,8 +502,13 @@ fn apply_rpcs3(keymap: &BTreeMap<String, String>, player: u8) {
     if crlf {
         existing = existing.replace("\r\n", "\n");
     }
-    if existing.contains(&header) && existing.contains("  Handler: Keyboard") {
-        info!("RPCS3 Player {player} already on Keyboard handler — left unchanged");
+    let want: String = binds
+        .lines()
+        .map(str::trim_start)
+        .collect::<Vec<&str>>()
+        .join("\n");
+    if extract_rpcs3_block(&existing, &header).is_some_and(|b| b.trim_end() == want) {
+        info!("RPCS3 Player {player} already on this keyboard mapping — left unchanged");
         return;
     }
 
