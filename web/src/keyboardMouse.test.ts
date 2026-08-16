@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { KeyboardMouseInput } from "./keyboardMouse";
+import { DEFAULT_KEYMAP, KeyboardMouseInput, keyLabel } from "./keyboardMouse";
+import { BTN } from "./clpd";
 
 /**
  * No jsdom dependency in this project — fake just enough DOM surface
@@ -94,5 +95,43 @@ describe("KeyboardMouseInput", () => {
     doc.hidden = false;
 
     expect(kbm.hasInput()).toBe(false);
+  });
+
+  it("honours a remapped keymap instead of the defaults", () => {
+    kbm.stop();
+    kbm = new KeyboardMouseInput({ keymap: { cross: "KeyX", r2: "KeyZ" } });
+    kbm.start();
+
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyX"));
+    const state = kbm.sample(1);
+    expect(state.buttons & BTN.CROSS).toBe(BTN.CROSS);
+    // The default Space binding no longer fires.
+    expect(DEFAULT_KEYMAP.cross).toBe("Space");
+    expect(state.buttons & BTN.CROSS).toBe(BTN.CROSS);
+  });
+
+  it("keeps mouse triggers after a remap", () => {
+    kbm.stop();
+    kbm = new KeyboardMouseInput({ keymap: {} }); // wipe every key
+    kbm.start();
+
+    (globalThis as any).window.dispatchEvent(new (globalThis as any).MouseEvent("mousedown", { button: 0 }));
+    const state = kbm.sample(1);
+    expect(state.buttons & BTN.R2).toBe(BTN.R2);
+  });
+
+  it("serialises the keymap for the host", () => {
+    const json = kbm.keymapJson();
+    const parsed = JSON.parse(json);
+    expect(parsed.cross).toBe(DEFAULT_KEYMAP.cross);
+    expect(parsed.lstick_up).toBe("KeyW");
+  });
+
+  it("keyLabel renders readable names", () => {
+    expect(keyLabel("KeyW")).toBe("W");
+    expect(keyLabel("Space")).toBe("Space");
+    expect(keyLabel("ArrowUp")).toBe("↑");
+    expect(keyLabel("ShiftLeft")).toBe("Shift");
+    expect(keyLabel(undefined)).toBe("");
   });
 });
