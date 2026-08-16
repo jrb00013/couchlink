@@ -35,6 +35,36 @@ fi
 
 build_ps1="$(wslpath -w "$ROOT/scripts/build-win-ds-vhid.ps1")"
 
+# Idempotency gate: this script is re-run on every host start AND every time a
+# player reports its controller family (emulator_pad.rs). A running companion
+# must NOT be killed on those later calls — killing it wipes the per-slot
+# SlotRegistry, so the very next reconnect plugs in a brand-new ViGEm target,
+# and the emulator (PCSX2/RPCS3) keeps its old binding pointing at the dead
+# pad. Player 2 goes "stuck": old pad kept, new pad never bound. Only relaunch
+# when the running companion is gone, runs a different backend, or is running
+# code older than what's on disk.
+backend="${COUCHLINK_DS_VHID_BACKEND:-auto}"
+if command -v powershell.exe >/dev/null 2>&1; then
+  probe="$(powershell.exe -NoProfile -Command "
+    \$p = Get-Process couchlink-ds-vhid -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not \$p) { Write-Output 'none'; exit }
+    \$cli = (Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$p.Id)\").CommandLine
+    \$bk = 'auto'
+    if (\$cli -match '--backend\s+(\S+)') { \$bk = \$Matches[1] }
+    \$exe = \$p.Path
+    \$exeT = if (\$exe) { (Get-Item \$exe).LastWriteTimeUtc } else { [datetime]::MinValue }
+    \$pidStart = \$p.StartTime.ToUniversalTime()
+    Write-Output (\"{0}|{1}|{2}\" -f \$bk, \$exeT.Ticks, \$pidStart.Ticks)
+  " 2>/dev/null | tr -d '\r' || true)"
+  if [[ -n "$probe" && "$probe" != "none" ]]; then
+    IFS='|' read -r running_backend exe_ticks start_ticks <<< "$probe"
+    if [[ "$running_backend" == "$backend" && -n "$exe_ticks" && "$exe_ticks" -le "$start_ticks" ]]; then
+      echo "==> DualSense companion already running (backend=$running_backend) — keeping its pads"
+      exit 0
+    fi
+  fi
+fi
+
 # Kill any stale companion FIRST: a running couchlink-ds-vhid.exe locks its own
 # exe on Windows, so `cargo build` below fails with "Access is denied" trying to
 # overwrite it — and the old process then never gets replaced, leaving the host
@@ -61,7 +91,6 @@ fi
 # Bind all interfaces: the host lives in WSL's own netns, so Windows' loopback
 # is not reachable from it — it connects via the default gateway instead.
 bind="${COUCHLINK_DS_VHID_BIND:-0.0.0.0}"
-backend="${COUCHLINK_DS_VHID_BACKEND:-auto}"
 exe_w="$(wslpath -w "$ROOT/target/release/couchlink-ds-vhid.exe")"
 
 # Running an unsigned .exe straight off the \\wsl.localhost\... UNC share puts
