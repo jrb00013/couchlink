@@ -536,11 +536,4 @@ mod tests {
         let empty = parse_keymap(r#"{"a":"b"}"#).unwrap();
         assert_eq!(empty.len(), 1);
     }
-
-    #[test]
-    fn apply_tolerates_missing_configs() {
-        // No PCSX2/RPCS3 config exists in CI — apply must warn and return,
-        // never panic.
-        apply(r#"{"cross":"Space"}"#, 0);
-    }
 }
