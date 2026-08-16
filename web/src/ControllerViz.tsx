@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { controllerKind, type ControllerKind } from "./controllerKind";
+import { keyLabel, type KeyMap } from "./keyboardMouse";
 
 export type LivePad = {
   index: number;
@@ -359,6 +360,74 @@ function DualSenseBody({ pad }: { pad: LivePad }) {
 function GenericBody({ pad }: { pad: LivePad }) {
   // Same layout as Xbox with neutral labels — Standard Gamepad mapping.
   return <XboxBody pad={pad} />;
+}
+
+/** A key-cap with a centered label, for the keyboard binding visual. */
+function Cap({ x, y, label }: { x: number; y: number; label: string }) {
+  return (
+    <g className="kv-cap" transform={`translate(${x} ${y})`}>
+      <rect x="-15" y="-11" width="30" height="22" rx="5" />
+      <text y="4.5" textAnchor="middle" className="kv-cap-label">
+        {label || "·"}
+      </text>
+    </g>
+  );
+}
+
+/**
+ * Static DualSense-shaped visual of the keyboard/mouse bindings. Reuses the
+ * DualSense body geometry so it reads as the same controller the host sees.
+ * Labels come from the active {@link KeyMap}; triggers fall back to their
+ * mouse button when no key is bound.
+ */
+export function KeyboardViz({ keymap }: { keymap: KeyMap }) {
+  return (
+    <figure className="cv" title="keyboard+mouse">
+      <svg className="cv-svg cv-ds" viewBox="0 0 360 220" aria-hidden="true">
+        <path
+          className="cv-shell"
+          d="M78 70c10-38 46-54 102-54s92 16 102 54c16 20 30 52 24 82-4 20-20 34-44 34-22 0-36-12-48-26-10-12-20-20-34-20s-24 8-34 20c-12 14-26 26-48 26-24 0-40-14-44-34-6-30 8-62 24-82z"
+        />
+        {/* triggers */}
+        <Cap x={114} y={25} label={keyLabel(keymap.l2) || "RMB"} />
+        <Cap x={246} y={25} label={keyLabel(keymap.r2) || "LMB"} />
+        {/* bumpers */}
+        <Cap x={114} y={45} label={keyLabel(keymap.l1) || "—"} />
+        <Cap x={246} y={45} label={keyLabel(keymap.r1) || "—"} />
+        {/* d-pad */}
+        <Cap x={108} y={92} label={keyLabel(keymap.dpad_up) || "·"} />
+        <Cap x={92} y={108} label={keyLabel(keymap.dpad_left) || "·"} />
+        <Cap x={108} y={124} label={keyLabel(keymap.dpad_down) || "·"} />
+        <Cap x={124} y={108} label={keyLabel(keymap.dpad_right) || "·"} />
+        {/* face: ✕ △ □ ○ */}
+        <Cap x={252} y={130} label={keyLabel(keymap.cross) || "·"} />
+        <Cap x={252} y={86} label={keyLabel(keymap.triangle) || "·"} />
+        <Cap x={230} y={108} label={keyLabel(keymap.square) || "·"} />
+        <Cap x={274} y={108} label={keyLabel(keymap.circle) || "·"} />
+        {/* sticks */}
+        <Cap x={138} y={150} label={stickLabel(keymap)} />
+        <Cap x={222} y={150} label="mouse" />
+        {/* sys */}
+        <Cap x={157} y={92} label={keyLabel(keymap.create) || "·"} />
+        <Cap x={203} y={92} label={keyLabel(keymap.options) || "·"} />
+      </svg>
+      <figcaption className="cv-cap">
+        <span className="cv-slot">⌨</span>
+        <span className="cv-name">keyboard+mouse</span>
+        <span className="cv-active">active</span>
+      </figcaption>
+    </figure>
+  );
+}
+
+/** Left stick cap: the four directional keys, condensed. */
+function stickLabel(keymap: KeyMap): string {
+  const u = keyLabel(keymap.lstick_up);
+  const d = keyLabel(keymap.lstick_down);
+  const l = keyLabel(keymap.lstick_left);
+  const r = keyLabel(keymap.lstick_right);
+  if (!u && !d && !l && !r) return "·";
+  return [u, d, l, r].filter(Boolean).join("/");
 }
 
 export function ControllerViz({ pad, active }: { pad: LivePad; active?: boolean }) {

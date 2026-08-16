@@ -665,6 +665,90 @@ button.ghost {
   max-width: 420px;
   line-height: 1.4;
 }
+.kbm-edit-toggle {
+  padding: .3rem .6rem;
+  border-radius: 6px;
+  border: 1px solid var(--line, #333);
+  background: transparent;
+  color: var(--ink, #ddd);
+  font-size: .78rem;
+  cursor: pointer;
+}
+.kbm-edit-toggle:hover {
+  border-color: var(--accent, #4a9eff);
+  color: var(--accent, #4a9eff);
+}
+.kbm-editor {
+  margin-top: .75rem;
+  padding: .75rem;
+  border: 1px solid var(--line, #333);
+  border-radius: 12px;
+  background: rgba(10, 14, 20, 0.55);
+  max-width: 720px;
+}
+.kbm-editor-hint {
+  margin: 0 0 .6rem;
+  font-size: .74rem;
+  color: #9aa;
+}
+.kbm-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: .45rem .6rem;
+}
+.kbm-bind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  padding: .3rem .5rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+}
+.kbm-bind.is-armed {
+  border-color: var(--accent, #4a9eff);
+}
+.kbm-bind-name {
+  font-size: .78rem;
+  color: #ccd;
+}
+.kbm-bind-key {
+  min-width: 78px;
+  padding: .28rem .5rem;
+  border-radius: 6px;
+  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--ink, #eee);
+  font-size: .76rem;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  cursor: pointer;
+}
+.kbm-bind-key.is-armed {
+  border-color: var(--accent, #4a9eff);
+  color: var(--accent, #4a9eff);
+  animation: kbm-bind-pulse 1s ease-in-out infinite;
+}
+@keyframes kbm-bind-pulse {
+  50% {
+    box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.25);
+  }
+}
+
+/* Keyboard binding visual — key-caps over a DualSense shell. */
+.kv-cap rect {
+  fill: rgba(255, 255, 255, 0.09);
+  stroke: rgba(255, 255, 255, 0.28);
+  stroke-width: 1;
+}
+.kv-cap-label {
+  font-size: 8px;
+  font-weight: 700;
+  fill: var(--ink, #eee);
+  user-select: none;
+}
 
 /* ── Mobile layout ─────────────────────────────────────────────── */
 

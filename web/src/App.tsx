@@ -8,11 +8,19 @@ import {
   canUseWebCodecs,
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
-import { ControllerViz, useLivePads } from "./ControllerViz";
+import { ControllerViz, KeyboardViz, useLivePads } from "./ControllerViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
-import { KeyboardMouseInput } from "./keyboardMouse";
+import {
+  controlLabel,
+  DEFAULT_KEYMAP,
+  KeyboardMouseInput,
+  keyLabel,
+  type KbmControl,
+  type KeyMap,
+  KBM_CONTROLS,
+} from "./keyboardMouse";
 import { detectMobile } from "./mobile";
 import { TouchGamepadInput } from "./touchPad";
 import { TouchOverlay } from "./TouchOverlay";
@@ -93,6 +101,21 @@ export default function App() {
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
   const [pointerLocked, setPointerLocked] = useState(false);
+  /** Active keyboard bindings, persisted so a remap survives a reload. */
+  const [kbmKeymap, setKbmKeymap] = useState<KeyMap>(() => {
+    if (typeof localStorage === "undefined") return { ...DEFAULT_KEYMAP };
+    try {
+      const raw = localStorage.getItem("couchlink.kbmKeymap");
+      if (!raw) return { ...DEFAULT_KEYMAP };
+      return { ...DEFAULT_KEYMAP, ...(JSON.parse(raw) as KeyMap) };
+    } catch {
+      return { ...DEFAULT_KEYMAP };
+    }
+  });
+  /** Keybind editor open — keyboard input is paused while capturing. */
+  const [editorOpen, setEditorOpen] = useState(false);
+  /** Control currently awaiting a key press, or null. */
+  const [capturing, setCapturing] = useState<KbmControl | null>(null);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
   const [isMobile, setIsMobile] = useState(() => detectMobile());
   const touchInputRef = useRef<TouchGamepadInput | null>(null);
@@ -422,11 +445,13 @@ export default function App() {
     playerRef.current?.connect(signalingUrl, invite.sessionId, invite.pin);
   }, [invite.auto, invite.sessionId, invite.pin, signalingUrl]);
 
-  // Create/destroy keyboard+mouse input and wire it into the player
+  // Create/destroy keyboard+mouse input and wire it into the player. Input is
+  // paused while the keybind editor is open so capturing a new key can't also
+  // drive the pad.
   useEffect(() => {
     const canvas = canvasRef.current ?? stageRef.current ?? undefined;
-    if (kbmActive) {
-      const kbm = new KeyboardMouseInput({ lockTarget: canvas ?? null });
+    if (kbmActive && !editorOpen) {
+      const kbm = new KeyboardMouseInput({ lockTarget: canvas ?? null, keymap: kbmKeymap });
       kbmRef.current = kbm;
       kbm.start();
       playerRef.current?.setKbm(kbm);
@@ -444,7 +469,43 @@ export default function App() {
       kbmRef.current = null;
       playerRef.current?.setKbm(null);
     }
-  }, [kbmActive]);
+  }, [kbmActive, editorOpen, kbmKeymap]);
+
+  // Persist a remap and push it to the host immediately (deduped there).
+  useEffect(() => {
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("couchlink.kbmKeymap", JSON.stringify(kbmKeymap));
+      } catch {
+        /* storage full / private mode — bindings just won't survive reload */
+      }
+    }
+    playerRef.current?.sendKeymap();
+  }, [kbmKeymap]);
+
+  // Capture the next key press for the armed control; Escape unbinds it.
+  useEffect(() => {
+    if (!capturing) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.code === "Escape") {
+        setKbmKeymap((m) => {
+          const next = { ...m };
+          delete next[capturing];
+          return next;
+        });
+        setCapturing(null);
+        return;
+      }
+      if (/^(Key|Digit|Numpad|F|Arrow|Space|Tab|Enter|Escape|Backspace|Delete|Insert|Home|End|Page|Shift|Control|Alt|CapsLock|Semicolon|Comma|Period|Slash|Minus|Equal|Quote|Backquote|Bracket|Backslash)/.test(e.code)) {
+        setKbmKeymap((m) => ({ ...m, [capturing]: e.code }));
+      }
+      setCapturing(null);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [capturing]);
 
   // Re-detect mobile on resize/orientation so the layout follows the device.
   useEffect(() => {
@@ -678,6 +739,7 @@ export default function App() {
                   active={livePads.length === 0 ? false : i === 0}
                 />
               ))}
+              {kbmActive && livePads.length === 0 && <KeyboardViz keymap={kbmKeymap} />}
             </div>
             {livePads.length === 0 && (
               <div className="kbm-row">
@@ -689,12 +751,45 @@ export default function App() {
                   {kbmActive ? "⌨ keyboard+mouse ON" : "⌨ use keyboard+mouse"}
                 </button>
                 {kbmActive && (
-                  <span className="kbm-hint">
-                    {pointerLocked
-                      ? "🔒 mouse locked — Esc to release"
-                      : "click stream to lock mouse · WASD=move · LMB=R2 · RMB=L2 · Space=✕ · E=△ · Q=□ · F=○"}
-                  </span>
+                  <>
+                    <button
+                      type="button"
+                      className="kbm-edit-toggle"
+                      onClick={() => setEditorOpen((o) => !o)}
+                    >
+                      {editorOpen ? "done editing" : "🎹 edit keys"}
+                    </button>
+                    <span className="kbm-hint">
+                      {pointerLocked
+                        ? "🔒 mouse locked — Esc to release"
+                        : "click stream to lock mouse · keys are shown on the controller"}
+                    </span>
+                  </>
                 )}
+              </div>
+            )}
+            {kbmActive && editorOpen && (
+              <div className="kbm-editor" aria-label="keybind editor">
+                <p className="kbm-editor-hint">
+                  Click a key, then press the new key — Esc clears a binding.
+                </p>
+                <div className="kbm-editor-grid">
+                  {KBM_CONTROLS.map((c) => {
+                    const armed = capturing === c;
+                    return (
+                      <div className={`kbm-bind${armed ? " is-armed" : ""}`} key={c}>
+                        <span className="kbm-bind-name">{controlLabel(c)}</span>
+                        <button
+                          type="button"
+                          className={`kbm-bind-key${armed ? " is-armed" : ""}`}
+                          onClick={() => setCapturing(armed ? null : c)}
+                        >
+                          {armed ? "press a key…" : keyLabel(kbmKeymap[c]) || "—"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </section>
