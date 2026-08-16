@@ -37,6 +37,11 @@ export type SignalMessage =
    * the virtual device and emulator binding. The Gamepad API normalises input,
    * so the host cannot tell an Xbox pad from a DualSense without being told. */
   | { type: "pad_info"; kind: string; id: string }
+  /** Player → host: control → `KeyboardEvent.code` bindings for a
+   * keyboard/mouse player, as a JSON string. The host translates the codes into
+   * PCSX2/RPCS3 key names and writes them into the emulator config for this
+   * player's slot. */
+  | { type: "key_map"; keymap: string }
   /** Player → host: which video path it is actually presenting from, so the
    * host can stop writing the path nobody is painting from. "warmup" means
    * WebCodecs is starting on the DataChannel — keep both paths live as a

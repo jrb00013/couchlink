@@ -141,6 +141,8 @@ export class CouchlinkPlayer {
   private lastPadHz = 0;
   /** Last Gamepad.id announced to the host, so pad_info is sent only on change. */
   private padInfoSent = "";
+  /** Last keymap JSON announced to the host, so key_map is sent only on change. */
+  private keymapSent = "";
   /** Last logged media-path summary, so the line prints only on change. */
   private lastPathKey = "";
   /** Keyboard+mouse input source — injected by the UI, null if not active. */
@@ -177,6 +179,17 @@ export class CouchlinkPlayer {
   /** Attach or detach the mobile touch controller. Call with null to disable. */
   setTouchInput(touch: TouchGamepadInput | null) {
     this.touch = touch;
+  }
+
+  /** Send the current keyboard keymap to the host (deduped per change). */
+  sendKeymap() {
+    const json = this.kbm?.keymapJson() ?? "";
+    if (!json || json === this.keymapSent) return;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.keymapSent = json;
+      send(this.ws, { type: "key_map", keymap: json });
+      clog("signal → key_map", `${json.length} bytes`);
+    }
   }
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
@@ -916,6 +929,9 @@ export class CouchlinkPlayer {
           send(this.ws, { type: "pad_info", kind: "dualsense", id: "keyboard+mouse" });
         }
       }
+      // The host writes the keymap into the emulator config for this slot so
+      // the friend's actual keys are bound in-game, not just the virtual pad.
+      this.sendKeymap();
       this.padName = "keyboard+mouse";
       const now = performance.now();
       if (now - this.padWindowStart >= 1000) {
