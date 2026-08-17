@@ -334,11 +334,7 @@ mod linux {
                 cfg.name,
                 cfg.vendor,
                 cfg.product,
-                if cfg.as_bluetooth {
-                    "bluetooth"
-                } else {
-                    "usb"
-                }
+                if cfg.as_bluetooth { "bluetooth" } else { "usb" }
             );
             Ok(Self::UInput(pad))
         }
@@ -441,9 +437,23 @@ mod linux {
                 ioctl_set(file.as_raw_fd(), UI_SET_EVBIT, EV_ABS as u64)?;
                 ioctl_set(file.as_raw_fd(), UI_SET_EVBIT, EV_SYN as u64)?;
                 for code in [
-                    BTN_SOUTH, BTN_EAST, BTN_NORTH, BTN_WEST, BTN_TL, BTN_TR, BTN_TL2, BTN_TR2,
-                    BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR, BTN_DPAD_UP,
-                    BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT,
+                    BTN_SOUTH,
+                    BTN_EAST,
+                    BTN_NORTH,
+                    BTN_WEST,
+                    BTN_TL,
+                    BTN_TR,
+                    BTN_TL2,
+                    BTN_TR2,
+                    BTN_SELECT,
+                    BTN_START,
+                    BTN_MODE,
+                    BTN_THUMBL,
+                    BTN_THUMBR,
+                    BTN_DPAD_UP,
+                    BTN_DPAD_DOWN,
+                    BTN_DPAD_LEFT,
+                    BTN_DPAD_RIGHT,
                 ] {
                     ioctl_set(file.as_raw_fd(), UI_SET_KEYBIT, code as u64)?;
                 }
