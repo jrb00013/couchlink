@@ -54,11 +54,29 @@ if [[ -z "$connect" ]]; then
     fi
   else
     # Default transport: a Hyper-V socket over the VMBus channel WSL2 already
-    # uses internally, instead of TCP over the vEthernet/NAT hop above. Same
-    # port on both ends is the only coordination needed — no NAT-mode/mirrored
-    # guessing, because a Hyper-V socket isn't an IP address at all. Set
-    # COUCHLINK_CAPTURE_TRANSPORT=tcp to fall back to the old path.
-    connect="hyperv:9877"
+    # uses internally, instead of TCP over the vEthernet/NAT hop above.
+    #
+    # Live-tested 2026-08-19: binding Windows' AF_HYPERV listener to the
+    # documented "any partition" wildcard VmId (HV_GUID_ZERO) does NOT work
+    # for WSL2's utility VM — the guest's connect times out (os error 110).
+    # The fix: give win-capture the *specific* WSL VM GUID to bind to.
+    # `wslinfo --vm-id` returns exactly that, with no admin rights needed
+    # (unlike `hcsdiag list`, which needs Hyper-V Administrators membership).
+    # Set COUCHLINK_CAPTURE_TRANSPORT=tcp to fall back to the old path.
+    if ! command -v wslinfo >/dev/null 2>&1; then
+      echo "warning: wslinfo not found (WSL package too old for --vm-id) — falling back to TCP capture transport" >&2
+      wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+      connect="${wsl_ip:-127.0.0.1}:9876"
+    else
+      vm_id="$(wslinfo --vm-id 2>/dev/null)"
+      if [[ -z "$vm_id" ]]; then
+        echo "warning: wslinfo --vm-id returned nothing — falling back to TCP capture transport" >&2
+        wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        connect="${wsl_ip:-127.0.0.1}:9876"
+      else
+        connect="hyperv:9877:${vm_id}"
+      fi
+    fi
   fi
 fi
 # Send frames at the stream resolution: the WSL virtual NIC, not the encoder,
@@ -111,15 +129,27 @@ fi
 # a member of that job, so a dead terminal (crash or a closed window) cannot
 # take win-capture with it. `/IT` keeps it interactive (attached to the
 # logged-on session), which the picker window needs to be visible/clickable.
+#
+# `schtasks /TR` silently truncates around ~262 characters (verified live:
+# the full args + the `\\wsl.localhost\...` UNC path to start-win-capture.ps1
+# blew past it and `-BitrateKbps 18000` came out the other end as `180` — a
+# 100x bitrate cut with no error from schtasks at all). Fixed by writing the
+# real argument list into a short local launcher script once, in a fixed,
+# always-short local path, and pointing `/TR` at *that* instead — the task's
+# command line is then constant-length regardless of how many capture args
+# there are.
 task_name="couchlink-win-capture"
-# Build ArgumentList in PowerShell so quoting stays correct.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
   \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   \$quoted = (\$argList | ForEach-Object { '\"' + \$_ + '\"' }) -join ' '
+  \$localDir = Join-Path \$env:LOCALAPPDATA 'couchlink\bin'
+  New-Item -ItemType Directory -Force -Path \$localDir | Out-Null
+  \$launcher = Join-Path \$localDir 'run-capture.ps1'
+  Set-Content -Path \$launcher -Value \"& powershell.exe -WindowStyle $style \$quoted\" -Encoding UTF8
   schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
   \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
-    /TR \"powershell.exe -WindowStyle $style \$quoted\" 2>&1
+    /TR \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \$launcher\" 2>&1
   if (\$LASTEXITCODE -ne 0) {
     Write-Host \"schtasks create failed, falling back to Start-Process (win-capture will NOT survive a terminal crash): \$created\"
     Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList

@@ -1,13 +1,22 @@
 //! Windows-side half of the Hyper-V socket capture transport.
 //!
-//! Binds `AF_HYPERV` with `VmId = HV_GUID_ZERO` (the documented wildcard —
-//! accept from whichever partition connects, so this side never needs to look
-//! up the WSL VM's specific GUID) and a `ServiceId` built from
-//! `HV_GUID_VSOCK_TEMPLATE` with the port folded into the low bits — the same
-//! port-to-GUID mapping the Linux kernel's `AF_VSOCK`-over-Hyper-V transport
-//! uses, so `VsockStream::connect_with_cid_port(VMADDR_CID_HOST, port)` on the
-//! WSL2 side lands on exactly this listener with no coordination beyond
-//! agreeing on the port number.
+//! Binds `AF_HYPERV` with `VmId = <the WSL2 VM's own GUID>` and a `ServiceId`
+//! built from `HV_GUID_VSOCK_TEMPLATE` with the port folded into the low
+//! bits — the same port-to-GUID mapping the Linux kernel's
+//! `AF_VSOCK`-over-Hyper-V transport uses, so
+//! `VsockStream::connect_with_cid_port(VMADDR_CID_HOST, port)` on the WSL2
+//! side lands on exactly this listener.
+//!
+//! Live-tested 2026-08-19: binding with `VmId = HV_GUID_ZERO` (the
+//! documented "any partition" wildcard) compiles and the listener comes up,
+//! but the WSL2 guest's connect then times out (`os error 110`) — the
+//! wildcard evidently doesn't route for WSL2's utility VM the way it does
+//! for a conventional Hyper-V child partition. The fix that actually works:
+//! bind to the *specific* VM GUID. WSL2 exposes this with zero admin rights
+//! via `wslinfo --vm-id` (confirmed on this machine: `hcsdiag list`, the
+//! traditional way to enumerate VM IDs, needs Hyper-V Administrators group
+//! membership — `wslinfo` doesn't). The WSL2 host passes that GUID through
+//! on `--connect hyperv:<port>:<vm-id>`; see `ensure-win-capture.sh`.
 //!
 //! This talks raw Winsock (no `std::net`, which has no `AF_HYPERV` support)
 //! but exposes `Read + Write` so it drops straight into the existing
@@ -19,7 +28,7 @@ use windows::Win32::Networking::WinSock::{
     accept, bind, closesocket, listen, recv, send, socket, WSAGetLastError, WSAStartup, ADDRESS_FAMILY,
     SEND_RECV_FLAGS, SOCKADDR, SOCKET, SOCK_STREAM, WSADATA,
 };
-use windows::Win32::System::Hypervisor::{HV_GUID_VSOCK_TEMPLATE, HV_GUID_ZERO, SOCKADDR_HV};
+use windows::Win32::System::Hypervisor::{HV_GUID_VSOCK_TEMPLATE, SOCKADDR_HV};
 
 const AF_HYPERV: i32 = 34;
 const HV_PROTOCOL_RAW: i32 = 1;
@@ -46,7 +55,10 @@ unsafe impl Send for HvListener {}
 unsafe impl Send for HvStream {}
 
 impl HvListener {
-    pub fn bind(port: u32) -> Result<Self> {
+    /// `vm_id`: the connecting WSL2 VM's own GUID, from `wslinfo --vm-id` on
+    /// the WSL2 side. Binding to the wildcard (`HV_GUID_ZERO`) instead was
+    /// the first thing tried here and does not work — see the module docs.
+    pub fn bind(port: u32, vm_id: windows::core::GUID) -> Result<Self> {
         unsafe {
             let mut wsadata = WSADATA::default();
             let started = WSAStartup(0x0202, &mut wsadata);
@@ -60,7 +72,7 @@ impl HvListener {
             let addr = SOCKADDR_HV {
                 Family: ADDRESS_FAMILY(AF_HYPERV as u16),
                 Reserved: 0,
-                VmId: HV_GUID_ZERO,
+                VmId: vm_id,
                 ServiceId: service_id_for_port(port),
             };
             let addr_ptr = &addr as *const SOCKADDR_HV as *const SOCKADDR;
@@ -74,7 +86,7 @@ impl HvListener {
                 closesocket(sock);
                 return Err(e);
             }
-            tracing::info!("Hyper-V socket listening on port {port} (VmId=wildcard)");
+            tracing::info!("Hyper-V socket listening on port {port} (VmId={vm_id:?})");
             Ok(Self { sock })
         }
     }

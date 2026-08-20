@@ -26,15 +26,18 @@ pub enum FrameCapture {
 
 impl FrameCapture {
     /// `windows_capture`: None = local display; `"auto"` / bind addr = listen for Windows
-    /// client over TCP; `"hyperv:<port>"` = connect out over a Hyper-V socket instead —
-    /// see `hyperv_bridge.rs` for why that skips the WSL2 virtual network stack entirely.
+    /// client over TCP; `"hyperv:<port>"` or `"hyperv:<port>:<vm-id>"` = connect out over
+    /// a Hyper-V socket instead — the host only needs the port (the VmId is win-capture's
+    /// own bind parameter, passed on its `--connect`, not this side's) — see
+    /// `hyperv_bridge.rs` for why that skips the WSL2 virtual network stack entirely.
     pub fn open(windows_capture: Option<&str>) -> Result<Self> {
         if let Some(spec) = windows_capture.filter(|s| !s.is_empty() && *s != "0" && *s != "false") {
             #[cfg(target_os = "linux")]
-            if let Some(port) = spec.strip_prefix("hyperv:") {
-                let port: u32 = port
+            if let Some(rest) = spec.strip_prefix("hyperv:") {
+                let port_str = rest.split(':').next().unwrap_or(rest);
+                let port: u32 = port_str
                     .parse()
-                    .with_context(|| format!("bad hyperv port {port:?} (expected a number)"))?;
+                    .with_context(|| format!("bad hyperv port {port_str:?} (expected a number)"))?;
                 info_log(&format!("Windows desktop capture over Hyper-V socket (port {port})"));
                 return Ok(Self::HyperV(HyperVBridge::connect(port)?));
             }

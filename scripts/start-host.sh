@@ -87,8 +87,9 @@ ARGS=(
 [[ -n "${COUCHLINK_TURN_PASS:-}" ]] && ARGS+=(--turn-pass "$COUCHLINK_TURN_PASS")
 [[ -n "${COUCHLINK_ICE_IPS:-}" ]] && ARGS+=(--ice-ips "$COUCHLINK_ICE_IPS")
 # Default the host's own listen/connect spec to match what ensure-win-capture.sh
-# just told win-capture.exe to dial: hyperv:<port> unless COUCHLINK_CAPTURE_TRANSPORT=tcp
-# opts back into the old TCP/vEthernet path (see ensure-win-capture.sh for why).
+# just told win-capture.exe to dial: a Hyper-V socket (only the port matters
+# on this side — see capture/mod.rs). COUCHLINK_CAPTURE_TRANSPORT=tcp opts
+# back into the old vEthernet/NAT path.
 _windows_capture="${COUCHLINK_WINDOWS_CAPTURE:-}"
 if [[ -z "$_windows_capture" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
   if [[ "${COUCHLINK_CAPTURE_TRANSPORT:-hyperv}" == "tcp" ]]; then

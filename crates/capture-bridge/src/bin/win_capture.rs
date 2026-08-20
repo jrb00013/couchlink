@@ -689,14 +689,25 @@ mod run {
     }
 
     fn spawn_tcp_writer(connect: String, rx: mpsc::Receiver<FrameMsg>) {
-        // `hyperv:<port>` skips TCP (and the whole WSL2 virtual switch/NAT hop)
-        // in favour of a Hyper-V socket — see `couchlink_capture_bridge::hyperv`.
-        if let Some(port) = connect.strip_prefix("hyperv:") {
-            let Ok(port) = port.parse::<u32>() else {
-                warn!("bad hyperv port {port:?} (expected a number) — falling back to TCP semantics won't apply, exiting writer");
+        // `hyperv:<port>:<vm-id>` skips TCP (and the whole WSL2 virtual
+        // switch/NAT hop) in favour of a Hyper-V socket — see
+        // `couchlink_capture_bridge::hyperv`. `vm-id` is the WSL2 side's own
+        // `wslinfo --vm-id`: binding AF_HYPERV to the wildcard VmId instead
+        // was tried first and does not work (see that module's docs).
+        if let Some(rest) = connect.strip_prefix("hyperv:") {
+            let Some((port, vm_id)) = rest.split_once(':') else {
+                warn!("bad hyperv spec {rest:?} — expected hyperv:<port>:<vm-id>, exiting writer");
                 return;
             };
-            spawn_hyperv_writer(port, rx);
+            let Ok(port) = port.parse::<u32>() else {
+                warn!("bad hyperv port {port:?} (expected a number), exiting writer");
+                return;
+            };
+            let Ok(vm_id) = windows::core::GUID::try_from(vm_id) else {
+                warn!("bad hyperv vm-id {vm_id:?} (expected a GUID), exiting writer");
+                return;
+            };
+            spawn_hyperv_writer(port, vm_id, rx);
             return;
         }
         std::thread::spawn(move || loop {
@@ -730,10 +741,10 @@ mod run {
     /// Listens on a Hyper-V socket and serves whichever WSL2 host connects.
     /// One listener, re-accepted forever, mirroring the TCP writer's own
     /// reconnect-and-keep-serving behaviour.
-    fn spawn_hyperv_writer(port: u32, rx: mpsc::Receiver<FrameMsg>) {
+    fn spawn_hyperv_writer(port: u32, vm_id: windows::core::GUID, rx: mpsc::Receiver<FrameMsg>) {
         use couchlink_capture_bridge::hyperv::HvListener;
         std::thread::spawn(move || {
-            let listener = match HvListener::bind(port) {
+            let listener = match HvListener::bind(port, vm_id) {
                 Ok(l) => l,
                 Err(e) => {
                     warn!("could not bind Hyper-V socket on port {port}: {e:#}");
