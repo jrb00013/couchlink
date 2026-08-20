@@ -31,25 +31,34 @@ fi
 
 connect="${COUCHLINK_WIN_CAPTURE_CONNECT:-}"
 if [[ -z "$connect" ]]; then
-  # Which address Windows should dial depends on the WSL networking mode.
-  #
-  # NAT mode: WSL has its own private eth0 and 127.0.0.1 on the Windows side
-  # often hits a stuck wslrelay half-connection, so dial the eth0 address.
-  #
-  # Mirrored mode: the two share a network stack, so loopback is correct — and
-  # `hostname -I` is actively wrong there. It returns whichever of a dozen
-  # addresses sorts first, which was 10.66.0.1 (a WireGuard interface) — not
-  # routable from Windows. win-capture then never connected, the host blocked
-  # forever on its first frame, and the player saw only "waiting for host".
-  if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 [23]'; then
-    connect="127.0.0.1:9876"
-  else
-    wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    if [[ -n "$wsl_ip" ]]; then
-      connect="${wsl_ip}:9876"
-    else
+  if [[ "${COUCHLINK_CAPTURE_TRANSPORT:-hyperv}" == "tcp" ]]; then
+    # Which address Windows should dial depends on the WSL networking mode.
+    #
+    # NAT mode: WSL has its own private eth0 and 127.0.0.1 on the Windows side
+    # often hits a stuck wslrelay half-connection, so dial the eth0 address.
+    #
+    # Mirrored mode: the two share a network stack, so loopback is correct — and
+    # `hostname -I` is actively wrong there. It returns whichever of a dozen
+    # addresses sorts first, which was 10.66.0.1 (a WireGuard interface) — not
+    # routable from Windows. win-capture then never connected, the host blocked
+    # forever on its first frame, and the player saw only "waiting for host".
+    if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 [23]'; then
       connect="127.0.0.1:9876"
+    else
+      wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+      if [[ -n "$wsl_ip" ]]; then
+        connect="${wsl_ip}:9876"
+      else
+        connect="127.0.0.1:9876"
+      fi
     fi
+  else
+    # Default transport: a Hyper-V socket over the VMBus channel WSL2 already
+    # uses internally, instead of TCP over the vEthernet/NAT hop above. Same
+    # port on both ends is the only coordination needed — no NAT-mode/mirrored
+    # guessing, because a Hyper-V socket isn't an IP address at all. Set
+    # COUCHLINK_CAPTURE_TRANSPORT=tcp to fall back to the old path.
+    connect="hyperv:9877"
   fi
 fi
 # Send frames at the stream resolution: the WSL virtual NIC, not the encoder,
@@ -92,11 +101,31 @@ style=Minimized
 if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
   echo "==> starting Windows capture (source=$source_mode → $connect @ ${wire_w}x${wire_h} ${bitrate_kbps}kbps)"
 fi
+
+# docs/INCIDENT-2026-08-19-terminals-died.md, root cause #1: `Start-Process`
+# here spawns win-capture as a descendant of *this* WSL session's process
+# tree. Windows Terminal puts every tab's whole tree in one Job Object with
+# kill-on-close, so a Start-Process child does not survive the terminal
+# crashing — it goes down with it, silently, and nothing ever relaunches it.
+# A Scheduled Task runs from the Task Scheduler service instead: it is never
+# a member of that job, so a dead terminal (crash or a closed window) cannot
+# take win-capture with it. `/IT` keeps it interactive (attached to the
+# logged-on session), which the picker window needs to be visible/clickable.
+task_name="couchlink-win-capture"
 # Build ArgumentList in PowerShell so quoting stays correct.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
   \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
-  Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
+  \$quoted = (\$argList | ForEach-Object { '\"' + \$_ + '\"' }) -join ' '
+  schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
+  \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
+    /TR \"powershell.exe -WindowStyle $style \$quoted\" 2>&1
+  if (\$LASTEXITCODE -ne 0) {
+    Write-Host \"schtasks create failed, falling back to Start-Process (win-capture will NOT survive a terminal crash): \$created\"
+    Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
+  } else {
+    schtasks.exe /Run /TN '$task_name' | Out-Null
+  }
 " >/dev/null
 
 echo "==> Windows capture launched (choose a window in the picker if it appears)"

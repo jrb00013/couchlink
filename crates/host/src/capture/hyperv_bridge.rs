@@ -32,7 +32,7 @@ use couchlink_capture_bridge::{
     REQUEST_IDR,
 };
 use std::io::{Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use vsock::{VsockStream, VMADDR_CID_HOST};
 
 use super::Captured;
@@ -40,6 +40,9 @@ use super::Captured;
 const IDLE_POLL: Duration = Duration::from_millis(2);
 const DRAIN_POLL: Duration = Duration::from_millis(1);
 const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// See `bridge::RESPAWN_AFTER` / `docs/INCIDENT-2026-08-19-terminals-died.md`.
+const RESPAWN_AFTER: Duration = Duration::from_secs(5);
+const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 
 fn is_timeout(e: &std::io::Error) -> bool {
     matches!(
@@ -60,6 +63,8 @@ pub struct HyperVBridge {
     keyframe: bool,
     target: Option<EncodeTarget>,
     frames_received: u64,
+    disconnected_at: Option<Instant>,
+    last_respawn: Option<Instant>,
 }
 
 impl HyperVBridge {
@@ -93,6 +98,8 @@ impl HyperVBridge {
             keyframe: false,
             target: None,
             frames_received: 0,
+            disconnected_at: None,
+            last_respawn: None,
         };
         bridge.read_one()?;
         Ok(bridge)
@@ -215,7 +222,11 @@ impl HyperVBridge {
             return Ok(Some(Captured::Bgra(p)));
         }
         if self.stream.is_none() {
-            self.try_reconnect();
+            if self.try_reconnect() {
+                self.disconnected_at = None;
+            } else {
+                self.maybe_respawn();
+            }
             return Ok(self.stale_frame());
         }
         match self.latest_frame() {
@@ -234,6 +245,7 @@ impl HyperVBridge {
             Err(e) => {
                 tracing::warn!("Hyper-V capture link lost ({e:#}) — waiting for reconnect");
                 self.stream = None;
+                self.disconnected_at = Some(Instant::now());
                 self.try_reconnect();
                 Ok(self.stale_frame())
             }
@@ -245,6 +257,24 @@ impl HyperVBridge {
             return None;
         }
         self.last.clone().map(Captured::Bgra)
+    }
+
+    /// See `bridge::WindowsBridge::maybe_respawn` /
+    /// `docs/INCIDENT-2026-08-19-terminals-died.md`.
+    fn maybe_respawn(&mut self) {
+        let Some(since) = self.disconnected_at else {
+            return;
+        };
+        if since.elapsed() < RESPAWN_AFTER {
+            return;
+        }
+        if let Some(last) = self.last_respawn {
+            if last.elapsed() < RESPAWN_RETRY_INTERVAL {
+                return;
+            }
+        }
+        self.last_respawn = Some(Instant::now());
+        super::respawn_windows_capture();
     }
 }
 

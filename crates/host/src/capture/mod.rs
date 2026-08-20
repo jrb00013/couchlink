@@ -129,6 +129,41 @@ fn info_log(msg: &str) {
     tracing::info!("{msg}");
 }
 
+/// Postmortem: `docs/INCIDENT-2026-08-19-terminals-died.md`. win-capture died
+/// alongside a crashed terminal and nothing ever relaunched it — the host
+/// kept running and the player just saw a frozen picture until they rejoined
+/// (which didn't even help, since capture was still down). `bridge.rs` and
+/// `hyperv_bridge.rs` call this once the Windows side has been gone longer
+/// than a moment, so a dead win-capture heals itself instead of waiting on a
+/// reconnect that nothing was ever going to trigger.
+///
+/// Fire-and-forget: `ensure-win-capture.sh` launches PowerShell, which can
+/// take real time, and this runs from the capture poll loop — blocking here
+/// would turn a capture outage into a frame-loop stall too. Repo root comes
+/// from `COUCHLINK_ROOT` (set by `start-host.sh`), same lookup
+/// `emulator_pad.rs` already uses for its own best-effort script re-runs.
+pub(crate) fn respawn_windows_capture() {
+    let Ok(root) = std::env::var("COUCHLINK_ROOT") else {
+        tracing::warn!("win-capture link down and COUCHLINK_ROOT unset — cannot self-heal");
+        return;
+    };
+    let script = std::path::Path::new(&root).join("scripts/ensure-win-capture.sh");
+    if !script.is_file() {
+        return;
+    }
+    tracing::warn!("win-capture link has been down too long — relaunching it");
+    if let Err(e) = std::process::Command::new("bash")
+        .arg(&script)
+        .current_dir(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        tracing::warn!("could not relaunch win-capture: {e}");
+    }
+}
+
 pub fn is_wsl() -> bool {
     std::fs::read_to_string("/proc/version")
         .map(|v| v.to_ascii_lowercase().contains("microsoft"))

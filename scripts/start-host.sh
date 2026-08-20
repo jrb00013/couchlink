@@ -86,7 +86,18 @@ ARGS=(
 [[ -n "${COUCHLINK_TURN_USER:-}" ]] && ARGS+=(--turn-user "$COUCHLINK_TURN_USER")
 [[ -n "${COUCHLINK_TURN_PASS:-}" ]] && ARGS+=(--turn-pass "$COUCHLINK_TURN_PASS")
 [[ -n "${COUCHLINK_ICE_IPS:-}" ]] && ARGS+=(--ice-ips "$COUCHLINK_ICE_IPS")
-[[ -n "${COUCHLINK_WINDOWS_CAPTURE:-}" ]] && ARGS+=(--windows-capture "$COUCHLINK_WINDOWS_CAPTURE")
+# Default the host's own listen/connect spec to match what ensure-win-capture.sh
+# just told win-capture.exe to dial: hyperv:<port> unless COUCHLINK_CAPTURE_TRANSPORT=tcp
+# opts back into the old TCP/vEthernet path (see ensure-win-capture.sh for why).
+_windows_capture="${COUCHLINK_WINDOWS_CAPTURE:-}"
+if [[ -z "$_windows_capture" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
+  if [[ "${COUCHLINK_CAPTURE_TRANSPORT:-hyperv}" == "tcp" ]]; then
+    _windows_capture="auto"
+  else
+    _windows_capture="hyperv:9877"
+  fi
+fi
+[[ -n "$_windows_capture" ]] && ARGS+=(--windows-capture "$_windows_capture")
 # Capture source is handled by ensure-win-capture / win-capture (picker|desktop|window).
 if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
   ARGS+=(--verbose)
