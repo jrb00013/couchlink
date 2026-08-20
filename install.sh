@@ -273,6 +273,18 @@ if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "wsl" ]]; then
     bash "$ROOT/scripts/enable-wsl-mirrored.sh" ||       echo "warning: mirrored networking not configured — Cloudflare tunnel stays the fallback"
   fi
 
+  # docs/INCIDENT-2026-08-19-terminals-died.md: on a default Windows 11
+  # install every console couchlink spawns (including the non-interactive
+  # ones this installer itself runs) attaches into the user's interactive
+  # Windows Terminal, and a crash there can take the whole terminal — and any
+  # game session running under it — down with it. Fix it at install time,
+  # not just on first game session.
+  if command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+      "$(wslpath -w "$ROOT/scripts/windows/fix-default-terminal.ps1")" || \
+      echo "warning: could not set default terminal app — Windows Terminal stays a crash risk for spawned consoles"
+  fi
+
   echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
   if command -v powershell.exe >/dev/null 2>&1; then
     if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File \

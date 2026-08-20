@@ -1,4 +1,4 @@
-> **Status (2026-08-19, later same day): fixes #1 and #3 implemented.**
+> **Status (2026-08-19 -> 2026-08-20): fixes #1, #3, and the real #4 implemented.**
 > win-capture now launches via a Scheduled Task instead of a `Start-Process`
 > child of the WSL session (`scripts/ensure-win-capture.sh`) — it is no
 > longer a member of Windows Terminal's job object, so a crashed/closed
@@ -6,10 +6,27 @@
 > capture link stays down for more than 5s, it re-invokes
 > `ensure-win-capture.sh` itself (`crates/host/src/capture/{bridge,hyperv_bridge,mod}.rs`,
 > `respawn_windows_capture`), closing the "waited forever for a reconnect
-> that nothing triggers" gap directly. Fix #2 (persistent win-capture log
-> file) and fix #4 (track the Windows Terminal XAML crash upstream) are
-> still open. See "Fixes to implement" below for the original plan and
-> `git log --oneline -- scripts/ensure-win-capture.sh crates/host/src/capture`
+> that nothing triggers" gap directly.
+>
+> **The Windows Terminal crash recurred live during testing the same night,
+> which corrected fix #4's own framing.** It is not an unrelated upstream
+> Windows Terminal bug to merely track — it is `HKCU\Console\%%Startup` (the
+> Default Terminal Application setting) being unset by default on Windows 11,
+> which means *every* console process, including ones spawned
+> non-interactively by couchlink's own build/launch/query tooling from WSL,
+> attaches as a tab inside the user's one interactive Windows Terminal
+> process. Enough of that from automated tooling is what destabilized it both
+> times. Fixed at the source: `scripts/windows/fix-default-terminal.ps1`
+> repoints the default terminal at plain `conhost.exe` instead, so couchlink's
+> own consoles (and anyone else's non-interactive ones) never land inside the
+> user's terminal at all. Wired into `install.sh` (applied once at install)
+> and `scripts/start-win-capture.ps1` (defense in depth, applied before every
+> launch — cheap no-op once already set). Verified idempotent live on the
+> machine this incident happened on.
+>
+> Fix #2 (persistent win-capture log file) is still open. See "Fixes to
+> implement" below for the original plan and
+> `git log --oneline -- scripts/ensure-win-capture.sh scripts/windows/fix-default-terminal.ps1 crates/host/src/capture`
 > for what actually landed.
 
 # Incident: all 8 terminals died at once + stream froze

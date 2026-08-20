@@ -15,6 +15,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+
+# docs/INCIDENT-2026-08-19-terminals-died.md: every console couchlink spawns
+# (this one included) attaches into the user's interactive Windows Terminal
+# by default, and enough of that from non-interactive tooling destabilizes
+# it. Idempotent — a cheap registry read after the first run.
+try {
+    & (Join-Path $Root "scripts\windows\fix-default-terminal.ps1") | Out-Null
+} catch {
+    Write-Host "WARN: fix-default-terminal.ps1 failed (non-fatal): $($_.Exception.Message)"
+}
+
 $BuildScript = Join-Path $Root "scripts\build-win-capture.ps1"
 $Bin = & $BuildScript
 if (-not $Bin) { throw "build-win-capture.ps1 returned no binary path" }
