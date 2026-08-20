@@ -12,6 +12,8 @@ pub mod keep_rendering;
 pub mod gpu_convert;
 #[cfg(windows)]
 pub mod mf_encoder;
+#[cfg(windows)]
+pub mod hyperv;
 
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};

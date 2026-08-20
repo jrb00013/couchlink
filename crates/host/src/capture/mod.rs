@@ -2,11 +2,15 @@ mod bridge;
 mod local;
 #[cfg(target_os = "linux")]
 mod cursor_x11;
+#[cfg(target_os = "linux")]
+mod hyperv_bridge;
 
 use anyhow::{bail, Context, Result};
 pub use bridge::Captured;
 use bridge::WindowsBridge;
 use couchlink_capture_bridge::{EncodeTarget, FrameFormat};
+#[cfg(target_os = "linux")]
+use hyperv_bridge::HyperVBridge;
 use local::ScrapCapture;
 
 pub fn sample_avg_luma_bgra(bgra: &[u8], max_pixels: usize) -> u64 {
@@ -16,12 +20,24 @@ pub fn sample_avg_luma_bgra(bgra: &[u8], max_pixels: usize) -> u64 {
 pub enum FrameCapture {
     Local(ScrapCapture),
     Windows(WindowsBridge),
+    #[cfg(target_os = "linux")]
+    HyperV(HyperVBridge),
 }
 
 impl FrameCapture {
-    /// `windows_capture`: None = local display; `"auto"` / bind addr = listen for Windows client.
+    /// `windows_capture`: None = local display; `"auto"` / bind addr = listen for Windows
+    /// client over TCP; `"hyperv:<port>"` = connect out over a Hyper-V socket instead —
+    /// see `hyperv_bridge.rs` for why that skips the WSL2 virtual network stack entirely.
     pub fn open(windows_capture: Option<&str>) -> Result<Self> {
         if let Some(spec) = windows_capture.filter(|s| !s.is_empty() && *s != "0" && *s != "false") {
+            #[cfg(target_os = "linux")]
+            if let Some(port) = spec.strip_prefix("hyperv:") {
+                let port: u32 = port
+                    .parse()
+                    .with_context(|| format!("bad hyperv port {port:?} (expected a number)"))?;
+                info_log(&format!("Windows desktop capture over Hyper-V socket (port {port})"));
+                return Ok(Self::HyperV(HyperVBridge::connect(port)?));
+            }
             let bind = resolve_listen_addr(spec)?;
             info_log(&format!("Windows desktop capture listening on {bind}"));
             return Ok(Self::Windows(WindowsBridge::listen(&bind)?));
@@ -33,6 +49,8 @@ impl FrameCapture {
         match self {
             Self::Local(c) => c.width,
             Self::Windows(c) => c.width,
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.width,
         }
     }
 
@@ -40,6 +58,8 @@ impl FrameCapture {
         match self {
             Self::Local(c) => c.height,
             Self::Windows(c) => c.height,
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.height,
         }
     }
 
@@ -47,6 +67,8 @@ impl FrameCapture {
         match self {
             Self::Local(c) => Ok(c.capture_bgra()?.map(Captured::Bgra)),
             Self::Windows(c) => c.capture(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.capture(),
         }
     }
 
@@ -55,28 +77,39 @@ impl FrameCapture {
         match self {
             Self::Local(_) => false,
             Self::Windows(c) => c.format() == FrameFormat::H264,
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.format() == FrameFormat::H264,
         }
     }
 
     /// Ask the source for a keyframe. Only meaningful when pre-encoded.
     pub fn request_idr(&mut self) {
-        if let Self::Windows(c) = self {
-            c.request_idr();
+        match self {
+            Self::Windows(c) => c.request_idr(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.request_idr(),
+            Self::Local(_) => {}
         }
     }
 
     /// Command the Windows encoder to match the stream target. No-op on the local
     /// path, where the host's own encoder already uses the preset directly.
     pub fn set_target(&mut self, target: EncodeTarget) {
-        if let Self::Windows(c) = self {
-            c.set_target(target);
+        match self {
+            Self::Windows(c) => c.set_target(target),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.set_target(target),
+            Self::Local(_) => {}
         }
     }
 
     /// Discard anything already buffered so the stream starts from *now*.
     pub fn resync(&mut self) {
-        if let Self::Windows(c) = self {
-            c.resync();
+        match self {
+            Self::Windows(c) => c.resync(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.resync(),
+            Self::Local(_) => {}
         }
     }
 
@@ -86,6 +119,8 @@ impl FrameCapture {
         match self {
             Self::Local(_) => 0,
             Self::Windows(c) => c.take_received(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.take_received(),
         }
     }
 }

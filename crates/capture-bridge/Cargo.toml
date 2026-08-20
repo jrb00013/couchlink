@@ -32,4 +32,6 @@ windows = { version = "0.62", features = [
     "Win32_System_Console",
     "Win32_System_Variant",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Networking_WinSock",
+    "Win32_System_Hypervisor",
 ] }

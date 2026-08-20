@@ -660,8 +660,7 @@ mod run {
     /// sees a `T`, which is fine: the host writes a command in one `write_all`,
     /// so a partial `T` payload only happens on a torn socket, which is broken
     /// anyway. Anything else means the link died.
-    fn watch_commands(mut reader: TcpStream) {
-        use std::io::Read;
+    fn watch_commands(mut reader: impl std::io::Read) {
         let mut byte = [0u8; 1];
         loop {
             match reader.read(&mut byte) {
@@ -690,6 +689,16 @@ mod run {
     }
 
     fn spawn_tcp_writer(connect: String, rx: mpsc::Receiver<FrameMsg>) {
+        // `hyperv:<port>` skips TCP (and the whole WSL2 virtual switch/NAT hop)
+        // in favour of a Hyper-V socket — see `couchlink_capture_bridge::hyperv`.
+        if let Some(port) = connect.strip_prefix("hyperv:") {
+            let Ok(port) = port.parse::<u32>() else {
+                warn!("bad hyperv port {port:?} (expected a number) — falling back to TCP semantics won't apply, exiting writer");
+                return;
+            };
+            spawn_hyperv_writer(port, rx);
+            return;
+        }
         std::thread::spawn(move || loop {
             match TcpStream::connect(&connect) {
                 Ok(stream) => {
@@ -713,6 +722,43 @@ mod run {
                 Err(e) => {
                     tracing::debug!("connect {connect}: {e}");
                     std::thread::sleep(Duration::from_millis(750));
+                }
+            }
+        });
+    }
+
+    /// Listens on a Hyper-V socket and serves whichever WSL2 host connects.
+    /// One listener, re-accepted forever, mirroring the TCP writer's own
+    /// reconnect-and-keep-serving behaviour.
+    fn spawn_hyperv_writer(port: u32, rx: mpsc::Receiver<FrameMsg>) {
+        use couchlink_capture_bridge::hyperv::HvListener;
+        std::thread::spawn(move || {
+            let listener = match HvListener::bind(port) {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("could not bind Hyper-V socket on port {port}: {e:#}");
+                    return;
+                }
+            };
+            loop {
+                match listener.accept() {
+                    Ok(mut stream) => {
+                        info!("Hyper-V socket: WSL2 host connected");
+                        let reader = stream.try_clone();
+                        std::thread::spawn(move || watch_commands(reader));
+                        while let Ok((w, h, payload, format, keyframe)) = rx.recv() {
+                            if let Err(e) =
+                                write_frame_with_format(&mut stream, w, h, format, keyframe, &payload)
+                            {
+                                warn!("send frame over Hyper-V socket failed: {e:#} — reconnecting");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Hyper-V socket accept failed: {e:#}");
+                        std::thread::sleep(Duration::from_millis(750));
+                    }
                 }
             }
         });
