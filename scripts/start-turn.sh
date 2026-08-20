@@ -107,18 +107,35 @@ fi
 # not listening, gathered no `typ relay` candidate, and failed ICE. Naming an
 # address we do not bind is the whole bug class; bind it explicitly.
 #
+# This restriction used to be gated on "external IP looks like IPv6", which
+# meant the IPv4 case (the common one) got none of it: coturn fell back to
+# its listen-on-everything default and bound all 16 addresses this machine
+# had, 12 of them unrelated Docker bridge networks (172.17-172.29.0.1) that
+# have nothing to do with the actual WAN path. That is a real, live-observed
+# cause of flaky/misrouted TURN allocate responses — a request answered from
+# the wrong local interface looks like a malformed response to the client.
+# Fixed 2026-08-20: always restrict, not just for IPv6.
+#
 # Listing any listening-ip disables coturn's listen-on-everything default, so
 # loopback and the LAN IPv4 have to be named too or the direct path breaks.
+#
+# This is passed as `-L` CLI args below, not as `listening-ip=` lines in the
+# config file: live-tested 2026-08-20 on this exact coturn build
+# (Coturn-4.6.1 'Gorst') and `listening-ip=` in the -c file was silently a
+# no-op — verified with -v, the address-discovery banner still enumerated
+# all 16 local addresses regardless of what the file said. The identical
+# restriction passed as `-L addr` on the command line worked immediately
+# (confirmed: exactly the given addresses, no discovery banner at all). The
+# config file keeps carrying every other setting (realm/credentials/etc);
+# only listening-ip needed the CLI-flag path.
+LISTEN_ARGS=(-L 127.0.0.1)
+lan4="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}')"
+[[ -n "$lan4" ]] && LISTEN_ARGS+=(-L "$lan4")
 if [[ "$TURN_EXTERNAL_IP" == *:* ]] && ip -6 addr show scope global 2>/dev/null \
      | grep -qiF "$TURN_EXTERNAL_IP"; then
-  {
-    echo "listening-ip=$TURN_EXTERNAL_IP"
-    echo "listening-ip=127.0.0.1"
-    lan4="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}')"
-    [[ -n "$lan4" ]] && echo "listening-ip=$lan4"
-  } >> "$RUNTIME_CONF"
-  echo "==> TURN binding $TURN_EXTERNAL_IP (advertised address)"
+  LISTEN_ARGS+=(-L "$TURN_EXTERNAL_IP")
 fi
+echo "==> TURN binding restricted to loopback + LAN (advertising $TURN_EXTERNAL_IP)"
 
 # Best-effort only — Windows prep / manual forward if the router blocks UPnP.
 if [[ "${COUCHLINK_SKIP_UPNP:-}" != "1" ]]; then
@@ -134,7 +151,7 @@ fi
 TURN_LOG="${COUCHLINK_TURN_LOG:-$ROOT/.run/turnserver.log}"
 mkdir -p "$(dirname "$TURN_LOG")" 2>/dev/null || true
 if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
-  exec turnserver -n -c "$RUNTIME_CONF"
+  exec turnserver -n -c "$RUNTIME_CONF" "${LISTEN_ARGS[@]}"
 fi
 # Quiet default: stash the banner / STUN dump; keep process in foreground.
-exec turnserver -n -c "$RUNTIME_CONF" >>"$TURN_LOG" 2>&1
+exec turnserver -n -c "$RUNTIME_CONF" "${LISTEN_ARGS[@]}" >>"$TURN_LOG" 2>&1
