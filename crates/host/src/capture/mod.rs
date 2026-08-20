@@ -79,6 +79,15 @@ impl FrameCapture {
             c.resync();
         }
     }
+
+    /// Frames received since the last call. Always 0 on the local path, which
+    /// has no socket hop to lose frames over.
+    pub fn take_received(&mut self) -> u64 {
+        match self {
+            Self::Local(_) => 0,
+            Self::Windows(c) => c.take_received(),
+        }
+    }
 }
 
 fn info_log(msg: &str) {

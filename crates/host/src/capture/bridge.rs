@@ -57,6 +57,11 @@ pub struct WindowsBridge {
     /// reconnecting client is re-told immediately; a fresh win-capture process
     /// starts from its CLI defaults until this reaches it.
     target: Option<EncodeTarget>,
+    /// Frames that finished `read_frame` successfully, regardless of whether the
+    /// relay stage later drops them. Compared against the win-capture side's own
+    /// "encoded" count, this pinpoints whether loss happens before or after the
+    /// Windows→WSL socket — see `docs/OPTIMIZATION_PLAN.md` step 1.
+    frames_received: u64,
 }
 
 impl WindowsBridge {
@@ -85,6 +90,7 @@ impl WindowsBridge {
             format: FrameFormat::Bgra,
             keyframe: false,
             target: None,
+            frames_received: 0,
         };
         bridge.read_one()?;
         Ok(bridge)
@@ -195,7 +201,15 @@ impl WindowsBridge {
             // A stale frame at the old size would be misread at the new size.
             self.last = None;
         }
+        self.frames_received += 1;
         Ok(Some(info))
+    }
+
+    /// Drain the received-frame counter since the last call. Pair with
+    /// win-capture's own "encoded" log to see whether frames are lost before
+    /// or after the Windows→WSL socket.
+    pub fn take_received(&mut self) -> u64 {
+        std::mem::take(&mut self.frames_received)
     }
 
     /// Read the next frame.

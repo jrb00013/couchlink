@@ -857,8 +857,10 @@ async fn main() -> Result<()> {
                                             decided.bitrate_kbps, drop_pct
                                         );
                                     }
+                                    let received = capturer.take_received();
                                     eprintln!(
                                         "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
+                                         | received {received} from win-capture, pushed {window_frames} \
                                          | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",
                                         if dropped_frames == 0 {
                                             "link keeping up".to_string()
