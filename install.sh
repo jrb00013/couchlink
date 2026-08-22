@@ -12,6 +12,74 @@ UNBLOCK_FIREWALL=0
 # Default = friend/player. Gaming PC uses --host.
 INSTALL_ROLE="${COUCHLINK_INSTALL_ROLE:-client}"
 INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
+
+# Bare `./install.sh` with no flags on an interactive terminal: walk through
+# the same choices as an argument in a small wizard instead of silently
+# defaulting to "client / local / build only". Any flag at all (including
+# -h) skips this and goes straight to the flag-driven path above/below.
+if [[ $# -eq 0 && -t 0 && -t 1 ]]; then
+  BOLD=""; DIM=""; CYAN=""; GREEN=""; RESET=""
+  if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
+    BOLD="$(tput bold)"; DIM="$(tput dim)"; CYAN="$(tput setaf 6)"; GREEN="$(tput setaf 2)"; RESET="$(tput sgr0)"
+  fi
+
+  couchlink_ask() {
+    # couchlink_ask "Question" "1) label" "2) label" ... -> sets REPLY_IDX (1-based)
+    local question="$1"; shift
+    echo
+    echo "${BOLD}${CYAN}${question}${RESET}"
+    local i=1 opt
+    for opt in "$@"; do
+      echo "  ${GREEN}${i})${RESET} ${opt}"
+      i=$((i + 1))
+    done
+    local n=$#
+    local choice
+    while true; do
+      read -r -p "  ${DIM}choice [1-${n}, default 1]:${RESET} " choice
+      choice="${choice:-1}"
+      if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+        REPLY_IDX="$choice"
+        return 0
+      fi
+      echo "  please enter a number between 1 and ${n}"
+    done
+  }
+
+  echo "${BOLD}== couchlink setup ==${RESET}"
+  echo "${DIM}(pass any flag, e.g. --help, to skip this wizard)${RESET}"
+
+  # 1) Role first — it decides what gets built (host needs coturn/uinput/UI).
+  couchlink_ask "Is this device the host (the gaming PC) or a client (a friend / player)?" \
+    "Host — this PC shares its screen/input" \
+    "Client — this PC connects to a friend's host"
+  [[ "$REPLY_IDX" == "1" ]] && INSTALL_ROLE="host" || INSTALL_ROLE="client"
+
+  # 2) Network mode next — same LAN, or over the internet (mesh/TURN/etc).
+  couchlink_ask "Will you play on the same network (local) or over the internet (online)?" \
+    "Local — same Wi-Fi / LAN" \
+    "Online — over the internet (mesh + TURN fallback)"
+  [[ "$REPLY_IDX" == "1" ]] && RUN_MODE="local" || RUN_MODE="online"
+
+  # 3) Firewall unblock only makes sense for online mode.
+  if [[ "$RUN_MODE" == "online" ]]; then
+    couchlink_ask "Open the local OS firewall for mesh/TURN now?" \
+      "No — leave firewall as-is" \
+      "Yes — unblock (may prompt for admin/UAC)"
+    [[ "$REPLY_IDX" == "2" ]] && UNBLOCK_FIREWALL=1
+  fi
+
+  # 4) Start couchlink immediately after install finishes?
+  couchlink_ask "Start couchlink right after install finishes?" \
+    "Yes — install then run" \
+    "No — just install, I'll run it myself later"
+  [[ "$REPLY_IDX" == "1" ]] && RUN_AFTER=1
+
+  echo
+  echo "${BOLD}==> ${INSTALL_ROLE} / ${RUN_MODE}$( [[ "$RUN_AFTER" == "1" ]] && echo " / run after install" )$( [[ "$UNBLOCK_FIREWALL" == "1" ]] && echo " / unblock firewall" )${RESET}"
+  echo
+fi
+
 for arg in "$@"; do
   case "$arg" in
     --run) RUN_AFTER=1 ;;
