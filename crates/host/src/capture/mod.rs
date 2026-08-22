@@ -158,6 +158,25 @@ pub(crate) fn respawn_windows_capture() {
     if let Err(e) = std::process::Command::new("bash")
         .arg(&script)
         .current_dir(&root)
+        // `ensure-win-capture.sh` defaults to the interactive picker, which
+        // `run.sh` launches with `WindowStyle Normal` specifically so it can
+        // steal focus and be clicked (see AllowSetForegroundWindow in
+        // win_capture.rs). That is correct for the user-driven first launch,
+        // but this is an unattended mid-session respawn — re-popping a
+        // foreground picker dialog here yanks focus off the game (and the
+        // remote player's controller input with it, since XInput delivery
+        // depends on whichever window currently has it) for no reason: there
+        // is nothing to click, nobody watching for it, and it just steals
+        // focus until it times out or falls back on its own. Force a
+        // non-interactive capture source instead, unless the caller already
+        // pinned a specific one.
+        .env(
+            "COUCHLINK_CAPTURE_SOURCE",
+            std::env::var("COUCHLINK_CAPTURE_SOURCE")
+                .ok()
+                .filter(|s| s != "picker" && !s.is_empty())
+                .unwrap_or_else(|| "desktop".to_string()),
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

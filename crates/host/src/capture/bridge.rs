@@ -26,6 +26,13 @@ const RESPAWN_AFTER: Duration = Duration::from_secs(5);
 const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// Once a frame has started, the rest is already in flight — allow plenty of time.
 const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// A hung (not crashed/disconnected) win-capture never trips `Err` from
+/// `read_frame` — the socket stays open, `latest_frame` just keeps returning
+/// `Ok(false)` forever because nothing new ever arrives. That silently starves
+/// `maybe_respawn`, which only fires off a real socket error. This is the
+/// second trigger: if no frame has landed in this long while the socket is
+/// still nominally connected, treat it exactly like a disconnect.
+const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
 
 /// A socket read timeout surfaces as `WouldBlock` (EAGAIN) on Unix and `TimedOut`
 /// on Windows. Both mean "no data yet", not "connection broken".
@@ -73,6 +80,9 @@ pub struct WindowsBridge {
     disconnected_at: Option<Instant>,
     /// When we last asked `ensure-win-capture.sh` to relaunch it.
     last_respawn: Option<Instant>,
+    /// When the last frame (of any kind, including a stale-frame no-op) was
+    /// actually pulled off the socket. Drives `FRAME_STALE_AFTER`.
+    last_frame_at: Instant,
 }
 
 impl WindowsBridge {
@@ -104,6 +114,7 @@ impl WindowsBridge {
             frames_received: 0,
             disconnected_at: None,
             last_respawn: None,
+            last_frame_at: Instant::now(),
         };
         bridge.read_one()?;
         Ok(bridge)
@@ -295,6 +306,7 @@ impl WindowsBridge {
         if self.stream.is_none() {
             if self.try_reconnect() {
                 self.disconnected_at = None;
+                self.last_frame_at = Instant::now();
             } else {
                 self.maybe_respawn();
             }
@@ -302,6 +314,7 @@ impl WindowsBridge {
         }
         match self.latest_frame() {
             Ok(true) => {
+                self.last_frame_at = Instant::now();
                 // One copy, not two. At 720p each clone is 3.3MB and this runs on
                 // every frame; the old code cloned once for `last` and again for the
                 // caller.
@@ -315,7 +328,24 @@ impl WindowsBridge {
                 self.last = Some(frame.clone());
                 Ok(Some(Captured::Bgra(frame)))
             }
-            Ok(false) => Ok(self.stale_frame()),
+            Ok(false) => {
+                // Socket is still open and read cleanly returned "nothing yet" —
+                // no error, so the old code never noticed a win-capture that has
+                // hung (GPU/driver stall, deadlocked message pump, ...) rather
+                // than crashed or disconnected. Route a long silence through the
+                // same respawn path a real disconnect uses.
+                if self.last_frame_at.elapsed() >= FRAME_STALE_AFTER {
+                    tracing::warn!(
+                        "no frame from win-capture in {:?} (socket still open — \
+                         likely hung, not disconnected) — treating as dead",
+                        self.last_frame_at.elapsed()
+                    );
+                    self.stream = None;
+                    self.disconnected_at.get_or_insert_with(Instant::now);
+                    self.maybe_respawn();
+                }
+                Ok(self.stale_frame())
+            }
             // A dead client must not kill the session: keep showing the last frame
             // and wait for win-capture to come back.
             Err(e) => {

@@ -43,6 +43,11 @@ const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// See `bridge::RESPAWN_AFTER` / `docs/INCIDENT-2026-08-19-terminals-died.md`.
 const RESPAWN_AFTER: Duration = Duration::from_secs(5);
 const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
+/// See `bridge::FRAME_STALE_AFTER` — same fix, same reasoning, over vsock
+/// instead of TCP: a hung win-capture never errors this side's read, it just
+/// stops sending, so `maybe_respawn` needs a second trigger besides a socket
+/// error.
+const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
 
 fn is_timeout(e: &std::io::Error) -> bool {
     matches!(
@@ -65,6 +70,7 @@ pub struct HyperVBridge {
     frames_received: u64,
     disconnected_at: Option<Instant>,
     last_respawn: Option<Instant>,
+    last_frame_at: Instant,
 }
 
 impl HyperVBridge {
@@ -100,6 +106,7 @@ impl HyperVBridge {
             frames_received: 0,
             disconnected_at: None,
             last_respawn: None,
+            last_frame_at: Instant::now(),
         };
         bridge.read_one()?;
         Ok(bridge)
@@ -143,16 +150,14 @@ impl HyperVBridge {
     }
 
     fn read_frame(&mut self, poll: Duration) -> Result<Option<FrameInfo>> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(stream) = self.stream.as_ref() else {
             return Ok(None);
         };
-        stream
-            .set_read_timeout(Some(poll))
-            .context("set vsock read timeout")?;
         let mut magic = [0u8; 4];
         let mut got = 0;
+        let mut deadline = DeadlineRead::new(stream, poll);
         while got < 4 {
-            match stream.read(&mut magic[got..]) {
+            match deadline.read(&mut magic[got..]) {
                 Ok(0) => bail!("win-capture disconnected"),
                 Ok(n) => got += n,
                 Err(ref e) if is_timeout(e) && got == 0 => return Ok(None),
@@ -162,10 +167,8 @@ impl HyperVBridge {
         if &magic != FRAME_MAGIC {
             bail!("bad frame magic {magic:?} — capture stream desynchronized");
         }
-        stream
-            .set_read_timeout(Some(FRAME_BODY_TIMEOUT))
-            .context("set vsock read timeout")?;
-        let info = read_frame_body_sync(stream, &mut self.buf)?;
+        let mut deadline = DeadlineRead::new(stream, FRAME_BODY_TIMEOUT);
+        let info = read_frame_body_sync(&mut deadline, &mut self.buf)?;
         if self.format != info.format {
             self.format = info.format;
             self.last = None;
@@ -224,6 +227,7 @@ impl HyperVBridge {
         if self.stream.is_none() {
             if self.try_reconnect() {
                 self.disconnected_at = None;
+                self.last_frame_at = Instant::now();
             } else {
                 self.maybe_respawn();
             }
@@ -231,6 +235,7 @@ impl HyperVBridge {
         }
         match self.latest_frame() {
             Ok(true) => {
+                self.last_frame_at = Instant::now();
                 let frame = std::mem::take(&mut self.buf);
                 if self.format == FrameFormat::H264 {
                     return Ok(Some(Captured::H264 {
@@ -241,7 +246,23 @@ impl HyperVBridge {
                 self.last = Some(frame.clone());
                 Ok(Some(Captured::Bgra(frame)))
             }
-            Ok(false) => Ok(self.stale_frame()),
+            Ok(false) => {
+                // See `bridge.rs`'s identical check: a hung (not disconnected)
+                // win-capture leaves the vsock stream open and just stops
+                // sending, so no read error is ever raised to trip
+                // `maybe_respawn` on its own.
+                if self.last_frame_at.elapsed() >= FRAME_STALE_AFTER {
+                    tracing::warn!(
+                        "no frame from win-capture in {:?} (Hyper-V socket still open — \
+                         likely hung, not disconnected) — treating as dead",
+                        self.last_frame_at.elapsed()
+                    );
+                    self.stream = None;
+                    self.disconnected_at.get_or_insert_with(Instant::now);
+                    self.maybe_respawn();
+                }
+                Ok(self.stale_frame())
+            }
             Err(e) => {
                 tracing::warn!("Hyper-V capture link lost ({e:#}) — waiting for reconnect");
                 self.stream = None;
@@ -279,8 +300,62 @@ impl HyperVBridge {
 }
 
 fn configure(stream: &VsockStream) -> Result<()> {
+    // Belt-and-suspenders: harmless if honored, but on this kernel's AF_VSOCK
+    // transport it silently is not — see `DeadlineRead` below for the real
+    // fix. Keep it in case a future kernel/host actually implements it.
     stream
         .set_read_timeout(Some(FRAME_BODY_TIMEOUT))
         .context("set vsock read timeout")?;
+    stream
+        .set_nonblocking(true)
+        .context("set vsock non-blocking")?;
     Ok(())
+}
+
+/// `VsockStream::set_read_timeout` sets `SO_RCVTIMEO`, which WSL2's vsock
+/// transport (hv_sock/virtio-vsock) does not honor: the setsockopt call
+/// succeeds, but a subsequent blocking `recv()` still waits forever for data
+/// that may never arrive if win-capture hangs on the Windows side. That
+/// wedges this read indefinitely — and because capture runs inline on the
+/// host's single event loop (not on a separate task), one stuck read freezes
+/// everything else too, including processing a player's join. Root-caused
+/// live: a hung-but-still-connected win-capture left this thread parked in
+/// `vsock_connectible_wait_data` for minutes with no timeout ever firing.
+///
+/// The fix: put the socket in non-blocking mode (`configure` above) and
+/// reimplement the timeout ourselves in userspace by polling with a real
+/// wall-clock deadline, exactly the semantics `read_exact` (used by
+/// `read_frame_body_sync`) needs from its underlying `Read` impl.
+struct DeadlineRead<'a> {
+    stream: &'a VsockStream,
+    deadline: Instant,
+}
+
+impl<'a> DeadlineRead<'a> {
+    fn new(stream: &'a VsockStream, timeout: Duration) -> Self {
+        Self {
+            stream,
+            deadline: Instant::now() + timeout,
+        }
+    }
+}
+
+impl std::io::Read for DeadlineRead<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match (&*self.stream).read(buf) {
+                Ok(n) => return Ok(n),
+                Err(e) if is_timeout(&e) => {
+                    if Instant::now() >= self.deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "vsock read deadline exceeded (userspace timeout — SO_RCVTIMEO is not honored on this transport)",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
