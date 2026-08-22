@@ -12,7 +12,9 @@ import { ControllerViz, useLivePads } from "./ControllerViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
-import { KeyboardMouseInput, KEYBIND_LIST } from "./keyboardMouse";
+import { KeyboardMouseInput } from "./keyboardMouse";
+import { KeybindsModal } from "./KeybindsModal";
+import { loadKbmBinds, type KbmBinds } from "./kbmBinds";
 import { detectMobile } from "./mobile";
 import { TouchGamepadInput } from "./touchPad";
 import { TouchOverlay } from "./TouchOverlay";
@@ -103,6 +105,7 @@ export default function App() {
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
   const [keybindsOpen, setKeybindsOpen] = useState(false);
+  const [kbmBinds, setKbmBinds] = useState<KbmBinds>(() => loadKbmBinds());
   const [pointerLocked, setPointerLocked] = useState(false);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
   const [isMobile, setIsMobile] = useState(() => detectMobile());
@@ -456,7 +459,10 @@ export default function App() {
   useEffect(() => {
     const canvas = canvasRef.current ?? stageRef.current ?? undefined;
     if (kbmActive) {
-      const kbm = new KeyboardMouseInput({ lockTarget: canvas ?? null });
+      const kbm = new KeyboardMouseInput({
+        lockTarget: canvas ?? null,
+        binds: kbmBinds,
+      });
       kbmRef.current = kbm;
       kbm.start();
       playerRef.current?.setKbm(kbm);
@@ -475,6 +481,10 @@ export default function App() {
       playerRef.current?.setKbm(null);
     }
   }, [kbmActive]);
+
+  useEffect(() => {
+    kbmRef.current?.setBinds(kbmBinds);
+  }, [kbmBinds]);
 
   // Re-detect mobile on resize/orientation so the layout follows the device.
   useEffect(() => {
@@ -506,7 +516,12 @@ export default function App() {
   }, [isMobile]);
 
   const connected = state === "connected" || state === "negotiating";
-  const livePads = useLivePads(true);
+  const livePads = useLivePads(connected && !isMobile);
+  const hasPhysicalPad = livePads.length > 0;
+
+  useEffect(() => {
+    setKbmActive(!hasPhysicalPad && !isMobile);
+  }, [hasPhysicalPad, isMobile]);
 
   const applyPastedLink = () => {
     try {
@@ -680,86 +695,46 @@ export default function App() {
 
         {connected && !isMobile && (
           <section className="pads" aria-live="polite">
-            <div className="pads-head">
-              <span className="pads-count">
-                {1 + livePads.length} controller{1 + livePads.length === 1 ? "" : "s"}
-              </span>
-              <span className="pads-hint">host owns P1 · friend pads land on P2–P4</span>
-            </div>
-            <div className="pads-viz">
-              <ControllerViz
-                key="host-p1"
-                pad={{
-                  index: 0,
-                  id: "host",
-                  label: "Host",
-                  kind: "dualsense",
-                  buttons: [],
-                  axes: [],
-                  l2: 0,
-                  r2: 0,
-                }}
-                active={livePads.length === 0}
-              />
-              {livePads.map((pad, i) => (
-                <ControllerViz
-                  key={`${pad.index}-${pad.id}`}
-                  pad={{ ...pad, index: pad.index + 1 }}
-                  active={livePads.length === 0 ? false : i === 0}
-                />
-              ))}
-            </div>
-            {livePads.length === 0 && (
+            {hasPhysicalPad ? (
+              <>
+                <div className="pads-head">
+                  <span className="pads-count">your controller</span>
+                  <span className="pads-hint">this browser — not the other seats</span>
+                </div>
+                <div className="pads-viz">
+                  <ControllerViz
+                    key={`${livePads[0].index}-${livePads[0].id}`}
+                    pad={livePads[0]}
+                    active
+                  />
+                </div>
+              </>
+            ) : (
               <div className="kbm-row">
+                <span className="kbm-hint">
+                  {pointerLocked
+                    ? "🔒 mouse locked — Esc to release"
+                    : "keyboard + mouse · click stream to lock look"}
+                </span>
                 <button
                   type="button"
-                  className={`kbm-toggle ${kbmActive ? "is-active" : ""}`}
-                  onClick={() => setKbmActive((v) => !v)}
+                  className="kbm-keybinds-btn"
+                  onClick={() => setKeybindsOpen(true)}
                 >
-                  {kbmActive ? "⌨ keyboard+mouse ON" : "⌨ use keyboard+mouse"}
+                  ⌨ keybinds
                 </button>
-                {kbmActive && (
-                  <span className="kbm-hint">
-                    {pointerLocked
-                      ? "🔒 mouse locked — Esc to release"
-                      : "click stream to lock mouse · WASD=move · LMB=R2 · RMB=L2 · Space=✕ · E=△ · Q=□ · F=○"}
-                  </span>
-                )}
-                {kbmActive && (
-                  <button
-                    type="button"
-                    className="kbm-keybinds-btn"
-                    onClick={() => setKeybindsOpen(true)}
-                  >
-                    ⌨ keybinds
-                  </button>
-                )}
               </div>
             )}
           </section>
         )}
       </div>
 
-      {keybindsOpen && (
-        <div className="modal-backdrop" onClick={() => setKeybindsOpen(false)}>
-          <div className="modal keybinds-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-head">
-              <h2>Keyboard + Mouse keybinds</h2>
-              <button type="button" className="modal-close" onClick={() => setKeybindsOpen(false)} aria-label="Close">
-                ✕
-              </button>
-            </div>
-            <p className="modal-hint">Fixed layout for now — not remappable yet.</p>
-            <div className="keybinds-list">
-              {KEYBIND_LIST.map((b) => (
-                <div key={b.key} className="keybinds-row">
-                  <span className="keybinds-key">{b.key}</span>
-                  <span className="keybinds-action">{b.action}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+      {keybindsOpen && !hasPhysicalPad && (
+        <KeybindsModal
+          binds={kbmBinds}
+          onChange={setKbmBinds}
+          onClose={() => setKeybindsOpen(false)}
+        />
       )}
 
       <DebugDrawer

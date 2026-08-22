@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { KeyboardMouseInput } from "./keyboardMouse";
+import { BTN } from "./clpd";
+import { DEFAULT_KBM_BINDS, setBind } from "./kbmBinds";
 
 /**
  * No jsdom dependency in this project — fake just enough DOM surface
@@ -81,6 +83,17 @@ describe("KeyboardMouseInput", () => {
     const state = kbm.sample(1);
     expect(state.ly).toBe(128);
     expect(state.buttons).toBe(0);
+  });
+
+  it("uses remapped binds so a custom jump key fires Cross", () => {
+    kbm.setBinds(setBind(DEFAULT_KBM_BINDS, "cross", "KeyZ"));
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyZ"));
+    const state = kbm.sample(1);
+    expect(state.buttons & BTN.CROSS).toBe(BTN.CROSS);
+    (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyZ"));
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "Space"));
+    const after = kbm.sample(2);
+    expect(after.buttons & BTN.CROSS).toBe(0);
   });
 
   it("clears held keys when the tab is hidden", () => {

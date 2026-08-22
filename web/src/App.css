@@ -827,6 +827,26 @@ button.ghost {
   font-size: 0.85rem;
 }
 
+.keybinds-row.is-button {
+  width: 100%;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: inherit;
+  font: inherit;
+}
+
+.keybinds-row.is-button:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.keybinds-row.is-capturing .keybinds-key {
+  color: #f0c14b;
+}
+
 .keybinds-key {
   color: var(--accent, #4a9eff);
   font-weight: 600;

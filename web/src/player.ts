@@ -1,5 +1,6 @@
 import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
 import { KeyboardMouseInput } from "./keyboardMouse";
+import { controllerKind, selectPhysicalGamepads } from "./controllerKind";
 import { TouchGamepadInput } from "./touchPad";
 import {
   ClvdAssembler,
@@ -8,7 +9,6 @@ import {
   VIDEO_CHANNEL,
   type VideoAccessUnit,
 } from "./clvd";
-import { controllerKind } from "./controllerKind";
 import { clog, cerror, cwarn } from "./log";
 import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
@@ -888,13 +888,10 @@ export class CouchlinkPlayer {
   private pollAndSendPad() {
     if (this.padDc?.readyState !== "open") return;
     const pads = navigator.getGamepads?.() ?? [];
-    let gp: Gamepad | null = null;
-    for (const p of pads) {
-      if (p) {
-        gp = p;
-        break;
-      }
-    }
+    const physical = selectPhysicalGamepads(
+      [...pads].filter((p): p is Gamepad => !!p)
+    );
+    const gp = physical[0] ?? null;
     if (!gp) {
       // No gamepad — fall back to the touch controller (mobile), else
       // keyboard/mouse.

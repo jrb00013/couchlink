@@ -1,54 +1,25 @@
 /**
  * Keyboard + mouse → DualSense PadState emulation.
  *
- * Layout:
- *   WASD / Arrow keys  → Left stick
- *   Mouse move (pointer-locked) → Right stick
- *   Left click  → R2 (shoot / confirm)
- *   Right click → L2 (aim / alternate)
- *   Space  → Cross (jump)
- *   E      → Triangle (interact)
- *   Q      → Square (reload / alt)
- *   F      → Circle (cancel / dodge)
- *   R      → R1
- *   Shift  → L1
- *   C      → L3 (crouch)
- *   V      → R3 (melee)
- *   Tab    → Options
- *   G      → Create
- *   Middle click → L3 (sprint)
- *   Numpad/IJKL → D-Pad
+ * Bindings live in `kbmBinds` (localStorage). Mouse look is always
+ * pointer-lock movement → right stick; it is not a remappable key.
  */
 
 import { BTN, type PadState } from "./clpd";
-
-/** Structured mirror of the mapping above, for a UI to render — kept next to
- * `sample()` so the two can't quietly drift apart. Fixed layout, not
- * user-remappable yet; this is what a "keybinds" panel shows today. */
-export const KEYBIND_LIST: ReadonlyArray<{ key: string; action: string }> = [
-  { key: "W A S D / Arrows", action: "Move (left stick)" },
-  { key: "Mouse (click stream to lock)", action: "Look (right stick)" },
-  { key: "Left click", action: "R2 — shoot / confirm" },
-  { key: "Right click", action: "L2 — aim / alternate" },
-  { key: "Middle click / C", action: "L3 — sprint / crouch" },
-  { key: "Space", action: "✕ Cross — jump" },
-  { key: "E", action: "△ Triangle — interact" },
-  { key: "Q", action: "□ Square — reload / alt" },
-  { key: "F", action: "○ Circle — cancel / dodge" },
-  { key: "R", action: "R1" },
-  { key: "Shift", action: "L1" },
-  { key: "V", action: "R3 — melee" },
-  { key: "Tab", action: "Options" },
-  { key: "G", action: "Create" },
-  { key: "I J K L / Numpad 8 4 2 6", action: "D-Pad" },
-  { key: "Esc", action: "Release mouse lock" },
-];
+import {
+  DEFAULT_KBM_BINDS,
+  type KbmAction,
+  type KbmBinds,
+  type KbmCode,
+  cloneBinds,
+} from "./kbmBinds";
 
 export type KbmOptions = {
   /** Sensitivity scalar for mouse → right stick. Default 0.5. */
   mouseSensitivity?: number;
   /** Element to request pointer lock on (typically the canvas). */
   lockTarget?: HTMLElement | null;
+  binds?: KbmBinds;
 };
 
 export class KeyboardMouseInput {
@@ -59,10 +30,16 @@ export class KeyboardMouseInput {
   private sensitivity: number;
   private lockTarget: HTMLElement | null;
   private active = false;
+  private binds: KbmBinds;
 
   constructor(opts: KbmOptions = {}) {
     this.sensitivity = opts.mouseSensitivity ?? 0.5;
     this.lockTarget = opts.lockTarget ?? null;
+    this.binds = cloneBinds(opts.binds ?? DEFAULT_KBM_BINDS);
+  }
+
+  setBinds(binds: KbmBinds) {
+    this.binds = cloneBinds(binds);
   }
 
   setLockTarget(el: HTMLElement | null) {
@@ -114,17 +91,15 @@ export class KeyboardMouseInput {
 
   /** Sample current state into a PadState, consuming accumulated mouse delta. */
   sample(seq: number): PadState {
-    const k = this.keys;
+    const held = (action: KbmAction) => this.actionHeld(action);
 
-    // Left stick — WASD / Arrow keys (digital, full deflection)
-    const moveLeft  = k.has("KeyA") || k.has("ArrowLeft");
-    const moveRight = k.has("KeyD") || k.has("ArrowRight");
-    const moveUp    = k.has("KeyW") || k.has("ArrowUp");
-    const moveDown  = k.has("KeyS") || k.has("ArrowDown");
+    const moveLeft = held("moveLeft");
+    const moveRight = held("moveRight");
+    const moveUp = held("moveUp");
+    const moveDown = held("moveDown");
     const lx = moveLeft ? 0 : moveRight ? 255 : 128;
-    const ly = moveUp   ? 0 : moveDown  ? 255 : 128;
+    const ly = moveUp ? 0 : moveDown ? 255 : 128;
 
-    // Right stick — accumulated mouse delta, clamped to 0–255
     const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
     const scale = this.sensitivity * 128;
     const rx = clamp(128 + this.mouseDx * scale);
@@ -132,44 +107,64 @@ export class KeyboardMouseInput {
     this.mouseDx = 0;
     this.mouseDy = 0;
 
-    // Buttons
     let buttons = 0;
-    if (k.has("Space"))                         buttons |= BTN.CROSS;
-    if (k.has("KeyF"))                          buttons |= BTN.CIRCLE;
-    if (k.has("KeyQ"))                          buttons |= BTN.SQUARE;
-    if (k.has("KeyE"))                          buttons |= BTN.TRIANGLE;
-    if (k.has("ShiftLeft") || k.has("ShiftRight")) buttons |= BTN.L1;
-    if (k.has("KeyR"))                          buttons |= BTN.R1;
-    if (k.has("KeyC"))                          buttons |= BTN.L3;
-    if (k.has("KeyV"))                          buttons |= BTN.R3;
-    if (k.has("Tab"))                           buttons |= BTN.OPTIONS;
-    if (k.has("KeyG"))                          buttons |= BTN.CREATE;
-    if (k.has("Numpad8") || k.has("KeyI"))      buttons |= BTN.DPAD_UP;
-    if (k.has("Numpad2") || k.has("KeyK"))      buttons |= BTN.DPAD_DOWN;
-    if (k.has("Numpad4") || k.has("KeyJ"))      buttons |= BTN.DPAD_LEFT;
-    if (k.has("Numpad6") || k.has("KeyL"))      buttons |= BTN.DPAD_RIGHT;
+    if (held("cross")) buttons |= BTN.CROSS;
+    if (held("circle")) buttons |= BTN.CIRCLE;
+    if (held("square")) buttons |= BTN.SQUARE;
+    if (held("triangle")) buttons |= BTN.TRIANGLE;
+    if (held("l1")) buttons |= BTN.L1;
+    if (held("r1")) buttons |= BTN.R1;
+    if (held("l3")) buttons |= BTN.L3;
+    if (held("r3")) buttons |= BTN.R3;
+    if (held("options")) buttons |= BTN.OPTIONS;
+    if (held("create")) buttons |= BTN.CREATE;
+    if (held("dpadUp")) buttons |= BTN.DPAD_UP;
+    if (held("dpadDown")) buttons |= BTN.DPAD_DOWN;
+    if (held("dpadLeft")) buttons |= BTN.DPAD_LEFT;
+    if (held("dpadRight")) buttons |= BTN.DPAD_RIGHT;
 
-    // Mouse buttons → triggers
-    const leftBtn   = !!(this.mouseButtons & 1);
-    const middleBtn = !!(this.mouseButtons & 2);
-    const rightBtn  = !!(this.mouseButtons & 4);
-    if (leftBtn)   { buttons |= BTN.R2; }
-    if (rightBtn)  { buttons |= BTN.L2; }
-    if (middleBtn) { buttons |= BTN.L3; }
-    const r2 = leftBtn  ? 255 : 0;
-    const l2 = rightBtn ? 255 : 0;
+    const r2Held = held("r2");
+    const l2Held = held("l2");
+    if (r2Held) buttons |= BTN.R2;
+    if (l2Held) buttons |= BTN.L2;
 
-    return { seq, buttons, lx, ly, rx, ry, l2, r2 };
+    return {
+      seq,
+      buttons,
+      lx,
+      ly,
+      rx,
+      ry,
+      l2: l2Held ? 255 : 0,
+      r2: r2Held ? 255 : 0,
+    };
   }
 
   /** True while any key or mouse button is held, or unprocessed mouse motion exists. */
   hasInput(): boolean {
-    return this.keys.size > 0 || this.mouseButtons !== 0 ||
-           Math.abs(this.mouseDx) > 0.001 || Math.abs(this.mouseDy) > 0.001;
+    return (
+      this.keys.size > 0 ||
+      this.mouseButtons !== 0 ||
+      Math.abs(this.mouseDx) > 0.001 ||
+      Math.abs(this.mouseDy) > 0.001
+    );
   }
 
   isPointerLocked(): boolean {
     return !!document.pointerLockElement;
+  }
+
+  private actionHeld(action: KbmAction): boolean {
+    return (this.binds[action] ?? []).some((code) => this.codeHeld(code));
+  }
+
+  private codeHeld(code: KbmCode): boolean {
+    if (code.startsWith("Mouse")) {
+      const btn = Number(code.slice(5));
+      if (!Number.isFinite(btn) || btn < 0) return false;
+      return !!(this.mouseButtons & (1 << btn));
+    }
+    return this.keys.has(code);
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -187,7 +182,7 @@ export class KeyboardMouseInput {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    this.mouseButtons |= (1 << e.button);
+    this.mouseButtons |= 1 << e.button;
   };
 
   private onMouseUp = (e: MouseEvent) => {

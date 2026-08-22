@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { controllerKind, type ControllerKind } from "./controllerKind";
+import {
+  controllerKind,
+  selectPhysicalGamepads,
+  type ControllerKind,
+} from "./controllerKind";
 
 export type LivePad = {
   index: number;
@@ -31,7 +35,7 @@ function readLivePads(): LivePad[] {
       r2: p.buttons[7]?.value ?? 0,
     });
   }
-  return out;
+  return selectPhysicalGamepads(out);
 }
 
 /** Poll Gamepad API and return live pad snapshots (rAF). */
@@ -369,7 +373,7 @@ export function ControllerViz({ pad, active }: { pad: LivePad; active?: boolean 
     <figure className={`cv${active ? " is-active" : ""}`} title={pad.id}>
       <Body pad={pad} />
       <figcaption className="cv-cap">
-        <span className="cv-slot">P{pad.index + 1}</span>
+        <span className="cv-slot">your pad</span>
         <span className="cv-name">{pad.label}</span>
         {active && <span className="cv-active">active</span>}
       </figcaption>
