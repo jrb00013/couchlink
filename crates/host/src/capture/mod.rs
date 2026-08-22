@@ -177,6 +177,9 @@ pub(crate) fn respawn_windows_capture() {
                 .filter(|s| s != "picker" && !s.is_empty())
                 .unwrap_or_else(|| "desktop".to_string()),
         )
+        // Respawn is unattended — don't cargo-build on every 20s retry.
+        // That was opening a blue PowerShell even when the exe was already there.
+        .env("COUCHLINK_SKIP_WIN_CAPTURE_BUILD", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
