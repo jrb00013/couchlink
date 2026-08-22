@@ -5,11 +5,17 @@
 //! variant and DualSense / DualSense Edge / DualShock 4 product is accepted.
 
 use crate::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
+use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
+use crate::steam_controller::{
+    KNOWN_PIDS as STEAM_PIDS, PRODUCT_NAME as STEAM_NAME, VALVE_VID,
+};
+use crate::switch::{
+    KNOWN_PIDS as SWITCH_PIDS, NINTENDO_VID, label_for_pid as switch_label_for_pid,
+};
 use crate::xbox::{
     KNOWN_PIDS as XBOX_PIDS, MICROSOFT_VID, PID_XBOX_ELITE_2, PID_XBOX_ONE_S, PID_XBOX_ONE_S_BT,
     PID_XBOX_SERIES, PID_XBOX_SERIES_BT, PID_XBOX_WIRELESS, PRODUCT_NAME as XBOX_NAME,
 };
-use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 
 /// DualShock 4 (PS4) — recognized for native hidraw + web Standard Gamepad.
 pub const PID_DUALSHOCK4_V1: u16 = 0x05C4;
@@ -25,6 +31,10 @@ pub enum ControllerFamily {
     DualSense,
     /// PS4 DualShock 4 — native hidraw + web.
     DualShock4,
+    /// Nintendo Switch Pro Controller / Joy-Con.
+    Switch,
+    /// Valve Steam Controller (classic V1).
+    SteamController,
     Unknown,
 }
 
@@ -84,9 +94,22 @@ pub fn is_dualshock4(vid: u16, pid: u16) -> bool {
     vid == SONY_VID && DUALSHOCK4_PIDS.contains(&pid)
 }
 
-/// Native hidraw capture accept list (Xbox + DualSense / Edge + DualShock 4).
+pub fn is_supported_switch(vid: u16, pid: u16) -> bool {
+    vid == NINTENDO_VID && SWITCH_PIDS.contains(&pid)
+}
+
+pub fn is_supported_steam_controller(vid: u16, pid: u16) -> bool {
+    vid == VALVE_VID && STEAM_PIDS.contains(&pid)
+}
+
+/// Native hidraw capture accept list (Xbox + DualSense / Edge + DualShock 4 +
+/// Switch + Steam Controller).
 pub fn is_native_supported(vid: u16, pid: u16) -> bool {
-    is_supported_xbox(vid, pid) || is_supported_dualsense(vid, pid) || is_dualshock4(vid, pid)
+    is_supported_xbox(vid, pid)
+        || is_supported_dualsense(vid, pid)
+        || is_dualshock4(vid, pid)
+        || is_supported_switch(vid, pid)
+        || is_supported_steam_controller(vid, pid)
 }
 
 pub fn xbox_variant(pid: u16) -> Option<XboxVariant> {
@@ -100,6 +123,10 @@ pub fn classify(vid: u16, pid: u16) -> ControllerFamily {
         ControllerFamily::DualSense
     } else if is_dualshock4(vid, pid) {
         ControllerFamily::DualShock4
+    } else if is_supported_switch(vid, pid) {
+        ControllerFamily::Switch
+    } else if is_supported_steam_controller(vid, pid) {
+        ControllerFamily::SteamController
     } else {
         ControllerFamily::Unknown
     }
@@ -117,6 +144,8 @@ pub fn product_label(vid: u16, pid: u16) -> Option<&'static str> {
             }
         }
         ControllerFamily::DualShock4 => Some("DualShock 4"),
+        ControllerFamily::Switch => Some(switch_label_for_pid(pid)),
+        ControllerFamily::SteamController => Some(STEAM_NAME),
         ControllerFamily::Unknown => None,
     }
 }
@@ -180,6 +209,47 @@ mod tests {
         assert!(!is_supported_xbox(MICROSOFT_VID, 0x028E)); // Xbox 360
         assert!(!is_native_supported(SONY_VID, 0x0268)); // Sixaxis
         assert_eq!(classify(0x1234, 0x5678), ControllerFamily::Unknown);
+    }
+
+    #[test]
+    fn switch_controllers_are_recognized() {
+        use crate::switch::{NINTENDO_VID, PID_SWITCH_PRO};
+        for &pid in SWITCH_PIDS {
+            assert!(
+                is_supported_switch(NINTENDO_VID, pid),
+                "PID {pid:04X} must be recognized"
+            );
+            assert_eq!(
+                classify(NINTENDO_VID, pid),
+                ControllerFamily::Switch,
+                "PID {pid:04X}"
+            );
+            assert!(is_native_supported(NINTENDO_VID, pid));
+            assert!(product_label(NINTENDO_VID, pid).is_some());
+        }
+        assert_eq!(
+            product_label(NINTENDO_VID, PID_SWITCH_PRO),
+            Some(crate::switch::PRODUCT_NAME)
+        );
+    }
+
+    #[test]
+    fn steam_controllers_are_recognized() {
+        for &pid in STEAM_PIDS {
+            assert!(
+                is_supported_steam_controller(VALVE_VID, pid),
+                "PID {pid:04X} must be recognized"
+            );
+            assert_eq!(
+                classify(VALVE_VID, pid),
+                ControllerFamily::SteamController,
+                "PID {pid:04X}"
+            );
+            assert!(is_native_supported(VALVE_VID, pid));
+            assert_eq!(product_label(VALVE_VID, pid), Some(STEAM_NAME));
+        }
+        // Not a Steam Controller: the Valve Index HMD is a different VID family.
+        assert!(!is_supported_steam_controller(VALVE_VID, 0x2000));
     }
 
     #[test]

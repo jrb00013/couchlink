@@ -2,6 +2,8 @@ mod decode;
 mod dualsense_reader;
 mod feedback_apply;
 mod keyboard_input;
+mod steam_reader;
+mod switch_reader;
 mod xbox_reader;
 mod config_file;
 mod invite;
@@ -447,16 +449,35 @@ async fn async_main(
     } else {
         None
     };
-    if dualsense.is_some() {
-        info!("DualSense/DualShock 4 controller connected");
+    let mut switch = if args.send_pad {
+        switch_reader::SwitchReader::open_first().ok()
+    } else {
+        None
+    };
+    let mut steam = if args.send_pad {
+        steam_reader::SteamReader::open_first().ok()
+    } else {
+        None
+    };
+    let pad = if dualsense.is_some() {
+        "DualSense/DualShock 4 controller connected"
     } else if xbox.is_some() {
-        info!("Xbox controller connected");
+        "Xbox controller connected"
+    } else if switch.is_some() {
+        "Nintendo Switch controller connected"
+    } else if steam.is_some() {
+        "Steam Controller connected"
     } else if args.send_pad {
         if keyboard.is_some() {
-            info!("no DualSense/DS4/Xbox controller found — keyboard input is still available in windowed mode");
+            "no DualSense/Xbox/Switch/Steam controller found — keyboard input is still available in windowed mode"
         } else {
-            warn!("no DualSense/DS4/Xbox controller found and no keyboard available (headless mode) — no pad input will be sent");
+            "no DualSense/Xbox/Switch/Steam controller found and no keyboard available (headless mode) — no pad input will be sent"
         }
+    } else {
+        ""
+    };
+    if !pad.is_empty() {
+        info!("{pad}");
     }
 
     let mut feedback_rx = player.take_feedback_rx().await;
@@ -548,7 +569,23 @@ async fn async_main(
                 } else {
                     None
                 };
-                let frame = match ds_frame.or(xb_frame) {
+                let sw_frame = if ds_frame.is_none() && xb_frame.is_none() {
+                    match switch.as_mut() {
+                        Some(r) => r.read_frame().ok().flatten(),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let sc_frame = if ds_frame.is_none() && xb_frame.is_none() && sw_frame.is_none() {
+                    match steam.as_mut() {
+                        Some(r) => r.read_frame().ok().flatten(),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let frame = match ds_frame.or(xb_frame).or(sw_frame).or(sc_frame) {
                     Some(f) => Some(f),
                     None => keyboard.as_ref().and_then(|(kp, _)| {
                         let kp = kp.lock().unwrap();

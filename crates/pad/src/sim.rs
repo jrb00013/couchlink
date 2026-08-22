@@ -9,6 +9,8 @@ use couchlink_proto::PadFrame;
 
 use crate::dualsense::{INPUT_BT, INPUT_USB};
 use crate::parse::parse_input_report;
+use crate::parse_steam::{parse_steam_input_report, STEAM_REPORT_ID};
+use crate::parse_switch::{parse_switch_input_report, SWITCH_REPORT_ID};
 use crate::parse_xbox::{parse_xbox_input_report, XBOX_REPORT_ID};
 
 /// Which face / shoulder / system button to press in a simulated report.
@@ -182,6 +184,99 @@ pub fn dualsense_usb_with_sticks(lx: u8, ly: u8, rx: u8, ry: u8) -> Vec<u8> {
 /// Client-side: Xbox HID bytes → normalized `PadFrame`.
 pub fn simulate_xbox_frame(raw: &[u8]) -> Option<PadFrame> {
     parse_xbox_input_report(raw)
+}
+
+/// Neutral Switch standard-report (0x30) with both sticks centered at 0x800.
+pub fn switch_neutral_report() -> Vec<u8> {
+    let mut raw = vec![0u8; 49];
+    raw[0] = SWITCH_REPORT_ID;
+    for off in [6usize, 9] {
+        // pack 0x800 into the 3-byte group
+        raw[off] = 0x00;
+        raw[off + 1] = 0x08;
+        raw[off + 2] = 0x80;
+    }
+    raw
+}
+
+/// Press one Switch button on a neutral report. Triggers ZL/ZR latch their
+/// digital bits; sticks stay centered.
+pub fn switch_press(btn: SimButton) -> Vec<u8> {
+    let mut raw = switch_neutral_report();
+    match btn {
+        SimButton::Cross => raw[3] |= 0x08, // A (bottom)
+        SimButton::Circle => raw[3] |= 0x04, // B (right)
+        SimButton::Square => raw[3] |= 0x02, // X (left)
+        SimButton::Triangle => raw[3] |= 0x01, // Y (top)
+        SimButton::R1 => raw[3] |= 0x40, // R
+        SimButton::R2 => raw[3] |= 0x80, // ZR
+        SimButton::L1 => raw[5] |= 0x40, // L
+        SimButton::L2 => raw[5] |= 0x80, // ZL
+        SimButton::Create => raw[4] |= 0x01, // Minus
+        SimButton::Options => raw[4] |= 0x02, // Plus
+        SimButton::R3 => raw[4] |= 0x04, // RStick
+        SimButton::L3 => raw[4] |= 0x08, // LStick
+        SimButton::Ps => raw[4] |= 0x10, // Home
+        SimButton::DpadUp => raw[5] |= 0x02,
+        SimButton::DpadDown => raw[5] |= 0x01,
+        SimButton::DpadLeft => raw[5] |= 0x08,
+        SimButton::DpadRight => raw[5] |= 0x04,
+        SimButton::Touch | SimButton::Mute => {}
+    }
+    raw
+}
+
+/// Client-side: Switch HID bytes → normalized `PadFrame`.
+pub fn simulate_switch_frame(raw: &[u8]) -> Option<PadFrame> {
+    parse_switch_input_report(raw)
+}
+
+/// Neutral Steam Controller report (0x01) with pads centered and triggers up.
+pub fn steam_neutral_report() -> Vec<u8> {
+    let mut raw = vec![0u8; 64];
+    raw[0] = STEAM_REPORT_ID;
+    for pair in [16usize, 18, 20, 22] {
+        raw[pair..pair + 2].copy_from_slice(&0i16.to_le_bytes());
+    }
+    raw
+}
+
+/// Press one Steam Controller button on a neutral report. L2/R2 pull the
+/// analog trigger fully so the digital bit latches too.
+pub fn steam_press(btn: SimButton) -> Vec<u8> {
+    let mut raw = steam_neutral_report();
+    match btn {
+        SimButton::Cross => raw[8] |= 0x80, // A (bottom)
+        SimButton::Circle => raw[8] |= 0x20, // B (right)
+        SimButton::Square => raw[8] |= 0x40, // X (left)
+        SimButton::Triangle => raw[8] |= 0x10, // Y (top)
+        SimButton::L1 => raw[8] |= 0x08, // left shoulder
+        SimButton::R1 => raw[8] |= 0x04, // right shoulder
+        SimButton::L2 => {
+            raw[8] |= 0x02; // ZL digital
+            raw[11] = 255;
+        }
+        SimButton::R2 => {
+            raw[8] |= 0x01; // ZR digital
+            raw[12] = 255;
+        }
+        SimButton::Create => raw[9] |= 0x10, // menu left
+        SimButton::Options => raw[9] |= 0x40, // menu right
+        SimButton::Ps => raw[9] |= 0x20, // Steam logo
+        SimButton::L3 => raw[10] |= 0x40, // joystick click (left pad)
+        SimButton::R3 => raw[10] |= 0x04, // right pad click
+        SimButton::DpadUp => raw[9] |= 0x01,
+        SimButton::DpadDown => raw[9] |= 0x08,
+        SimButton::DpadLeft => raw[9] |= 0x04,
+        SimButton::DpadRight => raw[9] |= 0x02,
+        SimButton::Touch | SimButton::Mute => {}
+    }
+    raw
+}
+
+/// Client-side: Steam Controller HID bytes → normalized `PadFrame`.
+pub fn simulate_steam_frame(raw: &[u8]) -> Option<PadFrame> {
+    parse_steam_input_report(raw)
 }
 
 /// Client-side: DualSense HID bytes → normalized `PadFrame`.

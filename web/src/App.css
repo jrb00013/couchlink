@@ -843,6 +843,90 @@ button.ghost {
   max-width: 420px;
   line-height: 1.4;
 }
+.kbm-edit-toggle {
+  padding: .3rem .6rem;
+  border-radius: 6px;
+  border: 1px solid var(--line, #333);
+  background: transparent;
+  color: var(--ink, #ddd);
+  font-size: .78rem;
+  cursor: pointer;
+}
+.kbm-edit-toggle:hover {
+  border-color: var(--accent, #4a9eff);
+  color: var(--accent, #4a9eff);
+}
+.kbm-editor {
+  margin-top: .75rem;
+  padding: .75rem;
+  border: 1px solid var(--line, #333);
+  border-radius: 12px;
+  background: rgba(10, 14, 20, 0.55);
+  max-width: 720px;
+}
+.kbm-editor-hint {
+  margin: 0 0 .6rem;
+  font-size: .74rem;
+  color: #9aa;
+}
+.kbm-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: .45rem .6rem;
+}
+.kbm-bind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  padding: .3rem .5rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+}
+.kbm-bind.is-armed {
+  border-color: var(--accent, #4a9eff);
+}
+.kbm-bind-name {
+  font-size: .78rem;
+  color: #ccd;
+}
+.kbm-bind-key {
+  min-width: 78px;
+  padding: .28rem .5rem;
+  border-radius: 6px;
+  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--ink, #eee);
+  font-size: .76rem;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  cursor: pointer;
+}
+.kbm-bind-key.is-armed {
+  border-color: var(--accent, #4a9eff);
+  color: var(--accent, #4a9eff);
+  animation: kbm-bind-pulse 1s ease-in-out infinite;
+}
+@keyframes kbm-bind-pulse {
+  50% {
+    box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.25);
+  }
+}
+
+/* Keyboard binding visual — key-caps over a DualSense shell. */
+.kv-cap rect {
+  fill: rgba(255, 255, 255, 0.09);
+  stroke: rgba(255, 255, 255, 0.28);
+  stroke-width: 1;
+}
+.kv-cap-label {
+  font-size: 8px;
+  font-weight: 700;
+  fill: var(--ink, #eee);
+  user-select: none;
+}
 
 .kbm-keybinds-btn {
   padding: .3rem .75rem;
@@ -967,11 +1051,17 @@ button.ghost {
   min-height: 0;
 }
 
-/* Docked: the controller sits below the video, full opacity. */
+/* Docked: the controller sits below the video, full opacity.
+   Sized like a real gamepad — width follows a fixed ~2.15:1 ratio off the
+   viewport height (clamped), never the full screen width, so the shoulder
+   row at the top never collides with the D-pad / face clusters at the bottom
+   even on short landscape screens. */
 .touch-dock {
   position: relative;
-  height: clamp(180px, 28vh, 260px);
-  border-radius: 14px;
+  width: min(100%, calc(clamp(280px, 42vh, 340px) * 2.15));
+  margin-inline: auto;
+  height: clamp(280px, 42vh, 340px);
+  border-radius: 18px;
   overflow: hidden;
   border: 1px solid var(--line);
   background: rgba(8, 12, 18, 0.6);
@@ -1000,7 +1090,9 @@ button.ghost {
 .mobile-game.is-mobile.is-fullscreen .touch-dock {
   position: absolute;
   inset: 0;
+  width: auto;
   height: auto;
+  margin: 0;
   border: none;
   border-radius: 0;
   opacity: 0.55;
@@ -1165,13 +1257,13 @@ button.ghost {
 }
 
 .touch-btns button {
-  min-width: 52px;
-  min-height: 52px;
+  min-width: 56px;
+  min-height: 56px;
   border-radius: 50%;
   border: 1.5px solid rgba(255, 255, 255, 0.3);
   background: rgba(16, 24, 34, 0.5);
   color: var(--ink);
-  font-size: 1.15rem;
+  font-size: 1.2rem;
   font-weight: 700;
   line-height: 1;
   touch-action: none;
@@ -1192,11 +1284,11 @@ button.ghost {
 
 /* D-pad: bottom-left. */
 .touch-btns-dpad {
-  left: 1.2rem;
-  bottom: 1.4rem;
+  left: 1.6rem;
+  bottom: 1.6rem;
   grid-template-columns: repeat(3, auto);
   grid-template-rows: repeat(3, auto);
-  gap: 0.35rem;
+  gap: 0.5rem;
 }
 
 .touch-btns-dpad [data-touch-btn="dpad_up"] { grid-area: 1 / 2; }
@@ -1206,11 +1298,11 @@ button.ghost {
 
 /* Face buttons: bottom-right (△ top, ✕ bottom). */
 .touch-btns-face {
-  right: 1.2rem;
-  bottom: 1.4rem;
+  right: 1.6rem;
+  bottom: 1.6rem;
   grid-template-columns: repeat(3, auto);
   grid-template-rows: repeat(3, auto);
-  gap: 0.4rem;
+  gap: 0.55rem;
 }
 
 .touch-btns-face [data-touch-btn="triangle"] { grid-area: 1 / 2; }
@@ -1220,34 +1312,34 @@ button.ghost {
 
 /* Shoulders/triggers: top corners. */
 .touch-btns-shoulder {
-  top: 1rem;
-  display: flex;
-  gap: 0.5rem;
-}
-
-.touch-btns-shoulder button {
-  min-width: 58px;
-  min-height: 38px;
-  border-radius: 10px;
-  font-size: 0.9rem;
-}
-
-.touch-btns-shoulder-l { left: 1rem; }
-.touch-btns-shoulder-r { right: 1rem; }
-
-/* Options/Create: bottom-centre between the sticks. */
-.touch-btns-menu {
-  left: 50%;
-  bottom: 1.6rem;
-  transform: translateX(-50%);
+  top: 1.2rem;
   display: flex;
   gap: 0.6rem;
 }
 
+.touch-btns-shoulder button {
+  min-width: 62px;
+  min-height: 40px;
+  border-radius: 10px;
+  font-size: 0.92rem;
+}
+
+.touch-btns-shoulder-l { left: 1.4rem; }
+.touch-btns-shoulder-r { right: 1.4rem; }
+
+/* Options/Create: bottom-centre between the sticks. */
+.touch-btns-menu {
+  left: 50%;
+  bottom: 1.8rem;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.8rem;
+}
+
 .touch-btns-menu button {
-  min-width: 44px;
-  min-height: 44px;
-  font-size: 0.9rem;
+  min-width: 46px;
+  min-height: 46px;
+  font-size: 0.92rem;
 }
 
 /* Mobile chrome: keep the page clean, hide the desktop-only bits. */
