@@ -186,12 +186,21 @@ link_pcsx2() {
 
   # Bindings read "Up = XInput-0/DPadUp", so match the value side. Matching the
   # start of the line silently never fired and rewrote the block every run.
+  #
+  # Also require Type != None: PCSX2's own in-game "toggle controller active"
+  # UI (Marvel Ultimate Alliance and others) persists a disabled slot back to
+  # this ini as "Type = None", *underneath* otherwise-correct button
+  # bindings. The old check only looked at the bindings, so once a slot got
+  # toggled off in-game it reported "already bound" forever and never
+  # repaired it — the pad looked perfectly configured on disk while being
+  # completely invisible to the running game. Live-reproduced 2026-08-22.
   if awk -v sect="[$section]" -v dev="$dev" '
       { line = $0; sub(/\r$/, "", line) }
       line == sect { inblock = 1; next }
       inblock && line ~ /^\[/ { inblock = 0 }
+      inblock && line ~ /^Type = / { type = line; sub(/^Type = /, "", type) }
       inblock && index(line, "= " dev "/") { found = 1 }
-      END { exit found ? 0 : 1 }
+      END { exit (found && type != "None") ? 0 : 1 }
     ' "$cfg" 2>/dev/null; then
     echo "==> PCSX2 ${section} already bound to ${dev}"
     PCSX2_STATUS=already
