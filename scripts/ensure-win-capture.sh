@@ -102,19 +102,29 @@ fi
 build_ps1="$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
 start_ps1="$(wslpath -w "$ROOT/scripts/start-win-capture.ps1")"
 
-echo "==> ensuring Windows capture binary is built…"
-if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1" >/dev/null 2>&1; then
-  echo "error: could not build couchlink-win-capture.exe" >&2
-  echo "       install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1" >&2
-  exit 1
+# Every powershell.exe from WSL opens a *visible* conhost (the blue window)
+# unless -WindowStyle Hidden is set. Host respawn calls this every 20s when
+# capture is down — without Hidden that looks like "couchlink is still on."
+psw() {
+  powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass "$@"
+}
+
+if [[ "${COUCHLINK_SKIP_WIN_CAPTURE_BUILD:-0}" != "1" ]]; then
+  echo "==> ensuring Windows capture binary is built…"
+  if ! psw -File "$build_ps1" >/dev/null 2>&1; then
+    echo "error: could not build couchlink-win-capture.exe" >&2
+    echo "       install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1" >&2
+    exit 1
+  fi
 fi
 
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
 fi
 
-style=Minimized
-[[ "$source_mode" == "picker" ]] && style=Normal
+# The picker UI lives on the capture exe, not this wrapper. Keep the
+# PowerShell host Hidden so respawn/build never flash a blue console.
+# Minimized still creates a conhost that pops then minimizes.
 
 if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
   echo "==> starting Windows capture (source=$source_mode → $connect @ ${wire_w}x${wire_h} ${bitrate_kbps}kbps)"
@@ -139,20 +149,20 @@ fi
 # command line is then constant-length regardless of how many capture args
 # there are.
 task_name="couchlink-win-capture"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
+psw -Command "
+  \$argList = @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   \$quoted = (\$argList | ForEach-Object { '\"' + \$_ + '\"' }) -join ' '
   \$localDir = Join-Path \$env:LOCALAPPDATA 'couchlink\bin'
   New-Item -ItemType Directory -Force -Path \$localDir | Out-Null
   \$launcher = Join-Path \$localDir 'run-capture.ps1'
-  Set-Content -Path \$launcher -Value \"& powershell.exe -WindowStyle $style \$quoted\" -Encoding UTF8
+  Set-Content -Path \$launcher -Value \"powershell.exe -NoProfile -WindowStyle Hidden \$quoted\" -Encoding UTF8
   schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
   \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
-    /TR \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \$launcher\" 2>&1
+    /TR \"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \$launcher\" 2>&1
   if (\$LASTEXITCODE -ne 0) {
     Write-Host \"schtasks create failed, falling back to Start-Process (win-capture will NOT survive a terminal crash): \$created\"
-    Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
+    Start-Process -WindowStyle Hidden powershell.exe -ArgumentList \$argList
   } else {
     schtasks.exe /Run /TN '$task_name' | Out-Null
   }

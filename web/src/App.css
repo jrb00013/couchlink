@@ -1007,6 +1007,100 @@ button.ghost {
   background: transparent;
 }
 
+/* Landscape side-mode: phone on its side, video fills, sticks/buttons as
+   left/right rails. CSS fullscreen even when the Fullscreen API is denied
+   (typical on iOS Safari without a tap). */
+.shell.is-mobile.is-side .meta,
+.shell.is-mobile.is-side .dt-toggle,
+.shell.is-mobile.is-side .dt-panel {
+  display: none;
+}
+
+.mobile-game.is-mobile.is-side {
+  z-index: 40;
+  width: 100dvw;
+  height: 100dvh;
+  height: 100svh;
+}
+
+.mobile-game.is-mobile.is-side .stage-wrap {
+  background: #000;
+}
+
+.mobile-game.is-mobile.is-side .stage {
+  min-height: 0;
+  object-fit: contain;
+}
+
+.mobile-game.is-mobile.is-side .touch-dock {
+  opacity: 1;
+  background:
+    linear-gradient(90deg, rgba(4, 10, 16, 0.72) 0%, rgba(4, 10, 16, 0.28) 18%, transparent 32%),
+    linear-gradient(270deg, rgba(4, 10, 16, 0.72) 0%, rgba(4, 10, 16, 0.28) 18%, transparent 32%);
+  padding:
+    max(0.4rem, env(safe-area-inset-top))
+    max(0.4rem, env(safe-area-inset-right))
+    max(0.4rem, env(safe-area-inset-bottom))
+    max(0.4rem, env(safe-area-inset-left));
+}
+
+.mobile-game.is-mobile.is-side .touch-zone {
+  width: min(34%, 260px);
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-dpad {
+  left: max(0.5rem, env(safe-area-inset-left));
+  bottom: max(0.7rem, env(safe-area-inset-bottom));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-face {
+  right: max(0.5rem, env(safe-area-inset-right));
+  bottom: max(0.7rem, env(safe-area-inset-bottom));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-shoulder-l {
+  left: max(0.5rem, env(safe-area-inset-left));
+  top: max(0.5rem, env(safe-area-inset-top));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-shoulder-r {
+  right: max(0.5rem, env(safe-area-inset-right));
+  top: max(0.5rem, env(safe-area-inset-top));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-menu {
+  bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.tilt-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 0.85rem;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 14, 22, 0.82);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.tilt-hint-icon {
+  display: inline-block;
+  font-size: 1.05rem;
+  transform: rotate(90deg);
+}
+
+.is-mobile.is-side .tilt-hint {
+  display: none;
+}
+
 /* Touch controller internals. */
 .touch-overlay {
   position: absolute;

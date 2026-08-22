@@ -45,7 +45,7 @@ build_ps1="$(wslpath -w "$ROOT/scripts/build-win-ds-vhid.ps1")"
 # code older than what's on disk.
 backend="${COUCHLINK_DS_VHID_BACKEND:-auto}"
 if command -v powershell.exe >/dev/null 2>&1; then
-  probe="$(powershell.exe -NoProfile -Command "
+  probe="$(powershell.exe -NoProfile -WindowStyle Hidden -Command "
     \$p = Get-Process couchlink-ds-vhid -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not \$p) { Write-Output 'none'; exit }
     \$cli = (Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$p.Id)\").CommandLine
@@ -108,9 +108,9 @@ fi
 
 echo "==> ensuring DualSense VHID companion is built…"
 if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1"
+  powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$build_ps1"
 else
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1" >/dev/null 2>&1
+  powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$build_ps1" >/dev/null 2>&1
 fi || {
   echo "==> DualSense companion build failed — host will run video-only" >&2
   echo "    detail: COUCHLINK_VERBOSE=1 ./scripts/ensure-ds-vhid.sh" >&2
@@ -136,7 +136,7 @@ exe_w="$(wslpath -w "$ROOT/target/release/couchlink-ds-vhid.exe")"
 # never puts it in that zone, so the prompt never fires — this is the actual
 # fix, not a workaround around the dialog (registry zone trust, SmartScreen
 # policy changes) that would also loosen security for everything else.
-exe_local_w="$(powershell.exe -NoProfile -Command "
+exe_local_w="$(powershell.exe -NoProfile -WindowStyle Hidden -Command "
   \$dst = Join-Path \$env:LOCALAPPDATA 'couchlink\bin'
   New-Item -ItemType Directory -Force -Path \$dst | Out-Null
   \$dstExe = Join-Path \$dst 'couchlink-ds-vhid.exe'
@@ -151,9 +151,9 @@ fi
 # Inbound from the WSL vSwitch is still inbound as far as Windows is concerned.
 # Note: no PowerShell backtick continuations here — inside a double-quoted bash
 # string a backtick starts command substitution and silently eats the line.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -DisplayName 'couchlink-ds-vhid-39251' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName 'couchlink-ds-vhid-39251' -Direction Inbound -Protocol TCP -LocalPort 39251 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null }" >/dev/null 2>&1 || true
+powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "if (-not (Get-NetFirewallRule -DisplayName 'couchlink-ds-vhid-39251' -ErrorAction SilentlyContinue)) { New-NetFirewallRule -DisplayName 'couchlink-ds-vhid-39251' -Direction Inbound -Protocol TCP -LocalPort 39251 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null }" >/dev/null 2>&1 || true
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Minimized -FilePath '$exe_local_w' -ArgumentList '--bind','$bind','--backend','$backend'" >/dev/null 2>&1 || {
+powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Start-Process -WindowStyle Hidden -FilePath '$exe_local_w' -ArgumentList '--bind','$bind','--backend','$backend'" >/dev/null 2>&1 || {
   echo "==> could not start DualSense companion — host will run video-only" >&2
   exit 0
 }

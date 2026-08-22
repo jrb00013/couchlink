@@ -18,7 +18,16 @@ import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
 import { KeyboardMouseInput } from "./keyboardMouse";
 import { KeybindsModal } from "./KeybindsModal";
 import { loadKbmBinds, type KbmBinds } from "./kbmBinds";
-import { detectMobile } from "./mobile";
+import {
+  detectLandscape,
+  detectMobile,
+  enterElementFullscreen,
+  exitElementFullscreen,
+  isNativeFullscreen,
+  isSideMode,
+  lockLandscape,
+  unlockOrientation,
+} from "./mobile";
 import { TouchGamepadInput } from "./touchPad";
 import { TouchOverlay } from "./TouchOverlay";
 import type { PlayerTelemetry } from "./player";
@@ -113,6 +122,7 @@ export default function App() {
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
   const [kbmInput, setKbmInput] = useState<KeyboardMouseInput | null>(null);
   const [isMobile, setIsMobile] = useState(() => detectMobile());
+  const [landscape, setLandscape] = useState(() => detectLandscape());
   const touchInputRef = useRef<TouchGamepadInput | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -493,14 +503,23 @@ export default function App() {
     kbmRef.current?.setBinds(kbmBinds);
   }, [kbmBinds]);
 
-  // Re-detect mobile on resize/orientation so the layout follows the device.
+  // Re-detect mobile + landscape so side-mode follows a phone tilt.
   useEffect(() => {
-    const onResize = () => setIsMobile(detectMobile());
-    window.addEventListener("resize", onResize);
-    window.addEventListener("orientationchange", onResize);
+    const sync = () => {
+      setIsMobile(detectMobile());
+      setLandscape(detectLandscape());
+      touchInputRef.current?.refresh();
+    };
+    window.addEventListener("resize", sync);
+    window.addEventListener("orientationchange", sync);
+    window.visualViewport?.addEventListener("resize", sync);
+    const mq = window.matchMedia?.("(orientation: landscape)");
+    mq?.addEventListener?.("change", sync);
     return () => {
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("orientationchange", onResize);
+      window.removeEventListener("resize", sync);
+      window.removeEventListener("orientationchange", sync);
+      window.visualViewport?.removeEventListener("resize", sync);
+      mq?.removeEventListener?.("change", sync);
     };
   }, []);
 
@@ -523,6 +542,38 @@ export default function App() {
   }, [isMobile]);
 
   const connected = state === "connected" || state === "negotiating";
+  const sideMode = isSideMode({ mobile: isMobile, landscape, connected });
+
+  useEffect(() => {
+    const onFs = () => setFullscreen(isNativeFullscreen());
+    document.addEventListener("fullscreenchange", onFs);
+    document.addEventListener("webkitfullscreenchange", onFs as EventListener);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFs);
+      document.removeEventListener("webkitfullscreenchange", onFs as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    if (sideMode) {
+      setFullscreen(true);
+      touchInputRef.current?.refresh();
+    } else {
+      void exitElementFullscreen();
+      unlockOrientation();
+      setFullscreen(false);
+    }
+  }, [sideMode, isMobile]);
+
+  const enterSidePlay = async () => {
+    const el = mobileFsRef.current;
+    if (!el) return;
+    await lockLandscape();
+    await enterElementFullscreen(el);
+    setFullscreen(true);
+    touchInputRef.current?.refresh();
+  };
   const livePads = useLivePads(connected && !isMobile);
   const hasPhysicalPad = livePads.length > 0;
   const hostReported = playerPads[0];
@@ -552,7 +603,9 @@ export default function App() {
   };
 
   return (
-    <div className={`shell ${fullscreen ? "is-fullscreen" : ""} ${isMobile ? "is-mobile" : ""}`}>
+    <div
+      className={`shell${fullscreen ? " is-fullscreen" : ""}${isMobile ? " is-mobile" : ""}${sideMode ? " is-side" : ""}`}
+    >
       <header className="top">
         <div className="brand">
           <img className="brand-logo" src="/logo.png" alt="" width={56} height={56} />
@@ -671,7 +724,7 @@ export default function App() {
 
       <div className="broadcast">
         <div
-          className={`mobile-game${isMobile ? " is-mobile" : ""}${fullscreen ? " is-fullscreen" : ""}`}
+          className={`mobile-game${isMobile ? " is-mobile" : ""}${fullscreen || sideMode ? " is-fullscreen" : ""}${sideMode ? " is-side" : ""}`}
           ref={mobileFsRef}
         >
           <div className="stage-wrap" ref={stageRef}>
@@ -696,6 +749,14 @@ export default function App() {
               <div className="overlay overlay-dim">
                 <span>{captureHint}</span>
               </div>
+            )}
+            {isMobile && connected && !landscape && (
+              <button type="button" className="tilt-hint" onClick={() => void enterSidePlay()}>
+                <span className="tilt-hint-icon" aria-hidden>
+                  ↻
+                </span>
+                <span>Tilt your phone sideways to play</span>
+              </button>
             )}
           </div>
 
@@ -791,20 +852,27 @@ export default function App() {
           type="button"
           className="ghost"
           onClick={() => {
-            // On mobile the fullscreen target wraps stage + touch controller so
-            // the controller overlays the video at low opacity; desktop keeps
-            // fullscreening the stage element as before.
-            const el = isMobile ? mobileFsRef.current : stageRef.current;
-            if (!document.fullscreenElement && el) {
-              void el.requestFullscreen();
+            if (isMobile) {
+              if (sideMode || isNativeFullscreen()) {
+                unlockOrientation();
+                void exitElementFullscreen();
+                setFullscreen(false);
+              } else {
+                void enterSidePlay();
+              }
+              return;
+            }
+            const el = stageRef.current;
+            if (!isNativeFullscreen() && el) {
+              void enterElementFullscreen(el);
               setFullscreen(true);
             } else {
-              void document.exitFullscreen();
+              void exitElementFullscreen();
               setFullscreen(false);
             }
           }}
         >
-          Fullscreen
+          {isMobile ? (sideMode ? "Exit side" : "Play sideways") : "Fullscreen"}
         </button>
       </footer>
     </div>
