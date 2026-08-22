@@ -90,6 +90,18 @@ async fn push_bounded(
     }
 }
 
+/// The host's own P1 pad — what friends draw next to their own device.
+/// Override with COUCHLINK_HOST_PAD_KIND / COUCHLINK_HOST_PAD_ID.
+fn host_physical_pad() -> (String, String) {
+    let kind = std::env::var("COUCHLINK_HOST_PAD_KIND").unwrap_or_else(|_| "dualsense".into());
+    let id = std::env::var("COUCHLINK_HOST_PAD_ID").unwrap_or_else(|_| match kind.as_str() {
+        "xbox" => "Host Xbox".into(),
+        "keyboard" | "keyboard+mouse" => "keyboard+mouse".into(),
+        _ => "Host DualSense".into(),
+    });
+    (kind, id)
+}
+
 /// One remote player's peer connection, virtual controller, and feedback loop.
 ///
 /// The host's own physical pad owns emulator P1, so a `PlayerConn` for slot `s`
@@ -537,6 +549,14 @@ async fn main() -> Result<()> {
     .await?;
 
     let signal_out = signaling.outbound.clone();
+    {
+        let (kind, id) = host_physical_pad();
+        let _ = signal_out.send(SignalMessage::PadInfo {
+            kind,
+            id,
+            slot: 0,
+        });
+    }
     // One peer + one virtual controller per remote slot. The host's own pad owns
     // emulator P1; slots 1-3 fill P2-P4.
     let slots: Arc<Mutex<HashMap<u8, PlayerConn>>> = Arc::new(Mutex::new(HashMap::new()));

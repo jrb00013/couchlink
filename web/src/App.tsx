@@ -8,7 +8,10 @@ import {
   canUseWebCodecs,
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
-import { ControllerViz, useLivePads } from "./ControllerViz";
+import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
+import type { ControllerKind } from "./controllerKind";
+import { seatForRemoteSlot } from "./seat";
+import { KeyboardMouseViz } from "./KeyboardMouseViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
@@ -108,6 +111,7 @@ export default function App() {
   const [kbmBinds, setKbmBinds] = useState<KbmBinds>(() => loadKbmBinds());
   const [pointerLocked, setPointerLocked] = useState(false);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
+  const [kbmInput, setKbmInput] = useState<KeyboardMouseInput | null>(null);
   const [isMobile, setIsMobile] = useState(() => detectMobile());
   const touchInputRef = useRef<TouchGamepadInput | null>(null);
 
@@ -464,6 +468,7 @@ export default function App() {
         binds: kbmBinds,
       });
       kbmRef.current = kbm;
+      setKbmInput(kbm);
       kbm.start();
       playerRef.current?.setKbm(kbm);
       const onLockChange = () => setPointerLocked(!!document.pointerLockElement);
@@ -471,6 +476,7 @@ export default function App() {
       return () => {
         kbm.stop();
         kbmRef.current = null;
+        setKbmInput(null);
         playerRef.current?.setKbm(null);
         document.removeEventListener("pointerlockchange", onLockChange);
         setPointerLocked(false);
@@ -478,6 +484,7 @@ export default function App() {
     } else {
       kbmRef.current?.stop();
       kbmRef.current = null;
+      setKbmInput(null);
       playerRef.current?.setKbm(null);
     }
   }, [kbmActive]);
@@ -518,6 +525,14 @@ export default function App() {
   const connected = state === "connected" || state === "negotiating";
   const livePads = useLivePads(connected && !isMobile);
   const hasPhysicalPad = livePads.length > 0;
+  const hostReported = playerPads[0];
+  const hostPad = {
+    kind: (["dualsense", "xbox", "generic"].includes(hostReported?.kind ?? "")
+      ? hostReported!.kind
+      : "dualsense") as ControllerKind,
+    id: hostReported?.id || "host",
+    label: hostReported?.id === "keyboard+mouse" ? "Keyboard + Mouse" : "Host",
+  };
 
   useEffect(() => {
     setKbmActive(!hasPhysicalPad && !isMobile);
@@ -546,33 +561,31 @@ export default function App() {
             <p>HD co-play · your DualSense → host Bluetooth pad</p>
           </div>
         </div>
-        <div className="top-pills">
-          <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
-          {playersStatus && (
-            <div className="pill" title="players connected">
-              {playersStatus.occupied + 1}/{playersStatus.max + 1} players
-            </div>
-          )}
-        </div>
-      </header>
-
-      {playersStatus && (
-        <div className="roster" aria-label="player roster">
-          {Array.from({ length: playersStatus.max + 1 }, (_, i) => {
-            const isHost = i === 0;
-            const filled = isHost || i - 1 < playersStatus.occupied;
+        <ol className="roster" aria-label="player seats">
+          {([1, 2, 3, 4] as const).map((seat) => {
+            const remoteSlot = seat - 1;
+            const isHost = seat === 1;
+            const filled =
+              isHost ||
+              !!playerPads[remoteSlot] ||
+              (playersStatus != null && remoteSlot <= playersStatus.occupied);
+            const mine = !isHost && mySlot === remoteSlot;
+            const role = isHost ? "host" : filled ? (mine ? "you" : "player") : "open";
             return (
-              <span
-                key={i}
-                className={`roster-slot${filled ? " is-filled" : ""}${isHost ? " is-host" : ""}`}
+              <li
+                key={seat}
+                className={`roster-slot cv-p${seat}${filled ? " is-filled" : " is-open"}${mine ? " is-you" : ""}`}
               >
-                <span className="roster-num">P{i + 1}</span>
-                {isHost ? "host" : filled ? "player" : "open"}
-              </span>
+                <span className="roster-num">P{seat}</span>
+                <span className="roster-role">{role}</span>
+              </li>
             );
           })}
+        </ol>
+        <div className="top-pills">
+          <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
         </div>
-      )}
+      </header>
 
       {!connected && (
         <section className="join">
@@ -695,27 +708,45 @@ export default function App() {
 
         {connected && !isMobile && (
           <section className="pads" aria-live="polite">
-            {hasPhysicalPad ? (
-              <>
-                <div className="pads-head">
-                  <span className="pads-count">your controller</span>
-                  <span className="pads-hint">this browser — not the other seats</span>
-                </div>
-                <div className="pads-viz">
-                  <ControllerViz
-                    key={`${livePads[0].index}-${livePads[0].id}`}
-                    pad={livePads[0]}
-                    active
-                  />
-                </div>
-              </>
-            ) : (
+            <div className="pads-head">
+              <span className="pads-count">host + you</span>
+              <span className="pads-hint">
+                {hasPhysicalPad
+                  ? "host’s pad · your pad"
+                  : pointerLocked
+                    ? "host’s pad · look locked — Esc to release"
+                    : "host’s pad · click the stream to lock look"}
+              </span>
+            </div>
+            <div className="pads-viz">
+              {hostPad.id === "keyboard+mouse" ? (
+                <KeyboardMouseViz input={null} seat={1} slotLabel="host" />
+              ) : (
+                <ControllerViz
+                  pad={silhouettePad(hostPad.kind, hostPad.id, hostPad.label)}
+                  seat={1}
+                  slotLabel="host"
+                />
+              )}
+              {hasPhysicalPad ? (
+                <ControllerViz
+                  key={`${livePads[0].index}-${livePads[0].id}`}
+                  pad={livePads[0]}
+                  seat={seatForRemoteSlot(mySlot)}
+                  slotLabel="you"
+                  active
+                />
+              ) : (
+                <KeyboardMouseViz
+                  input={kbmInput}
+                  seat={seatForRemoteSlot(mySlot)}
+                  slotLabel="you"
+                  active
+                />
+              )}
+            </div>
+            {!hasPhysicalPad && (
               <div className="kbm-row">
-                <span className="kbm-hint">
-                  {pointerLocked
-                    ? "🔒 mouse locked — Esc to release"
-                    : "keyboard + mouse · click stream to lock look"}
-                </span>
                 <button
                   type="button"
                   className="kbm-keybinds-btn"
