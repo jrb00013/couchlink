@@ -69,6 +69,39 @@ fi
 # exe on Windows, so `cargo build` below fails with "Access is denied" trying to
 # overwrite it — and the old process then never gets replaced, leaving the host
 # video-only. (taskkill is idempotent; missing process is fine.)
+#
+# ViGEmBus ties a virtual controller's lifetime to the process that plugged it
+# in — there is no vendor API to hand an existing target to a new process, so
+# killing the companion here always destroys and recreates the virtual pad,
+# even though it lands back on the same nominal XInput slot. An emulator that
+# was already open (RPCS3/PCSX2) is holding a handle to the device that just
+# got destroyed and, for XInput specifically, most emulators only resolve
+# "who's on slot N" at startup or on an explicit rescan, not continuously — so
+# it silently stops receiving input until told to look again. This was the
+# actual cause of "not registering his pad anymore" during the 2026-08-22
+# capture-hang troubleshooting: repeated manual `taskkill` of the companion
+# while PCSX2 stayed open the whole time. Surface it instead of staying quiet.
+if command -v tasklist.exe >/dev/null 2>&1 \
+  && tasklist.exe /FI "IMAGENAME eq couchlink-ds-vhid.exe" 2>/dev/null | grep -qi couchlink-ds-vhid; then
+  # Separate calls, not combined /FI: tasklist.exe ANDs multiple /FI filters
+  # together rather than ORing them, so one call filtering for both image
+  # names at once matches nothing (no process has both names) and this
+  # always came back empty.
+  # `|| true` on the whole substitution: under `set -eo pipefail`, grep
+  # finding no match (the common case — neither emulator open) makes the
+  # pipeline's exit status non-zero and would otherwise abort this entire
+  # script right here, silently skipping the companion relaunch altogether.
+  open_emulators="$( { {
+    tasklist.exe /FI "IMAGENAME eq pcsx2-qt.exe" 2>/dev/null
+    tasklist.exe /FI "IMAGENAME eq rpcs3.exe" 2>/dev/null
+  } | grep -iE 'pcsx2-qt\.exe|rpcs3\.exe' | awk '{print $1}' | sort -u | tr '\n' ' '; } || true )"
+  echo "==> restarting DualSense companion — this recreates the virtual pad as a NEW device" >&2
+  if [[ -n "${open_emulators// /}" ]]; then
+    echo "    already running and will need a controller rescan (or restart) to see it: ${open_emulators}" >&2
+  else
+    echo "    any emulator that was already open will need a controller rescan (or restart) to see it" >&2
+  fi
+fi
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-ds-vhid.exe /F >/dev/null 2>&1 || true
 fi
