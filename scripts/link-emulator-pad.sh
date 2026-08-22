@@ -156,6 +156,22 @@ find_pcsx2_config() {
   }
 }
 
+# Human-readable PS2 port for a PCSX2 [PadN] section, so the RESULT line says
+# "1B" rather than leaving everyone to remember that Pad3 is not port 3.
+pcsx2_port_name() {
+  case "$1" in
+    Pad1) echo "1A" ;;
+    Pad2) echo "2A" ;;
+    Pad3) echo "1B" ;;
+    Pad4) echo "1C" ;;
+    Pad5) echo "1D" ;;
+    Pad6) echo "2B" ;;
+    Pad7) echo "2C" ;;
+    Pad8) echo "2D" ;;
+    *) echo "" ;;
+  esac
+}
+
 link_pcsx2() {
   local cfg
   cfg="$(find_pcsx2_config)"
@@ -182,7 +198,41 @@ link_pcsx2() {
   # PLAYER is the emulator port (P2, P3, P4…), so PLAYER-2 is that slot's
   # assumed XInput index — every player gets its own device, not slot 2's.
   local dev="${COUCHLINK_PCSX2_DEVICE:-XInput-$((PLAYER - 2))}"
-  local section="Pad${PLAYER}"
+
+  # PCSX2's [PadN] sections are NOT numbered sequentially across the ports.
+  # The actual layout is:
+  #
+  #   Pad1 = port 1A     Pad2 = port 2A
+  #   Pad3 = port 1B     Pad6 = port 2B
+  #   Pad4 = port 1C     Pad7 = port 2C
+  #   Pad5 = port 1D     Pad8 = port 2D
+  #
+  # i.e. Pad1/Pad2 are the two *base* ports, and Pad3-Pad5 are the extra
+  # multitap slots hanging off port 1 (Pad6-Pad8 off port 2).
+  #
+  # This matters because a 4-player PS2 game reads its four players from ONE
+  # multitap: ports 1A/1B/1C/1D. Binding "emulator player 2" to Pad2 puts that
+  # player on port 2A — a port such a game never looks at — so their pad is
+  # live in PCSX2 (it shows in the pad overlay, it registers in the settings)
+  # and completely invisible to the game.
+  #
+  # Live-reproduced 2026-08-22 in Marvel Ultimate Alliance with 3 remote
+  # players bound to Pad2/Pad3/Pad4: the game offered exactly two join slots
+  # (the Pad3=1B and Pad4=1C players) and never saw the Pad2=2A player, who
+  # could not register no matter what they pressed. Under the old assumption
+  # that PadN numbering was sequential, all three should have shown up.
+  #
+  # So remote players go on the port-1 multitap chain: emulator player 2 ->
+  # Pad3 (1B), player 3 -> Pad4 (1C), player 4 -> Pad5 (1D), leaving the host
+  # on Pad1 (1A). Set COUCHLINK_PCSX2_MULTITAP=0 to fall back to the old
+  # base-port layout (only ever correct for a single remote player, on 2A).
+  local section
+  if [[ "${COUCHLINK_PCSX2_MULTITAP:-1}" == "0" ]]; then
+    section="Pad${PLAYER}"
+  else
+    section="Pad$((PLAYER + 1))"
+  fi
+  PCSX2_SECTION="$section"
 
   # Bindings read "Up = XInput-0/DPadUp", so match the value side. Matching the
   # start of the line silently never fired and rewrote the block every run.
@@ -253,6 +303,48 @@ link_pcsx2() {
     echo "RLeft = ${dev}/-RightX"
   } >> "$tmp"
 
+  # Ports 1B/1C/1D only exist when port 1 is actually a multitap — without
+  # this the sections above are written but the game still sees a single
+  # controller on port 1, which is the same invisible-player failure from a
+  # different direction.
+  if [[ "${COUCHLINK_PCSX2_MULTITAP:-1}" != "0" ]]; then
+    if grep -q '^\[Pad\]' "$tmp"; then
+      if grep -qE '^MultitapPort1 *=' "$tmp"; then
+        sed -i 's/^MultitapPort1 *=.*/MultitapPort1 = true/' "$tmp"
+      else
+        sed -i '/^\[Pad\]/a MultitapPort1 = true' "$tmp"
+      fi
+    else
+      printf '\n[Pad]\nMultitapPort1 = true\n' >> "$tmp"
+    fi
+
+    # Retire the old base-port binding for this player. Only Pad2 (port 2A)
+    # is ever touched, and only when it still points at one of the virtual
+    # devices this script itself wrote — a real controller someone deliberately
+    # put on port 2A is left alone. Without this the pre-fix binding lingers,
+    # so the same virtual pad answers on both 2A and 1B and a game that reads
+    # both sees one player twice.
+    # CRLF-aware throughout: PCSX2 writes this file with Windows line endings,
+    # so matching "[Pad2]" without stripping the trailing \r silently never
+    # fires (and rewriting without putting it back would corrupt the file).
+    if awk -v want="$dev" '
+        { line = $0; sub(/\r$/, "", line) }
+        line == "[Pad2]" { inblock = 1; next }
+        inblock && line ~ /^\[/ { inblock = 0 }
+        inblock && index(line, "= " want "/") { found = 1 }
+        END { exit found ? 0 : 1 }
+      ' "$tmp" 2>/dev/null; then
+      echo "==> PCSX2 retiring stale Pad2 (port 2A) binding for ${dev} — it now lives on ${section}"
+      awk '
+        { line = $0; cr = ""; if (sub(/\r$/, "", line)) cr = "\r" }
+        line == "[Pad2]" { print line cr; inblock = 1; next }
+        inblock && line ~ /^\[/ { inblock = 0 }
+        inblock && line ~ /^Type *=/ { print "Type = None" cr; next }
+        { print line cr }
+      ' "$tmp" > "$tmp.pad2" && mv "$tmp.pad2" "$tmp"
+    fi
+  fi
+
   # PCSX2 only enumerates XInput devices when that source is enabled.
   if grep -q '^\[InputSources\]' "$tmp"; then
     if grep -qE '^XInput *=' "$tmp"; then
@@ -279,6 +371,7 @@ link_pcsx2() {
 
 PCSX2_STATUS=skipped
 PCSX2_CONFIG_PATH=""
+PCSX2_SECTION=""
 
 link_pcsx2 || true
 
@@ -301,5 +394,8 @@ echo "RESULT $(jq -nc \
   --arg rpcs3_config "$RPCS3_CONFIG_PATH" \
   --arg pcsx2 "$PCSX2_STATUS" \
   --arg pcsx2_config "$PCSX2_CONFIG_PATH" \
+  --arg pcsx2_section "$PCSX2_SECTION" \
+  --arg pcsx2_port "$(pcsx2_port_name "$PCSX2_SECTION")" \
   '{player: ($player | tonumber), backend: $backend, handler: $handler, device: $device,
-    rpcs3: $rpcs3, rpcs3_config: $rpcs3_config, pcsx2: $pcsx2, pcsx2_config: $pcsx2_config}')"
+    rpcs3: $rpcs3, rpcs3_config: $rpcs3_config, pcsx2: $pcsx2, pcsx2_config: $pcsx2_config,
+    pcsx2_section: $pcsx2_section, pcsx2_port: $pcsx2_port}')"
