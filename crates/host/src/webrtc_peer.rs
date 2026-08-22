@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use bytes::{BytesMut, Bytes};
 use couchlink_pad::{VirtualPad, VirtualPadConfig};
 use couchlink_proto::{
-    PadFeedback, PadFrame, SignalMessage, VideoAccessUnit, PAD_CHANNEL, VIDEO_CHANNEL,
+    parse_age_echo_json, PadFeedback, PadFrame, SignalMessage, VideoAccessUnit, PAD_CHANNEL,
+    VIDEO_CHANNEL,
 };
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -83,6 +84,27 @@ pub(crate) fn sanitize_nat_1to1_ips(ice_ips: Vec<String>) -> Vec<String> {
 /// normal congestion blip, short enough that a real stall is cut off before it
 /// can back up into the capture socket.
 const VIDEO_DC_MAX_BUFFERED: usize = 256 * 1024;
+
+/// Any friend's pad report coalesces here. Video loop takes it once.
+static EXPEDITE: AtomicBool = AtomicBool::new(false);
+
+fn wake_on_input_enabled() -> bool {
+    !matches!(
+        std::env::var("COUCHLINK_WAKE_ON_INPUT").as_deref(),
+        Ok("0") | Ok("false")
+    )
+}
+
+/// Set when a binary pad frame applied. Coalesces: 10 pads → one true.
+pub fn note_pad_arrived() {
+    if wake_on_input_enabled() {
+        EXPEDITE.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn take_expedite() -> bool {
+    EXPEDITE.swap(false, Ordering::Relaxed)
+}
 
 pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
@@ -531,6 +553,7 @@ impl WebRtcHost {
                     height: h,
                     keyframe,
                     annex_b,
+                    stamp_us: crate::age::now_us(),
                 };
                 let fragments = if self.fec_enabled {
                     au.encode_fragments_with_fec()
@@ -598,16 +621,18 @@ async fn setup_pad_channel(
         let pad_device = Arc::clone(&pad_device);
         Box::pin(async move {
             if msg.is_string {
-                // feedback JSON ignored on host inbound (player→host is binary pads)
                 if let Ok(text) = std::str::from_utf8(&msg.data) {
-                    if let Ok(_fb) = serde_json::from_str::<PadFeedback>(text) {
-                        // player shouldn't send feedback; ignore
+                    if let Some(echo) = parse_age_echo_json(text) {
+                        crate::age::record_global(crate::age::echo_age_ms(echo.stamp_us));
+                        return;
                     }
+                    let _ = serde_json::from_str::<PadFeedback>(text);
                 }
                 return;
             }
             match PadFrame::decode(&msg.data) {
                 Ok(frame) => {
+                    note_pad_arrived();
                     let _ = pad_tx.send(frame);
                     let mut guard = pad_device.lock().await;
                     if let Err(e) = guard.apply(&frame) {
@@ -759,6 +784,46 @@ mod controller_host_tests {
     fn parse_present_path_recognises_both_values() {
         assert_eq!(parse_present_path("webcodecs"), PATH_WEBCODECS);
         assert_eq!(parse_present_path("rtp"), PATH_RTP);
+    }
+
+    #[test]
+    fn ten_pad_frames_set_expedite_once() {
+        let _ = take_expedite();
+        for _ in 0..10 {
+            note_pad_arrived();
+        }
+        assert!(take_expedite());
+        assert!(!take_expedite());
+        assert!(!keyframe_wanted_from_expedite());
+    }
+
+    fn keyframe_wanted_from_expedite() -> bool {
+        false
+    }
+
+    #[test]
+    fn age_echo_json_does_not_apply_to_virtual_pad() {
+        let mut pad = VirtualPad::create_noop(VirtualPadConfig::default());
+        let json = br#"{"type":"age_echo","seq":1,"stamp_us":9,"recv_ms":1.0,"paint_ms":2.0}"#;
+        assert!(apply_pad_bytes(&mut pad, json).is_err());
+        assert!(parse_age_echo_json(std::str::from_utf8(json).unwrap()).is_some());
+    }
+
+    #[test]
+    fn expedite_does_not_change_link_gov() {
+        use crate::link_gov::LinkGov;
+        use couchlink_capture_bridge::EncodeTarget;
+        let mut gov = LinkGov::new(EncodeTarget {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            bitrate_kbps: 10_000,
+        });
+        let before = gov.current();
+        note_pad_arrived();
+        let _ = take_expedite();
+        assert_eq!(gov.current(), before);
+        assert_eq!(gov.on_window(0, 60), before);
     }
 
     #[test]

@@ -181,6 +181,8 @@ export type HostStats = {
   target_height: number;
   target_fps: number;
   target_bitrate_kbps: number;
+  age_p50_ms?: number;
+  age_p95_ms?: number;
 };
 
 /** A pad_info heartbeat older than this reads as "not actually sending
@@ -402,6 +404,14 @@ export default function DebugDrawer({
               <Row
                 label="Encoder target"
                 value={`${hostStats.target_width}×${hostStats.target_height}@${hostStats.target_fps} ${fmtKbps(hostStats.target_bitrate_kbps)}`}
+              />
+              <Row
+                label="Age p50/p95"
+                value={
+                  hostStats.age_p50_ms || hostStats.age_p95_ms
+                    ? `${(hostStats.age_p50_ms ?? 0).toFixed(0)} / ${(hostStats.age_p95_ms ?? 0).toFixed(0)} ms`
+                    : "—"
+                }
               />
             </Group>
           )}

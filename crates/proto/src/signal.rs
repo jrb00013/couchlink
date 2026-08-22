@@ -171,6 +171,10 @@ pub enum SignalMessage {
         target_height: u32,
         target_fps: u32,
         target_bitrate_kbps: u32,
+        #[serde(default)]
+        age_p50_ms: f64,
+        #[serde(default)]
+        age_p95_ms: f64,
     },
 }
 

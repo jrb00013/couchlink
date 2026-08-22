@@ -42,31 +42,31 @@ pub struct LinkGov {
     clean_windows: u32,
 }
 
-/// The rung ladder: fps halves before bitrate so frame *freshness* is preserved
-/// as long as possible — dropping to 30fps costs smoothness, halving bitrate
-/// first would cost sharpness on *every* frame, including the now-frame the
-/// player actually sees. When the link can only take a trickle, cut fps to 15
-/// before touching bitrate: a sharp, rare frame beats a blurry common one for
-/// input latency, because the eye waits for the newest one regardless.
+/// The rung ladder for 3-friend WAN: keep fps before spending bits, and the
+/// first climb off trickle is **same bitrate, 30 fps** — host uplink `N*P*R`
+/// stays put while `T/2` halves. The old 15/5000 quarter spent bits without
+/// shrinking the wait.
 fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
-    let mut rungs = vec![*baseline];
     let half_fps = EncodeTarget {
         fps: (baseline.fps / 2).max(1),
         ..*baseline
     };
-    let quarter_fps = EncodeTarget {
-        fps: (half_fps.fps / 2).max(1),
-        bitrate_kbps: half_fps.bitrate_kbps / 2,
-        ..half_fps
+    let same_bits_30 = EncodeTarget {
+        fps: 30,
+        bitrate_kbps: (baseline.bitrate_kbps / 4).max(1),
+        ..*baseline
     };
     let trickle = EncodeTarget {
         fps: 15,
         bitrate_kbps: baseline.bitrate_kbps / 4,
         ..*baseline
     };
-    rungs.push(half_fps);
-    rungs.push(quarter_fps);
-    rungs.push(trickle);
+    let mut rungs = vec![*baseline];
+    for extra in [half_fps, same_bits_30, trickle] {
+        if !rungs.iter().any(|r| *r == extra) {
+            rungs.push(extra);
+        }
+    }
     rungs
 }
 
@@ -158,8 +158,16 @@ mod tests {
                 seen.push(t);
             }
         }
-        assert_eq!(*seen.last().unwrap(), rungs_from(&P720).last().copied().unwrap(), "must reach the floor");
-        assert!(seen.last().unwrap().fps <= 15, "floor fps: {:?}", seen.last());
+        assert_eq!(
+            *seen.last().unwrap(),
+            rungs_from(&P720).last().copied().unwrap(),
+            "must reach the floor"
+        );
+        assert!(
+            seen.last().unwrap().fps <= 15,
+            "floor fps: {:?}",
+            seen.last()
+        );
     }
 
     #[test]
@@ -184,7 +192,11 @@ mod tests {
         assert_ne!(down, P720);
         gov.on_window(0, 60);
         gov.on_window(0, 60);
-        assert_eq!(gov.current(), down, "must stay down through the old 2-window climb");
+        assert_eq!(
+            gov.current(),
+            down,
+            "must stay down through the old 2-window climb"
+        );
     }
 
     #[test]
@@ -283,7 +295,8 @@ mod tests {
             shed_total
         );
         assert!(
-            g_wire_bytes <= shed_total as u64 * IDR_BYTES / 2 + g_frames_delivered as u64 * DELTA_BYTES * 2,
+            g_wire_bytes
+                <= shed_total as u64 * IDR_BYTES / 2 + g_frames_delivered as u64 * DELTA_BYTES * 2,
             "governor bytes {} unexpectedly above {}",
             g_wire_bytes,
             shed_total as u64 * IDR_BYTES / 2 + g_frames_delivered as u64 * DELTA_BYTES * 2
@@ -331,8 +344,22 @@ mod tests {
         // with pixel count. Numbers are typical measured 720p H264 with a CBR
         // hardware encoder at the commanded bitrates.
         let cases = [
-            ("detached 1728x1080 @18Mbps (what the session actually streamed)", 1728, 1080, 18_000, 150_000, 20_000),
-            ("preset 1280x720 @10Mbps (what SET_TARGET now commands)      ", 1280, 720, 10_000, 68_000, 9_000),
+            (
+                "detached 1728x1080 @18Mbps (what the session actually streamed)",
+                1728,
+                1080,
+                18_000,
+                150_000,
+                20_000,
+            ),
+            (
+                "preset 1280x720 @10Mbps (what SET_TARGET now commands)      ",
+                1280,
+                720,
+                10_000,
+                68_000,
+                9_000,
+            ),
         ];
         for (label, w, h, kbps, idr_bytes, delta_bytes) in cases {
             let mut idr_frags = 0usize;
@@ -344,6 +371,7 @@ mod tests {
                     height: h,
                     keyframe: true,
                     annex_b: vec![0u8; idr_bytes],
+                    stamp_us: 0,
                 };
                 let frags = au.encode_fragments();
                 idr_frags += frags.len();
@@ -358,6 +386,7 @@ mod tests {
                     height: h,
                     keyframe: false,
                     annex_b: vec![0u8; delta_bytes],
+                    stamp_us: 0,
                 };
                 let frags = au.encode_fragments();
                 delta_frags += frags.len();

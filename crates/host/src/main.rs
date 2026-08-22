@@ -1,3 +1,4 @@
+mod age;
 mod capture;
 mod config;
 mod emulator_pad;
@@ -8,6 +9,7 @@ mod link_gov;
 mod motion;
 mod scale;
 mod signaling_client;
+mod wan3_math;
 mod webrtc_peer;
 
 use anyhow::Result;
@@ -786,6 +788,9 @@ async fn main() -> Result<()> {
             // wobble, and measured buffer grew to ~100ms during motion. Encoding on a
             // metronome makes delivery uniform, which is what lets the buffer stay small.
             _ = cadence.tick() => {
+                if webrtc_peer::take_expedite() {
+                    capturer.write_expedite();
+                }
                 // Any viewer that lost sync asks for a keyframe over RTCP.
                 // Answering immediately turns a multi-second glitch into a single
                 // frame. An IDR is decodable by every viewer, so a freshly-joined
@@ -1180,5 +1185,7 @@ fn host_stats_message(
         target_height: target.height,
         target_fps: target.fps,
         target_bitrate_kbps: target.bitrate_kbps,
+        age_p50_ms: crate::age::global_percentiles().0,
+        age_p95_ms: crate::age::global_percentiles().1,
     }
 }

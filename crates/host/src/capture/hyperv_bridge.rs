@@ -29,7 +29,7 @@
 use anyhow::{bail, Context, Result};
 use couchlink_capture_bridge::{
     read_frame_body_sync, write_set_target, EncodeTarget, FrameFormat, FrameInfo, FRAME_MAGIC,
-    REQUEST_IDR,
+    EXPEDITE, REQUEST_IDR,
 };
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -201,6 +201,15 @@ impl HyperVBridge {
             if let Err(e) = stream.write_all(&[REQUEST_IDR]) {
                 tracing::warn!("could not request IDR over Hyper-V socket: {e}");
             }
+        }
+    }
+
+    pub fn write_expedite(&mut self) {
+        if self.format != FrameFormat::H264 {
+            return;
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            let _ = stream.write_all(&[EXPEDITE]);
         }
     }
 

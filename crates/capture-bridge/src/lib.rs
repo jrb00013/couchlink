@@ -29,6 +29,9 @@ const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 /// joining mid-session waits for the encoder's own keyframe interval.
 pub const REQUEST_IDR: u8 = b'I';
 
+/// Skip one `next_submit` wait — pad arrived, encode the next AU now.
+pub const EXPEDITE: u8 = b'X';
+
 /// Sent by the host back up the capture socket to command the encode target.
 ///
 /// Without this the Windows encoder is *detached from the link*: it encodes the
@@ -297,6 +300,8 @@ mod tests {
     #[test]
     fn set_target_opcode_is_distinct_from_idr() {
         assert_ne!(SET_TARGET, REQUEST_IDR);
+        assert_ne!(EXPEDITE, REQUEST_IDR);
+        assert_ne!(EXPEDITE, SET_TARGET);
     }
 
     /// Live 2026-08-22: PCSX2's window title becomes the game name

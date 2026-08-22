@@ -3,9 +3,11 @@ import {
   ClvdAssembler,
   decodeClvdFragment,
   VIDEO_HEADER_LEN,
+  VIDEO_HEADER_LEN_V2,
   VIDEO_MAGIC,
   VIDEO_MAX_FRAGMENT_PAYLOAD,
   VIDEO_VERSION,
+  VIDEO_VERSION_V2,
   FLAG_KEYFRAME,
 } from "./clvd";
 
@@ -32,6 +34,7 @@ function encodeFragment(
   view.setUint32(10, seq, true);
   view.setUint16(14, fragIdx, true);
   view.setUint16(16, fragCount, true);
+  view.setBigUint64(18, 0n, true);
   u8.set(payload, VIDEO_HEADER_LEN);
   return buf;
 }
@@ -136,5 +139,26 @@ describe("decodeClvdFragment", () => {
 
     const tooFar = decodeClvdFragment(encodeFragment(1, 4, 3, true, new Uint8Array(1)));
     expect(tooFar).toBeNull();
+  });
+
+  it("still decodes a v2 18-byte header with stampUs 0", () => {
+    const payload = new Uint8Array([1, 2, 3]);
+    const buf = new ArrayBuffer(VIDEO_HEADER_LEN_V2 + payload.byteLength);
+    const u8 = new Uint8Array(buf);
+    const view = new DataView(buf);
+    for (let i = 0; i < 4; i++) u8[i] = VIDEO_MAGIC.charCodeAt(i);
+    u8[4] = VIDEO_VERSION_V2;
+    u8[5] = FLAG_KEYFRAME;
+    view.setUint16(6, 1280, true);
+    view.setUint16(8, 720, true);
+    view.setUint32(10, 3, true);
+    view.setUint16(14, 0, true);
+    view.setUint16(16, 1, true);
+    u8.set(payload, VIDEO_HEADER_LEN_V2);
+    const frag = decodeClvdFragment(buf)!;
+    expect(frag.stampUs).toBe(0);
+    expect(Array.from(frag.payload)).toEqual([1, 2, 3]);
+    const au = new ClvdAssembler().push(frag);
+    expect(au?.stampUs).toBe(0);
   });
 });

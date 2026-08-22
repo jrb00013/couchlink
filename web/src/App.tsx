@@ -97,6 +97,8 @@ export default function App() {
     target_height: number;
     target_fps: number;
     target_bitrate_kbps: number;
+    age_p50_ms?: number;
+    age_p95_ms?: number;
   } | null>(null);
   /** Session occupancy snapshot — "N/4 players connected" (host owns P1). */
   const [playersStatus, setPlayersStatus] = useState<{

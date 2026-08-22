@@ -95,6 +95,15 @@ impl FrameCapture {
         }
     }
 
+    pub fn write_expedite(&mut self) {
+        match self {
+            Self::Windows(c) => c.write_expedite(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.write_expedite(),
+            Self::Local(_) => {}
+        }
+    }
+
     /// Command the Windows encoder to match the stream target. No-op on the local
     /// path, where the host's own encoder already uses the preset directly.
     pub fn set_target(&mut self, target: EncodeTarget) {

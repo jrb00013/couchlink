@@ -13,6 +13,7 @@ import { clog, cerror, cwarn } from "./log";
 import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
 import { canUseWebCodecs } from "./webCodecsCanvas";
+import { echoAgeOnce } from "./ageEcho";
 
 export type ConnectionState =
   | "disconnected"
@@ -55,6 +56,8 @@ export interface PlayerCallbacks {
     target_height: number;
     target_fps: number;
     target_bitrate_kbps: number;
+    age_p50_ms?: number;
+    age_p95_ms?: number;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
   /** This browser's own assigned slot (1-based), so it can label itself
@@ -824,7 +827,21 @@ export class CouchlinkPlayer {
       if (!frag) return;
       const au = this.clvdAsm.push(frag);
       if (!au) return;
+      const recvMs = performance.now();
       this.cb.onVideoAccessUnit?.(au);
+      const pad = this.padDc;
+      if (pad?.readyState === "open") {
+        echoAgeOnce(
+          { seq: au.seq, stampUs: au.stampUs, recvMs, paintMs: performance.now() },
+          (json) => {
+            try {
+              pad.send(json);
+            } catch {
+              /* pad closing */
+            }
+          }
+        );
+      }
     };
     ch.onclose = () => clog("video datachannel closed");
     ch.onerror = (e) => cerror("video datachannel error", e);

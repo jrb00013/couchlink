@@ -4,11 +4,13 @@
 //! for WebSocket signaling; media stays peer-to-peer. Pad state uses a compact
 //! binary frame (`CLPD`) on the WebRTC DataChannel named `pad`.
 
+pub mod age;
 pub mod pad_frame;
 pub mod video_frame;
 pub mod host_events;
 pub mod signal;
 
+pub use age::{age_ms, parse_age_echo_json, AgeEcho};
 pub use pad_frame::{PadFeedback, PadFrame, PAD_CHANNEL, PAD_MAGIC};
 pub use video_frame::{
     annex_b_is_keyframe, VideoAccessUnit, VideoFragment, VIDEO_CHANNEL, VIDEO_MAGIC,
