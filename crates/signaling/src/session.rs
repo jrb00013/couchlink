@@ -27,6 +27,8 @@ pub struct Session {
     pub pin_failures: u32,
     pub locked_until: Option<DateTime<Utc>>,
     pub last_activity: DateTime<Utc>,
+    /// Host's own P1 pad (`kind`, `id`) so joining players can draw it.
+    pub host_pad: Option<(String, String)>,
 }
 
 pub struct SessionStore {
@@ -123,6 +125,7 @@ impl SessionStore {
                 pin_failures: 0,
                 locked_until: None,
                 last_activity: Utc::now(),
+                host_pad: None,
             }
         });
         Self::check_pin_lock(&entry)?;
@@ -140,6 +143,18 @@ impl SessionStore {
         self.audit
             .record(&session_id, AuditEventKind::HostRegistered, None);
         Ok(())
+    }
+
+    pub fn set_host_pad(&self, session_id: &str, kind: String, id: String) {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.host_pad = Some((kind, id));
+        }
+    }
+
+    pub fn host_pad(&self, session_id: &str) -> Option<(String, String)> {
+        self.sessions
+            .get(session_id)
+            .and_then(|e| e.host_pad.clone())
     }
 
     /// Seated players the new host must re-offer, with a fresh epoch each.

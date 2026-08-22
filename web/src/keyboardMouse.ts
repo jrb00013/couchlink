@@ -14,6 +14,14 @@ import {
   cloneBinds,
 } from "./kbmBinds";
 
+export type KbmSnapshot = {
+  keys: string[];
+  mouseButtons: number;
+  lookX: number;
+  lookY: number;
+  locked: boolean;
+};
+
 export type KbmOptions = {
   /** Sensitivity scalar for mouse → right stick. Default 0.5. */
   mouseSensitivity?: number;
@@ -27,6 +35,9 @@ export class KeyboardMouseInput {
   private mouseButtons = 0;
   private mouseDx = 0;
   private mouseDy = 0;
+  /** Unconsumed look for the mini viz — sample() zeros mouseDx/Dy. */
+  private lookX = 0;
+  private lookY = 0;
   private sensitivity: number;
   private lockTarget: HTMLElement | null;
   private active = false;
@@ -87,6 +98,23 @@ export class KeyboardMouseInput {
     this.mouseButtons = 0;
     this.mouseDx = 0;
     this.mouseDy = 0;
+    this.lookX = 0;
+    this.lookY = 0;
+  }
+
+  /** Live keys/buttons for the keyboard+mouse drawing. Does not consume look. */
+  snapshot(): KbmSnapshot {
+    this.lookX *= 0.86;
+    this.lookY *= 0.86;
+    if (Math.abs(this.lookX) < 0.02) this.lookX = 0;
+    if (Math.abs(this.lookY) < 0.02) this.lookY = 0;
+    return {
+      keys: [...this.keys],
+      mouseButtons: this.mouseButtons,
+      lookX: this.lookX,
+      lookY: this.lookY,
+      locked: this.isPointerLocked(),
+    };
   }
 
   /** Sample current state into a PadState, consuming accumulated mouse delta. */
@@ -193,6 +221,8 @@ export class KeyboardMouseInput {
     if (!document.pointerLockElement) return;
     this.mouseDx += e.movementX / 100;
     this.mouseDy += e.movementY / 100;
+    this.lookX = Math.max(-1, Math.min(1, this.lookX + e.movementX / 40));
+    this.lookY = Math.max(-1, Math.min(1, this.lookY + e.movementY / 40));
   };
 
   private onContextMenu = (e: Event) => {

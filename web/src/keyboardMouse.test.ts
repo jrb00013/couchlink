@@ -65,6 +65,14 @@ describe("KeyboardMouseInput", () => {
     expect(state.ly).toBe(128);
   });
 
+  it("snapshot reports held keys without consuming them", () => {
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyW"));
+    const snap = kbm.snapshot();
+    expect(snap.keys).toContain("KeyW");
+    const state = kbm.sample(1);
+    expect(state.ly).toBe(0);
+  });
+
   it("releases keys on keyup", () => {
     (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyD"));
     (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyD"));
