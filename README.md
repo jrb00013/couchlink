@@ -1,5 +1,6 @@
 # couchlink
 <img width="1918" height="898" alt="image" src="https://github.com/user-attachments/assets/5f855a69-77e1-4d20-8bf6-b5a90e00fcae" />
+<img width="1909" height="908" alt="image" src="https://github.com/user-attachments/assets/134156ca-b89a-465f-a969-c0d92dfbfe34" />
 
 
 **Full co-play device for emulator nights.** You run PCSX2 or RPCS3. Your friend opens a

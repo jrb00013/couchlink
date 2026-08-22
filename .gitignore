@@ -4,6 +4,7 @@
 .local-libs/
 .tools/
 **/node_modules/
+web/dist/
 infra/certs/*.pem
 infra/wireguard/keys/
 var/

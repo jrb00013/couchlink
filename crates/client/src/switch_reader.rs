@@ -73,7 +73,7 @@ mod linux_impl {
         pub fn open_first() -> Result<Self> {
             let (path, bus) = find_switch_hidraw()?
                 .context("no Nintendo Switch controller hidraw node found")?;
-            let file = File::options()
+            let mut file = File::options()
                 .read(true)
                 .write(true)
                 .open(&path)
@@ -84,7 +84,7 @@ mod linux_impl {
             // starts streaming 0x30 reports. Best-effort: Bluetooth needs
             // nothing and a failed handshake just logs.
             if bus == "0003" {
-                usb_handshake(&file, &path);
+                usb_handshake(&mut file, &path);
             }
             info!("opened Nintendo Switch controller at {}", path.display());
             Ok(Self {
@@ -153,7 +153,7 @@ mod linux_impl {
     /// Best-effort handshake for USB-attached Pro Controllers / charging
     /// grips, mirroring `hid-nintendo` `joycon_init_ctlr_state`. Every step is
     /// non-fatal — Bluetooth and already-active devices don't need it.
-    fn usb_handshake(file: &File, path: &PathBuf) {
+    fn usb_handshake(file: &mut File, path: &PathBuf) {
         for cmd in [JC_USB_CMD_HANDSHAKE, JC_USB_CMD_BAUDRATE_3M, JC_USB_CMD_NO_TIMEOUT] {
             if let Err(e) = file
                 .write_all(&[JC_OUTPUT_USB_CMD, cmd])

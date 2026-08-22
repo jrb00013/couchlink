@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type {
   InboundVideoStats,
   MediaPathStats,
@@ -182,12 +183,85 @@ export type HostStats = {
   target_bitrate_kbps: number;
 };
 
+/** A pad_info heartbeat older than this reads as "not actually sending
+ * input right now" rather than merely "connected a while ago" — player.ts
+ * re-announces every 3s while genuinely producing input, so a couple of
+ * missed beats is a real signal, not noise. */
+const PAD_STALE_MS = 8000;
+
+export type PlayerPadEntry = { kind: string; id: string; lastSeenAt: number };
+
+/**
+ * `kind` is what gets sent to the *emulator* — keyboard+mouse and touch both
+ * report "dualsense" there because CLPD frames from either source are
+ * DualSense-shaped, same as a real pad, and that's what makes the emulator
+ * pick the right virtual device. A human reading this debug view doesn't
+ * care what the emulator was told; showing "DualSense" for someone playing
+ * on a keyboard is just wrong, not merely imprecise — the actual input
+ * source lives in `id` instead ("keyboard+mouse" / "touch"), so check that
+ * first.
+ */
+export function padKindLabel(kind: string, id: string): string {
+  if (id === "keyboard+mouse") return "⌨ Keyboard + Mouse";
+  if (id === "touch") return "📱 Touch controls";
+  switch (kind) {
+    case "dualsense":
+      return "DualSense";
+    case "xbox":
+      return "Xbox";
+    case "generic":
+      return "Generic pad";
+    default:
+      return kind || "—";
+  }
+}
+
+function ControllerRow({
+  label,
+  kind,
+  id,
+  hz,
+  lastSeenAt,
+  nowMs,
+}: {
+  label: string;
+  kind: string;
+  id: string;
+  hz?: number;
+  lastSeenAt: number | null;
+  nowMs: number;
+}) {
+  const ageMs = lastSeenAt == null ? null : nowMs - lastSeenAt;
+  const stale = ageMs == null || ageMs > PAD_STALE_MS;
+  const status =
+    ageMs == null
+      ? "no controller reported"
+      : ageMs < 1500
+        ? "sending input now"
+        : `last input ${(ageMs / 1000).toFixed(0)}s ago`;
+  return (
+    <div className={`dt-row dt-pad-row ${stale ? "dt-pad-stale" : "dt-pad-live"}`}>
+      <span className="dt-label">{label}</span>
+      <span className="dt-value">
+        <span className={`dt-pad-dot ${stale ? "" : "dt-pad-dot-live"}`} />
+        {kind || id ? padKindLabel(kind, id) : "—"}
+        {kind && id && id !== "keyboard+mouse" && id !== "touch" ? ` (${id})` : ""}
+        {typeof hz === "number" && hz > 0 ? ` · ${hz}Hz` : ""} — {status}
+      </span>
+    </div>
+  );
+}
+
 export default function DebugDrawer({
   telemetry,
   hostStats,
   present,
   streamInfo,
   presentMode,
+  playerPads,
+  mySlot,
+  myPadName,
+  myPadHz,
   open,
   onToggle,
 }: {
@@ -196,9 +270,15 @@ export default function DebugDrawer({
   present: PresentSummary | null;
   streamInfo: string;
   presentMode: string;
+  playerPads?: Record<number, PlayerPadEntry>;
+  mySlot?: number | null;
+  myPadName?: string | null;
+  myPadHz?: number;
   open: boolean;
   onToggle: () => void;
 }) {
+  const [tab, setTab] = useState<"network" | "controller">("network");
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const t = telemetry;
   const checks = bottleneckChecks({
     path: t?.path ?? null,
@@ -207,6 +287,14 @@ export default function DebugDrawer({
     present,
   });
   const summary = checks.length ? bottleneckSummary(checks) : null;
+
+  // Only tick the clock while the drawer is open and on the Controller tab —
+  // this is purely so "Xs ago" keeps counting up live, not a data source.
+  useEffect(() => {
+    if (!open || tab !== "controller") return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [open, tab]);
 
   return (
     <div className={`debug ${open ? "is-open" : ""}`}>
@@ -222,6 +310,56 @@ export default function DebugDrawer({
         {summary && (
           <p className={`dt-summary dt-${summary.verdict}`}>{summary.text}</p>
         )}
+        <div className="dt-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "network"}
+            className={`dt-tab ${tab === "network" ? "is-active" : ""}`}
+            onClick={() => setTab("network")}
+          >
+            Network
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "controller"}
+            className={`dt-tab ${tab === "controller" ? "is-active" : ""}`}
+            onClick={() => setTab("controller")}
+          >
+            Controller
+          </button>
+        </div>
+        {tab === "controller" ? (
+          <div className="dt-grid">
+            <Group title="Controllers">
+              <ControllerRow
+                label={mySlot ? `You (P${mySlot + 1})` : "You"}
+                kind=""
+                id={myPadName ?? t?.padName ?? "—"}
+                hz={myPadHz ?? t?.padHz}
+                lastSeenAt={(myPadHz ?? t?.padHz ?? 0) > 0 ? nowMs : null}
+                nowMs={nowMs}
+              />
+              {Object.entries(playerPads ?? {})
+                .filter(([slot]) => Number(slot) !== mySlot)
+                .sort(([a], [b]) => Number(a) - Number(b))
+                .map(([slot, p]) => (
+                  <ControllerRow
+                    key={slot}
+                    label={`P${Number(slot) + 1}`}
+                    kind={p.kind}
+                    id={p.id}
+                    lastSeenAt={p.lastSeenAt}
+                    nowMs={nowMs}
+                  />
+                ))}
+              {Object.keys(playerPads ?? {}).length === 0 && (
+                <p className="dt-foot">No other players seated yet.</p>
+              )}
+            </Group>
+          </div>
+        ) : (
         <div className="dt-grid">
           {t?.path && (
             <Group title="Media path / transit latency">
@@ -277,7 +415,8 @@ export default function DebugDrawer({
             <Row label="Stream info" value={streamInfo} />
           </Group>
         </div>
-        {streamInfo && (
+        )}
+        {tab === "network" && streamInfo && (
           <p className="dt-foot">
             {streamInfo} · stats tick every 2s · browser & host numbers fuse
             here to find the slow hop.

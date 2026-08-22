@@ -8,20 +8,26 @@ import {
   canUseWebCodecs,
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
-import { ControllerViz, KeyboardViz, useLivePads } from "./ControllerViz";
+import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
+import type { ControllerKind } from "./controllerKind";
+import { seatForRemoteSlot } from "./seat";
+import { KeyboardMouseViz } from "./KeyboardMouseViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
+import { KeyboardMouseInput } from "./keyboardMouse";
+import { KeybindsModal } from "./KeybindsModal";
+import { loadKbmBinds, type KbmBinds } from "./kbmBinds";
 import {
-  controlLabel,
-  DEFAULT_KEYMAP,
-  KeyboardMouseInput,
-  keyLabel,
-  type KbmControl,
-  type KeyMap,
-  KBM_CONTROLS,
-} from "./keyboardMouse";
-import { detectMobile } from "./mobile";
+  detectLandscape,
+  detectMobile,
+  enterElementFullscreen,
+  exitElementFullscreen,
+  isNativeFullscreen,
+  isSideMode,
+  lockLandscape,
+  unlockOrientation,
+} from "./mobile";
 import { TouchGamepadInput } from "./touchPad";
 import { TouchOverlay } from "./TouchOverlay";
 import type { PlayerTelemetry } from "./player";
@@ -97,27 +103,26 @@ export default function App() {
     occupied: number;
     max: number;
   } | null>(null);
+  /** Per-slot controller status for the debug drawer's Controller tab — kind,
+   * raw device id, and when we last heard a pad_info heartbeat from them
+   * (player.ts re-announces every 3s while actually sending input), so a
+   * stale entry visibly ages instead of silently claiming "connected"
+   * forever after someone's controller stops working. */
+  const [playerPads, setPlayerPads] = useState<
+    Record<number, { kind: string; id: string; lastSeenAt: number }>
+  >({});
+  /** This browser's own player slot, assigned by the session on registration. */
+  const [mySlot, setMySlot] = useState<number | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
+  const [keybindsOpen, setKeybindsOpen] = useState(false);
+  const [kbmBinds, setKbmBinds] = useState<KbmBinds>(() => loadKbmBinds());
   const [pointerLocked, setPointerLocked] = useState(false);
-  /** Active keyboard bindings, persisted so a remap survives a reload. */
-  const [kbmKeymap, setKbmKeymap] = useState<KeyMap>(() => {
-    if (typeof localStorage === "undefined") return { ...DEFAULT_KEYMAP };
-    try {
-      const raw = localStorage.getItem("couchlink.kbmKeymap");
-      if (!raw) return { ...DEFAULT_KEYMAP };
-      return { ...DEFAULT_KEYMAP, ...(JSON.parse(raw) as KeyMap) };
-    } catch {
-      return { ...DEFAULT_KEYMAP };
-    }
-  });
-  /** Keybind editor open — keyboard input is paused while capturing. */
-  const [editorOpen, setEditorOpen] = useState(false);
-  /** Control currently awaiting a key press, or null. */
-  const [capturing, setCapturing] = useState<KbmControl | null>(null);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
+  const [kbmInput, setKbmInput] = useState<KeyboardMouseInput | null>(null);
   const [isMobile, setIsMobile] = useState(() => detectMobile());
+  const [landscape, setLandscape] = useState(() => detectLandscape());
   const touchInputRef = useRef<TouchGamepadInput | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -200,6 +205,16 @@ export default function App() {
       wcRef.current.setFirstPaintHandler(() => {
         promoteWebcodecsPresent();
       });
+      wcRef.current.setStallHandler(() => {
+        promotedRef.current = false;
+        playerRef.current?.resumeWarmup();
+        wcCanvasRef.current?.classList.add("is-hidden");
+        // RTP never stopped decoding — just show the canvas that was
+        // already painting under the WebCodecs layer.
+        canvasRef.current?.classList.remove("is-hidden");
+        videoRef.current?.classList.remove("is-hidden");
+        setVideoDiag("webcodecs stalled — showing live RTP");
+      });
     }
     // Don't tear down a live decoder on every callback.
     if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
@@ -209,28 +224,26 @@ export default function App() {
     return true;
   }
 
-  /** WebCodecs painted its first frame — take over the canvas and cut RTP. */
+  /** WebCodecs painted — show it, but keep RTP decoding on the hidden canvas. */
   function promoteWebcodecsPresent() {
     if (promotedRef.current) return;
     promotedRef.current = true;
     clearRtpFallbackTimer();
-    viewRef.current?.stop();
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-      videoRef.current.classList.add("is-hidden");
-    }
+    // Do not stop the RTP renderer or null the <video> — a lost CLVD
+    // IDR used to freeze the last picture because nothing else was live.
     canvasRef.current?.classList.add("is-hidden");
+    videoRef.current?.classList.add("is-hidden");
     wcCanvasRef.current?.classList.remove("is-hidden");
     setPresentMode("webcodecs");
-    clog("present mode: WebCodecs + CLVD (promoted after first paint)");
+    clog("present mode: WebCodecs + CLVD (RTP stays live, hidden)");
     playerRef.current?.promoteWebcodecs();
   }
 
   function attachStream(stream: MediaStream) {
     heldStreamRef.current = stream;
-    // WebCodecs owns the canvas once promoted — keep the RTP stream for
-    // fallback only. During warm-up it is NOT promoted, so RTP keeps painting
-    // as the visible safety net while the WebCodecs decoder warms up.
+    // WebCodecs is on screen once promoted, but the RTP renderer stays
+    // started — a stall just unhides that canvas. During warm-up RTP is
+    // the visible safety net.
     if (promotedRef.current) {
       if (heldLoggedRef.current !== stream) {
         heldLoggedRef.current = stream;
@@ -409,7 +422,18 @@ export default function App() {
     },
     onTelemetry: (t) => setTelemetry(t),
     onHostStats: (s) => setHostStats(s),
+    onRegistered: (slot) => setMySlot(slot),
     onPlayersStatus: (occupied, max) => setPlayersStatus({ occupied, max }),
+    onPlayerPadInfo: (slot, kind, id) => {
+      setPlayerPads((prev) => ({ ...prev, [slot]: { kind, id, lastSeenAt: Date.now() } }));
+    },
+    onPlayerLeft: (slot) => {
+      setPlayerPads((prev) => {
+        const next = { ...prev };
+        delete next[slot];
+        return next;
+      });
+    },
   });
 
   useEffect(() => {
@@ -445,14 +469,16 @@ export default function App() {
     playerRef.current?.connect(signalingUrl, invite.sessionId, invite.pin);
   }, [invite.auto, invite.sessionId, invite.pin, signalingUrl]);
 
-  // Create/destroy keyboard+mouse input and wire it into the player. Input is
-  // paused while the keybind editor is open so capturing a new key can't also
-  // drive the pad.
+  // Create/destroy keyboard+mouse input and wire it into the player
   useEffect(() => {
     const canvas = canvasRef.current ?? stageRef.current ?? undefined;
-    if (kbmActive && !editorOpen) {
-      const kbm = new KeyboardMouseInput({ lockTarget: canvas ?? null, keymap: kbmKeymap });
+    if (kbmActive) {
+      const kbm = new KeyboardMouseInput({
+        lockTarget: canvas ?? null,
+        binds: kbmBinds,
+      });
       kbmRef.current = kbm;
+      setKbmInput(kbm);
       kbm.start();
       playerRef.current?.setKbm(kbm);
       const onLockChange = () => setPointerLocked(!!document.pointerLockElement);
@@ -460,6 +486,7 @@ export default function App() {
       return () => {
         kbm.stop();
         kbmRef.current = null;
+        setKbmInput(null);
         playerRef.current?.setKbm(null);
         document.removeEventListener("pointerlockchange", onLockChange);
         setPointerLocked(false);
@@ -467,54 +494,32 @@ export default function App() {
     } else {
       kbmRef.current?.stop();
       kbmRef.current = null;
+      setKbmInput(null);
       playerRef.current?.setKbm(null);
     }
-  }, [kbmActive, editorOpen, kbmKeymap]);
+  }, [kbmActive]);
 
-  // Persist a remap and push it to the host immediately (deduped there).
   useEffect(() => {
-    if (typeof localStorage !== "undefined") {
-      try {
-        localStorage.setItem("couchlink.kbmKeymap", JSON.stringify(kbmKeymap));
-      } catch {
-        /* storage full / private mode — bindings just won't survive reload */
-      }
-    }
-    playerRef.current?.sendKeymap();
-  }, [kbmKeymap]);
+    kbmRef.current?.setBinds(kbmBinds);
+  }, [kbmBinds]);
 
-  // Capture the next key press for the armed control; Escape unbinds it.
+  // Re-detect mobile + landscape so side-mode follows a phone tilt.
   useEffect(() => {
-    if (!capturing) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.code === "Escape") {
-        setKbmKeymap((m) => {
-          const next = { ...m };
-          delete next[capturing];
-          return next;
-        });
-        setCapturing(null);
-        return;
-      }
-      if (/^(Key|Digit|Numpad|F|Arrow|Space|Tab|Enter|Escape|Backspace|Delete|Insert|Home|End|Page|Shift|Control|Alt|CapsLock|Semicolon|Comma|Period|Slash|Minus|Equal|Quote|Backquote|Bracket|Backslash)/.test(e.code)) {
-        setKbmKeymap((m) => ({ ...m, [capturing]: e.code }));
-      }
-      setCapturing(null);
+    const sync = () => {
+      setIsMobile(detectMobile());
+      setLandscape(detectLandscape());
+      touchInputRef.current?.refresh();
     };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [capturing]);
-
-  // Re-detect mobile on resize/orientation so the layout follows the device.
-  useEffect(() => {
-    const onResize = () => setIsMobile(detectMobile());
-    window.addEventListener("resize", onResize);
-    window.addEventListener("orientationchange", onResize);
+    window.addEventListener("resize", sync);
+    window.addEventListener("orientationchange", sync);
+    window.visualViewport?.addEventListener("resize", sync);
+    const mq = window.matchMedia?.("(orientation: landscape)");
+    mq?.addEventListener?.("change", sync);
     return () => {
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("orientationchange", onResize);
+      window.removeEventListener("resize", sync);
+      window.removeEventListener("orientationchange", sync);
+      window.visualViewport?.removeEventListener("resize", sync);
+      mq?.removeEventListener?.("change", sync);
     };
   }, []);
 
@@ -537,7 +542,52 @@ export default function App() {
   }, [isMobile]);
 
   const connected = state === "connected" || state === "negotiating";
-  const livePads = useLivePads(true);
+  const sideMode = isSideMode({ mobile: isMobile, landscape, connected });
+
+  useEffect(() => {
+    const onFs = () => setFullscreen(isNativeFullscreen());
+    document.addEventListener("fullscreenchange", onFs);
+    document.addEventListener("webkitfullscreenchange", onFs as EventListener);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFs);
+      document.removeEventListener("webkitfullscreenchange", onFs as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    if (sideMode) {
+      setFullscreen(true);
+      touchInputRef.current?.refresh();
+    } else {
+      void exitElementFullscreen();
+      unlockOrientation();
+      setFullscreen(false);
+    }
+  }, [sideMode, isMobile]);
+
+  const enterSidePlay = async () => {
+    const el = mobileFsRef.current;
+    if (!el) return;
+    await lockLandscape();
+    await enterElementFullscreen(el);
+    setFullscreen(true);
+    touchInputRef.current?.refresh();
+  };
+  const livePads = useLivePads(connected && !isMobile);
+  const hasPhysicalPad = livePads.length > 0;
+  const hostReported = playerPads[0];
+  const hostPad = {
+    kind: (["dualsense", "xbox", "generic"].includes(hostReported?.kind ?? "")
+      ? hostReported!.kind
+      : "dualsense") as ControllerKind,
+    id: hostReported?.id || "host",
+    label: hostReported?.id === "keyboard+mouse" ? "Keyboard + Mouse" : "Host",
+  };
+
+  useEffect(() => {
+    setKbmActive(!hasPhysicalPad && !isMobile);
+  }, [hasPhysicalPad, isMobile]);
 
   const applyPastedLink = () => {
     try {
@@ -553,7 +603,9 @@ export default function App() {
   };
 
   return (
-    <div className={`shell ${fullscreen ? "is-fullscreen" : ""} ${isMobile ? "is-mobile" : ""}`}>
+    <div
+      className={`shell${fullscreen ? " is-fullscreen" : ""}${isMobile ? " is-mobile" : ""}${sideMode ? " is-side" : ""}`}
+    >
       <header className="top">
         <div className="brand">
           <img className="brand-logo" src="/logo.png" alt="" width={56} height={56} />
@@ -562,33 +614,31 @@ export default function App() {
             <p>HD co-play · your DualSense → host Bluetooth pad</p>
           </div>
         </div>
-        <div className="top-pills">
-          <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
-          {playersStatus && (
-            <div className="pill" title="players connected">
-              {playersStatus.occupied + 1}/{playersStatus.max + 1} players
-            </div>
-          )}
-        </div>
-      </header>
-
-      {playersStatus && (
-        <div className="roster" aria-label="player roster">
-          {Array.from({ length: playersStatus.max + 1 }, (_, i) => {
-            const isHost = i === 0;
-            const filled = isHost || i - 1 < playersStatus.occupied;
+        <ol className="roster" aria-label="player seats">
+          {([1, 2, 3, 4] as const).map((seat) => {
+            const remoteSlot = seat - 1;
+            const isHost = seat === 1;
+            const filled =
+              isHost ||
+              !!playerPads[remoteSlot] ||
+              (playersStatus != null && remoteSlot <= playersStatus.occupied);
+            const mine = !isHost && mySlot === remoteSlot;
+            const role = isHost ? "host" : filled ? (mine ? "you" : "player") : "open";
             return (
-              <span
-                key={i}
-                className={`roster-slot${filled ? " is-filled" : ""}${isHost ? " is-host" : ""}`}
+              <li
+                key={seat}
+                className={`roster-slot cv-p${seat}${filled ? " is-filled" : " is-open"}${mine ? " is-you" : ""}`}
               >
-                <span className="roster-num">P{i + 1}</span>
-                {isHost ? "host" : filled ? "player" : "open"}
-              </span>
+                <span className="roster-num">P{seat}</span>
+                <span className="roster-role">{role}</span>
+              </li>
             );
           })}
+        </ol>
+        <div className="top-pills">
+          <div className={`pill state-${state}`}>{state.replace("_", " ")}</div>
         </div>
-      )}
+      </header>
 
       {!connected && (
         <section className="join">
@@ -674,7 +724,7 @@ export default function App() {
 
       <div className="broadcast">
         <div
-          className={`mobile-game${isMobile ? " is-mobile" : ""}${fullscreen ? " is-fullscreen" : ""}`}
+          className={`mobile-game${isMobile ? " is-mobile" : ""}${fullscreen || sideMode ? " is-fullscreen" : ""}${sideMode ? " is-side" : ""}`}
           ref={mobileFsRef}
         >
           <div className="stage-wrap" ref={stageRef}>
@@ -700,6 +750,14 @@ export default function App() {
                 <span>{captureHint}</span>
               </div>
             )}
+            {isMobile && connected && !landscape && (
+              <button type="button" className="tilt-hint" onClick={() => void enterSidePlay()}>
+                <span className="tilt-hint-icon" aria-hidden>
+                  ↻
+                </span>
+                <span>Tilt your phone sideways to play</span>
+              </button>
+            )}
           </div>
 
           {isMobile && connected && touchInputRef.current && (
@@ -712,89 +770,64 @@ export default function App() {
         {connected && !isMobile && (
           <section className="pads" aria-live="polite">
             <div className="pads-head">
-              <span className="pads-count">
-                {1 + livePads.length} controller{1 + livePads.length === 1 ? "" : "s"}
+              <span className="pads-count">host + you</span>
+              <span className="pads-hint">
+                {hasPhysicalPad
+                  ? "host’s pad · your pad"
+                  : pointerLocked
+                    ? "host’s pad · look locked — Esc to release"
+                    : "host’s pad · click the stream to lock look"}
               </span>
-              <span className="pads-hint">host owns P1 · friend pads land on P2–P4</span>
             </div>
             <div className="pads-viz">
-              <ControllerViz
-                key="host-p1"
-                pad={{
-                  index: 0,
-                  id: "host",
-                  label: "Host",
-                  kind: "dualsense",
-                  buttons: [],
-                  axes: [],
-                  l2: 0,
-                  r2: 0,
-                }}
-                active={livePads.length === 0}
-              />
-              {livePads.map((pad, i) => (
+              {hostPad.id === "keyboard+mouse" ? (
+                <KeyboardMouseViz input={null} seat={1} slotLabel="host" />
+              ) : (
                 <ControllerViz
-                  key={`${pad.index}-${pad.id}`}
-                  pad={{ ...pad, index: pad.index + 1 }}
-                  active={livePads.length === 0 ? false : i === 0}
+                  pad={silhouettePad(hostPad.kind, hostPad.id, hostPad.label)}
+                  seat={1}
+                  slotLabel="host"
                 />
-              ))}
-              {kbmActive && livePads.length === 0 && <KeyboardViz keymap={kbmKeymap} />}
+              )}
+              {hasPhysicalPad ? (
+                <ControllerViz
+                  key={`${livePads[0].index}-${livePads[0].id}`}
+                  pad={livePads[0]}
+                  seat={seatForRemoteSlot(mySlot)}
+                  slotLabel="you"
+                  active
+                />
+              ) : (
+                <KeyboardMouseViz
+                  input={kbmInput}
+                  seat={seatForRemoteSlot(mySlot)}
+                  slotLabel="you"
+                  active
+                />
+              )}
             </div>
-            {livePads.length === 0 && (
+            {!hasPhysicalPad && (
               <div className="kbm-row">
                 <button
                   type="button"
-                  className={`kbm-toggle ${kbmActive ? "is-active" : ""}`}
-                  onClick={() => setKbmActive((v) => !v)}
+                  className="kbm-keybinds-btn"
+                  onClick={() => setKeybindsOpen(true)}
                 >
-                  {kbmActive ? "⌨ keyboard+mouse ON" : "⌨ use keyboard+mouse"}
+                  ⌨ keybinds
                 </button>
-                {kbmActive && (
-                  <>
-                    <button
-                      type="button"
-                      className="kbm-edit-toggle"
-                      onClick={() => setEditorOpen((o) => !o)}
-                    >
-                      {editorOpen ? "done editing" : "🎹 edit keys"}
-                    </button>
-                    <span className="kbm-hint">
-                      {pointerLocked
-                        ? "🔒 mouse locked — Esc to release"
-                        : "click stream to lock mouse · keys are shown on the controller"}
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-            {kbmActive && editorOpen && (
-              <div className="kbm-editor" aria-label="keybind editor">
-                <p className="kbm-editor-hint">
-                  Click a key, then press the new key — Esc clears a binding.
-                </p>
-                <div className="kbm-editor-grid">
-                  {KBM_CONTROLS.map((c) => {
-                    const armed = capturing === c;
-                    return (
-                      <div className={`kbm-bind${armed ? " is-armed" : ""}`} key={c}>
-                        <span className="kbm-bind-name">{controlLabel(c)}</span>
-                        <button
-                          type="button"
-                          className={`kbm-bind-key${armed ? " is-armed" : ""}`}
-                          onClick={() => setCapturing(armed ? null : c)}
-                        >
-                          {armed ? "press a key…" : keyLabel(kbmKeymap[c]) || "—"}
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
               </div>
             )}
           </section>
         )}
       </div>
+
+      {keybindsOpen && !hasPhysicalPad && (
+        <KeybindsModal
+          binds={kbmBinds}
+          onChange={setKbmBinds}
+          onClose={() => setKeybindsOpen(false)}
+        />
+      )}
 
       <DebugDrawer
         telemetry={telemetry}
@@ -802,6 +835,10 @@ export default function App() {
         present={present}
         streamInfo={streamMeta}
         presentMode={presentMode}
+        playerPads={playerPads}
+        mySlot={mySlot}
+        myPadName={telemetry?.padName ?? null}
+        myPadHz={telemetry?.padHz ?? 0}
         open={debugOpen}
         onToggle={() => setDebugOpen((o) => !o)}
       />
@@ -815,20 +852,27 @@ export default function App() {
           type="button"
           className="ghost"
           onClick={() => {
-            // On mobile the fullscreen target wraps stage + touch controller so
-            // the controller overlays the video at low opacity; desktop keeps
-            // fullscreening the stage element as before.
-            const el = isMobile ? mobileFsRef.current : stageRef.current;
-            if (!document.fullscreenElement && el) {
-              void el.requestFullscreen();
+            if (isMobile) {
+              if (sideMode || isNativeFullscreen()) {
+                unlockOrientation();
+                void exitElementFullscreen();
+                setFullscreen(false);
+              } else {
+                void enterSidePlay();
+              }
+              return;
+            }
+            const el = stageRef.current;
+            if (!isNativeFullscreen() && el) {
+              void enterElementFullscreen(el);
               setFullscreen(true);
             } else {
-              void document.exitFullscreen();
+              void exitElementFullscreen();
               setFullscreen(false);
             }
           }}
         >
-          Fullscreen
+          {isMobile ? (sideMode ? "Exit side" : "Play sideways") : "Fullscreen"}
         </button>
       </footer>
     </div>

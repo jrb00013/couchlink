@@ -103,40 +103,39 @@ pub struct WebRtcHost {
     keyframe_wanted: Arc<AtomicBool>,
     /// Which path the viewer is actually painting from (`PATH_*` below).
     ///
-    /// Before this, every frame was written to RTP *and* the DataChannel
-    /// because the host had no way to know which one the browser used —
-    /// double the per-frame send work, and two streams competing inside one
-    /// congestion controller. Chrome paints the DataChannel; Safari has no
-    /// WebCodecs here and falls back to RTP. Until the client reports in,
-    /// default to sending both so nobody goes black during that window.
+    /// Chrome paints the DataChannel; Safari has no WebCodecs here and
+    /// falls back to RTP. WebCodecs viewers still receive RTP so a lost
+    /// CLVD IDR can unhide a picture that is already decoding. Until the
+    /// client reports in, default to sending both.
     present_path: Arc<AtomicU8>,
-    /// `COUCHLINK_FEC=1` — send an XOR parity fragment on the CLVD channel so a
-    /// single dropped fragment recovers with no round trip instead of costing a
-    /// full keyframe request.
-    ///
-    /// Off by default: it was built and tested (crates/proto/src/video_frame.rs)
-    /// without a live session to measure real packet loss against, and enabling
-    /// it unmeasured would spend bandwidth on a problem that may not exist. See
-    /// docs/superpowers/plans/2026-08-06-latency-next-session.md §2.1.
+    /// XOR parity fragment on the CLVD channel. On by default — a single
+    /// dropped fragment used to freeze the viewer for the rest of the GOP.
+    /// `COUCHLINK_FEC=0` disables it.
     fec_enabled: bool,
 }
 
 /// `present_path` has not been reported yet — send both paths.
 const PATH_UNKNOWN: u8 = 0;
-/// Client is painting from the CLVD DataChannel — RTP is unnecessary.
+/// Client is painting from the CLVD DataChannel. RTP still goes out — a
+/// lost CLVD IDR used to freeze the last picture with nothing already
+/// decoded to show.
 const PATH_WEBCODECS: u8 = 1;
 /// Client is painting from the RTP media track — the DataChannel is unnecessary.
 const PATH_RTP: u8 = 2;
 
 /// Which of (RTP, DataChannel) to write for a given `present_path` state.
 ///
-/// Utilisation on the measured online path is ~0.29, so skipping a path was
-/// never about saving bandwidth — the cost was two streams competing inside
-/// one congestion controller, converting self-inflicted contention into the
-/// jitter the receiver then buffers as delay. `PATH_UNKNOWN` sends both: a
-/// viewer that hasn't reported in yet must not go black while we guess.
+/// RTP stays on for every path except the explicit RTP-only browsers
+/// (Safari / no WebCodecs), which skip the DataChannel. Cutting RTP after
+/// the first WebCodecs paint left a single unordered DC; one lost IDR
+/// froze the last picture until a hard refresh. `PATH_UNKNOWN` and
+/// `PATH_WEBCODECS` both send both streams so the hidden RTP decoder
+/// stays current and a stall can unhide it immediately.
 fn path_flags(path: u8) -> (bool, bool) {
-    (path != PATH_WEBCODECS, path != PATH_RTP)
+    match path {
+        PATH_RTP => (true, false),
+        _ => (true, true),
+    }
 }
 
 /// Parse a client-reported present path. An unrecognised value maps to
@@ -170,8 +169,13 @@ impl WebRtcHost {
     /// silently picking a side — a typo here must never be the reason a
     /// viewer goes black.
     pub fn set_present_path(&self, path: &str) {
-        self.present_path
-            .store(parse_present_path(path), Ordering::Relaxed);
+        let next = parse_present_path(path);
+        let prev = self.present_path.swap(next, Ordering::Relaxed);
+        // A path flip (warmup after a stall, or RTP fallback) needs an IDR
+        // so the stream that just became visible is not mid-GOP.
+        if prev != next {
+            self.request_keyframe();
+        }
     }
 
     /// True when the video DataChannel has more queued than we are willing to wait on.
@@ -377,9 +381,12 @@ impl WebRtcHost {
                 player_slot,
                 keyframe_wanted,
                 present_path: Arc::new(AtomicU8::new(PATH_UNKNOWN)),
-                fec_enabled: matches!(
+                // On by default: a single lost CLVD fragment used to freeze the
+                // viewer until the next complete IDR made it through, which on
+                // a flapping WAN often never did. `COUCHLINK_FEC=0` turns it off.
+                fec_enabled: !matches!(
                     std::env::var("COUCHLINK_FEC").as_deref(),
-                    Ok("1") | Ok("true")
+                    Ok("0") | Ok("false")
                 ),
             },
             pad_rx,
@@ -613,9 +620,14 @@ async fn setup_pad_channel(
     }));
 }
 
-pub fn create_virtual_pad(as_bluetooth: bool) -> Result<VirtualPad> {
+/// `slot` is this couchlink player slot (1-based) — announced to the
+/// DualSense VHID companion so a reconnect always lands back on this same
+/// slot's own virtual controller instead of whichever one the companion
+/// happens to hand out next.
+pub fn create_virtual_pad(as_bluetooth: bool, slot: u8) -> Result<VirtualPad> {
     let mut cfg = VirtualPadConfig::default();
     cfg.as_bluetooth = as_bluetooth;
+    cfg.companion_slot = slot;
     #[cfg(any(target_os = "linux", windows))]
     {
         match VirtualPad::create(cfg.clone()) {
@@ -734,8 +746,8 @@ mod controller_host_tests {
     }
 
     #[test]
-    fn webcodecs_path_skips_rtp_only() {
-        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
+    fn webcodecs_path_keeps_rtp_so_a_lost_idr_has_a_live_fallback() {
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
     }
 
     #[test]

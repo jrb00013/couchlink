@@ -30,6 +30,29 @@ pub fn handle_request(req: &Request, script_dir: &Path) -> Response {
     }
 }
 
+// Canonical script bodies, baked into the exe at build time. Every op re-syncs
+// script_dir from these before running anything, so the installed scripts can
+// never drift stale relative to this binary — no external input, no separate
+// "refresh" op, nothing an unprivileged caller could point at attacker files.
+const ENABLE_UPNP_PS1: &str = include_str!("../../../scripts/windows/enable-upnp.ps1");
+const UNBLOCK_FIREWALL_PS1: &str = include_str!("../../../scripts/windows/unblock-firewall.ps1");
+
+#[cfg(windows)]
+fn sync_embedded_scripts(script_dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(script_dir)?;
+    write_if_changed(&script_dir.join("enable-upnp.ps1"), ENABLE_UPNP_PS1)?;
+    write_if_changed(&script_dir.join("unblock-firewall.ps1"), UNBLOCK_FIREWALL_PS1)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(path).ok().as_deref() != Some(content) {
+        std::fs::write(path, content)?;
+    }
+    Ok(())
+}
+
 fn run_online_prep(
     script_dir: &Path,
     skip_map: bool,
@@ -44,13 +67,10 @@ fn run_online_prep(
     }
     #[cfg(windows)]
     {
-        let script = script_dir.join("enable-upnp.ps1");
-        if !script.is_file() {
-            return Response::err(
-                Some("online_prep"),
-                format!("missing script: {}", script.display()),
-            );
+        if let Err(e) = sync_embedded_scripts(script_dir) {
+            return Response::err(Some("online_prep"), format!("sync scripts: {e}"));
         }
+        let script = script_dir.join("enable-upnp.ps1");
         let run_dir = helper_run_dir();
         let _ = std::fs::create_dir_all(&run_dir);
         let marker = run_dir.join("enable-upnp.exit");
@@ -124,13 +144,10 @@ fn run_firewall_unblock(script_dir: &Path) -> Response {
     }
     #[cfg(windows)]
     {
-        let script = script_dir.join("unblock-firewall.ps1");
-        if !script.is_file() {
-            return Response::err(
-                Some("firewall_unblock"),
-                format!("missing script: {}", script.display()),
-            );
+        if let Err(e) = sync_embedded_scripts(script_dir) {
+            return Response::err(Some("firewall_unblock"), format!("sync scripts: {e}"));
         }
+        let script = script_dir.join("unblock-firewall.ps1");
         let run_dir = helper_run_dir();
         let _ = std::fs::create_dir_all(&run_dir);
         // unblock-firewall.ps1 writes to LOCALAPPDATA; SYSTEM uses ProgramData run dir

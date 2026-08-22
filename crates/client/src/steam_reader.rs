@@ -62,7 +62,7 @@ mod linux_impl {
 
     /// `HIDIOCSFEATURE(len)` = `_IOWR('H', 0x06, len)`.
     fn hidio_sfeature(len: usize) -> usize {
-        (3u64 << 30) | ((len as u64) << 16) | (0x48 << 8) | 0x06
+        ((3u64 << 30) | ((len as u64) << 16) | (0x48 << 8) | 0x06) as usize
     }
 
     pub struct SteamReader {

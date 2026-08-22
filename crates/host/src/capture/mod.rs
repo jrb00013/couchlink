@@ -2,11 +2,15 @@ mod bridge;
 mod local;
 #[cfg(target_os = "linux")]
 mod cursor_x11;
+#[cfg(target_os = "linux")]
+mod hyperv_bridge;
 
 use anyhow::{bail, Context, Result};
 pub use bridge::Captured;
 use bridge::WindowsBridge;
 use couchlink_capture_bridge::{EncodeTarget, FrameFormat};
+#[cfg(target_os = "linux")]
+use hyperv_bridge::HyperVBridge;
 use local::ScrapCapture;
 
 pub fn sample_avg_luma_bgra(bgra: &[u8], max_pixels: usize) -> u64 {
@@ -16,12 +20,27 @@ pub fn sample_avg_luma_bgra(bgra: &[u8], max_pixels: usize) -> u64 {
 pub enum FrameCapture {
     Local(ScrapCapture),
     Windows(WindowsBridge),
+    #[cfg(target_os = "linux")]
+    HyperV(HyperVBridge),
 }
 
 impl FrameCapture {
-    /// `windows_capture`: None = local display; `"auto"` / bind addr = listen for Windows client.
+    /// `windows_capture`: None = local display; `"auto"` / bind addr = listen for Windows
+    /// client over TCP; `"hyperv:<port>"` or `"hyperv:<port>:<vm-id>"` = connect out over
+    /// a Hyper-V socket instead — the host only needs the port (the VmId is win-capture's
+    /// own bind parameter, passed on its `--connect`, not this side's) — see
+    /// `hyperv_bridge.rs` for why that skips the WSL2 virtual network stack entirely.
     pub fn open(windows_capture: Option<&str>) -> Result<Self> {
         if let Some(spec) = windows_capture.filter(|s| !s.is_empty() && *s != "0" && *s != "false") {
+            #[cfg(target_os = "linux")]
+            if let Some(rest) = spec.strip_prefix("hyperv:") {
+                let port_str = rest.split(':').next().unwrap_or(rest);
+                let port: u32 = port_str
+                    .parse()
+                    .with_context(|| format!("bad hyperv port {port_str:?} (expected a number)"))?;
+                info_log(&format!("Windows desktop capture over Hyper-V socket (port {port})"));
+                return Ok(Self::HyperV(HyperVBridge::connect(port)?));
+            }
             let bind = resolve_listen_addr(spec)?;
             info_log(&format!("Windows desktop capture listening on {bind}"));
             return Ok(Self::Windows(WindowsBridge::listen(&bind)?));
@@ -33,6 +52,8 @@ impl FrameCapture {
         match self {
             Self::Local(c) => c.width,
             Self::Windows(c) => c.width,
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.width,
         }
     }
 
@@ -40,6 +61,8 @@ impl FrameCapture {
         match self {
             Self::Local(c) => c.height,
             Self::Windows(c) => c.height,
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.height,
         }
     }
 
@@ -47,6 +70,8 @@ impl FrameCapture {
         match self {
             Self::Local(c) => Ok(c.capture_bgra()?.map(Captured::Bgra)),
             Self::Windows(c) => c.capture(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.capture(),
         }
     }
 
@@ -55,34 +80,113 @@ impl FrameCapture {
         match self {
             Self::Local(_) => false,
             Self::Windows(c) => c.format() == FrameFormat::H264,
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.format() == FrameFormat::H264,
         }
     }
 
     /// Ask the source for a keyframe. Only meaningful when pre-encoded.
     pub fn request_idr(&mut self) {
-        if let Self::Windows(c) = self {
-            c.request_idr();
+        match self {
+            Self::Windows(c) => c.request_idr(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.request_idr(),
+            Self::Local(_) => {}
         }
     }
 
     /// Command the Windows encoder to match the stream target. No-op on the local
     /// path, where the host's own encoder already uses the preset directly.
     pub fn set_target(&mut self, target: EncodeTarget) {
-        if let Self::Windows(c) = self {
-            c.set_target(target);
+        match self {
+            Self::Windows(c) => c.set_target(target),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.set_target(target),
+            Self::Local(_) => {}
         }
     }
 
     /// Discard anything already buffered so the stream starts from *now*.
     pub fn resync(&mut self) {
-        if let Self::Windows(c) = self {
-            c.resync();
+        match self {
+            Self::Windows(c) => c.resync(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.resync(),
+            Self::Local(_) => {}
+        }
+    }
+
+    /// Frames received since the last call. Always 0 on the local path, which
+    /// has no socket hop to lose frames over.
+    pub fn take_received(&mut self) -> u64 {
+        match self {
+            Self::Local(_) => 0,
+            Self::Windows(c) => c.take_received(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.take_received(),
         }
     }
 }
 
 fn info_log(msg: &str) {
     tracing::info!("{msg}");
+}
+
+/// Postmortem: `docs/INCIDENT-2026-08-19-terminals-died.md`. win-capture died
+/// alongside a crashed terminal and nothing ever relaunched it — the host
+/// kept running and the player just saw a frozen picture until they rejoined
+/// (which didn't even help, since capture was still down). `bridge.rs` and
+/// `hyperv_bridge.rs` call this once the Windows side has been gone longer
+/// than a moment, so a dead win-capture heals itself instead of waiting on a
+/// reconnect that nothing was ever going to trigger.
+///
+/// Fire-and-forget: `ensure-win-capture.sh` launches PowerShell, which can
+/// take real time, and this runs from the capture poll loop — blocking here
+/// would turn a capture outage into a frame-loop stall too. Repo root comes
+/// from `COUCHLINK_ROOT` (set by `start-host.sh`), same lookup
+/// `emulator_pad.rs` already uses for its own best-effort script re-runs.
+pub(crate) fn respawn_windows_capture() {
+    let Ok(root) = std::env::var("COUCHLINK_ROOT") else {
+        tracing::warn!("win-capture link down and COUCHLINK_ROOT unset — cannot self-heal");
+        return;
+    };
+    let script = std::path::Path::new(&root).join("scripts/ensure-win-capture.sh");
+    if !script.is_file() {
+        return;
+    }
+    tracing::warn!("win-capture link has been down too long — relaunching it");
+    if let Err(e) = std::process::Command::new("bash")
+        .arg(&script)
+        .current_dir(&root)
+        // `ensure-win-capture.sh` defaults to the interactive picker, which
+        // `run.sh` launches with `WindowStyle Normal` specifically so it can
+        // steal focus and be clicked (see AllowSetForegroundWindow in
+        // win_capture.rs). That is correct for the user-driven first launch,
+        // but this is an unattended mid-session respawn — re-popping a
+        // foreground picker dialog here yanks focus off the game (and the
+        // remote player's controller input with it, since XInput delivery
+        // depends on whichever window currently has it) for no reason: there
+        // is nothing to click, nobody watching for it, and it just steals
+        // focus until it times out or falls back on its own. Force a
+        // non-interactive capture source instead, unless the caller already
+        // pinned a specific one.
+        .env(
+            "COUCHLINK_CAPTURE_SOURCE",
+            std::env::var("COUCHLINK_CAPTURE_SOURCE")
+                .ok()
+                .filter(|s| s != "picker" && !s.is_empty())
+                .unwrap_or_else(|| "desktop".to_string()),
+        )
+        // Respawn is unattended — don't cargo-build on every 20s retry.
+        // That was opening a blue PowerShell even when the exe was already there.
+        .env("COUCHLINK_SKIP_WIN_CAPTURE_BUILD", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        tracing::warn!("could not relaunch win-capture: {e}");
+    }
 }
 
 pub fn is_wsl() -> bool {

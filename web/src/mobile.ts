@@ -24,3 +24,87 @@ export function detectMobile(): boolean {
   const small = window.innerWidth <= 820;
   return coarse || (touch && small);
 }
+
+/** Phone turned on its side — the play posture for mobile side-mode. */
+export function detectLandscape(): boolean {
+  if (typeof window === "undefined") return false;
+  const mm = window.matchMedia?.("(orientation: landscape)");
+  if (mm && typeof mm.matches === "boolean") return mm.matches;
+  return window.innerWidth > window.innerHeight;
+}
+
+/** Landscape + mobile + in-session → side-screen play (video fill, rails). */
+export function isSideMode(opts: {
+  mobile: boolean;
+  landscape: boolean;
+  connected: boolean;
+}): boolean {
+  return opts.mobile && opts.landscape && opts.connected;
+}
+
+type FsEl = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+  webkitRequestFullScreen?: () => Promise<void> | void;
+};
+
+type FsDoc = Document & {
+  webkitExitFullscreen?: () => Promise<void> | void;
+  webkitFullscreenElement?: Element | null;
+};
+
+export function isNativeFullscreen(): boolean {
+  if (typeof document === "undefined") return false;
+  const doc = document as FsDoc;
+  return !!(document.fullscreenElement || doc.webkitFullscreenElement);
+}
+
+/** Best-effort Fullscreen API. iOS often rejects this without a tap; CSS side-mode still applies. */
+export async function enterElementFullscreen(el: HTMLElement): Promise<boolean> {
+  const anyEl = el as FsEl;
+  try {
+    if (el.requestFullscreen) {
+      await el.requestFullscreen();
+      return true;
+    }
+    if (anyEl.webkitRequestFullscreen) {
+      await anyEl.webkitRequestFullscreen();
+      return true;
+    }
+    if (anyEl.webkitRequestFullScreen) {
+      await anyEl.webkitRequestFullScreen();
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+export async function exitElementFullscreen(): Promise<void> {
+  if (typeof document === "undefined") return;
+  const doc = document as FsDoc;
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+      await doc.webkitExitFullscreen();
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function lockLandscape(): Promise<void> {
+  try {
+    await screen.orientation?.lock?.("landscape");
+  } catch {
+    /* iOS / unsigned web — lock is optional */
+  }
+}
+
+export function unlockOrientation(): void {
+  try {
+    screen.orientation?.unlock?.();
+  } catch {
+    /* ignore */
+  }
+}

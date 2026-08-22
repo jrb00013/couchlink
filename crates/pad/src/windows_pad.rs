@@ -10,7 +10,10 @@ use crate::vhid_client::VhidClient;
 use crate::virtual_pad::{VirtualPadBackend, VirtualPadConfig};
 
 pub enum WindowsPad {
-    DualSenseVhid(VhidClient),
+    /// Slot kept alongside the client so a mid-session reconnect (below)
+    /// re-announces the same slot instead of silently landing on whatever
+    /// the companion happens to assign next.
+    DualSenseVhid(VhidClient, u8),
     VigemXbox360(VigemXbox),
     VigemDs4(VigemDs4),
     Noop,
@@ -18,17 +21,18 @@ pub enum WindowsPad {
 
 impl WindowsPad {
     pub fn create(cfg: &VirtualPadConfig) -> Result<Self> {
+        let slot = cfg.companion_slot;
         match cfg.backend {
             VirtualPadBackend::Noop => Ok(Self::Noop),
-            VirtualPadBackend::DualSense => VhidClient::connect()
-                .map(Self::DualSenseVhid)
+            VirtualPadBackend::DualSense => VhidClient::connect(slot)
+                .map(|c| Self::DualSenseVhid(c, slot))
                 .context("DualSense VHID companion not available"),
             VirtualPadBackend::Ds4 => VigemDs4::create().map(Self::VigemDs4),
             VirtualPadBackend::Xbox360 => VigemXbox::create().map(Self::VigemXbox360),
             VirtualPadBackend::Auto => {
-                if let Ok(ds) = VhidClient::connect() {
+                if let Ok(ds) = VhidClient::connect(slot) {
                     info!("Windows virtual pad: DualSense VHID companion");
-                    return Ok(Self::DualSenseVhid(ds));
+                    return Ok(Self::DualSenseVhid(ds, slot));
                 }
                 warn!("DualSense VHID unavailable — trying ViGEm DS4");
                 if let Ok(ds4) = VigemDs4::create() {
@@ -55,15 +59,16 @@ impl WindowsPad {
             // mid-session. Without reconnecting, every later frame returns
             // "Broken pipe" and the player's input is dead for good while video
             // keeps flowing — the failure looks like the pad, not the pipe.
-            Self::DualSenseVhid(p) => match p.apply(frame) {
+            Self::DualSenseVhid(p, slot) => match p.apply(frame) {
                 Ok(()) => Ok(()),
                 Err(e) => {
-                    let Ok(mut fresh) = VhidClient::connect() else {
+                    let this_slot = *slot;
+                    let Ok(mut fresh) = VhidClient::connect(this_slot) else {
                         return Err(e);
                     };
                     tracing::info!("DualSense VHID companion reconnected after {e}");
                     let r = fresh.apply(frame);
-                    *self = Self::DualSenseVhid(fresh);
+                    *self = Self::DualSenseVhid(fresh, this_slot);
                     r
                 }
             },
@@ -75,7 +80,7 @@ impl WindowsPad {
 
     pub fn poll_feedback(&mut self) -> Result<Vec<PadFeedback>> {
         match self {
-            Self::DualSenseVhid(p) => p.poll_feedback(),
+            Self::DualSenseVhid(p, _) => p.poll_feedback(),
             _ => Ok(Vec::new()),
         }
     }

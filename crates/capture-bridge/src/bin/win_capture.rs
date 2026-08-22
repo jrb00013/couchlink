@@ -14,7 +14,7 @@ mod run {
     use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
-    use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
+    use couchlink_capture_bridge::{window_matches, write_frame_with_format, FrameFormat};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::io::BufWriter;
     use std::net::TcpStream;
@@ -653,6 +653,37 @@ mod run {
         Ok(())
     }
 
+    /// Title *or* process name, and keep looking until it exists.
+    ///
+    /// Emulators rewrite the window title to the game name, so a title-only
+    /// match for "PCSX2" misses "Marvel - Ultimate Alliance" owned by
+    /// pcsx2-qt. Waiting means the host can start before the emulator does.
+    fn wait_for_window(needle: &str) -> Result<Window> {
+        let mut attempt = 0u32;
+        loop {
+            if let Some(w) = find_window(needle)? {
+                return Ok(w);
+            }
+            attempt += 1;
+            if attempt == 1 || attempt % 15 == 0 {
+                warn!("no window matching {needle:?} by title or process — waiting");
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    fn find_window(needle: &str) -> Result<Option<Window>> {
+        let wins = Window::enumerate().context("enumerate windows")?;
+        for w in wins {
+            let title = w.title().unwrap_or_default();
+            let proc = w.process_name().unwrap_or_default();
+            if window_matches(needle, &title, &proc) && !title.trim().is_empty() {
+                return Ok(Some(w));
+            }
+        }
+        Ok(None)
+    }
+
     /// Host commands, multiplexed on the reverse of the frame socket.
     ///
     /// `I` = request IDR (1 byte). `T` = SET_TARGET, followed by 16 bytes of
@@ -660,8 +691,7 @@ mod run {
     /// sees a `T`, which is fine: the host writes a command in one `write_all`,
     /// so a partial `T` payload only happens on a torn socket, which is broken
     /// anyway. Anything else means the link died.
-    fn watch_commands(mut reader: TcpStream) {
-        use std::io::Read;
+    fn watch_commands(mut reader: impl std::io::Read) {
         let mut byte = [0u8; 1];
         loop {
             match reader.read(&mut byte) {
@@ -690,6 +720,27 @@ mod run {
     }
 
     fn spawn_tcp_writer(connect: String, rx: mpsc::Receiver<FrameMsg>) {
+        // `hyperv:<port>:<vm-id>` skips TCP (and the whole WSL2 virtual
+        // switch/NAT hop) in favour of a Hyper-V socket — see
+        // `couchlink_capture_bridge::hyperv`. `vm-id` is the WSL2 side's own
+        // `wslinfo --vm-id`: binding AF_HYPERV to the wildcard VmId instead
+        // was tried first and does not work (see that module's docs).
+        if let Some(rest) = connect.strip_prefix("hyperv:") {
+            let Some((port, vm_id)) = rest.split_once(':') else {
+                warn!("bad hyperv spec {rest:?} — expected hyperv:<port>:<vm-id>, exiting writer");
+                return;
+            };
+            let Ok(port) = port.parse::<u32>() else {
+                warn!("bad hyperv port {port:?} (expected a number), exiting writer");
+                return;
+            };
+            let Ok(vm_id) = windows::core::GUID::try_from(vm_id) else {
+                warn!("bad hyperv vm-id {vm_id:?} (expected a GUID), exiting writer");
+                return;
+            };
+            spawn_hyperv_writer(port, vm_id, rx);
+            return;
+        }
         std::thread::spawn(move || loop {
             match TcpStream::connect(&connect) {
                 Ok(stream) => {
@@ -713,6 +764,43 @@ mod run {
                 Err(e) => {
                     tracing::debug!("connect {connect}: {e}");
                     std::thread::sleep(Duration::from_millis(750));
+                }
+            }
+        });
+    }
+
+    /// Listens on a Hyper-V socket and serves whichever WSL2 host connects.
+    /// One listener, re-accepted forever, mirroring the TCP writer's own
+    /// reconnect-and-keep-serving behaviour.
+    fn spawn_hyperv_writer(port: u32, vm_id: windows::core::GUID, rx: mpsc::Receiver<FrameMsg>) {
+        use couchlink_capture_bridge::hyperv::HvListener;
+        std::thread::spawn(move || {
+            let listener = match HvListener::bind(port, vm_id) {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("could not bind Hyper-V socket on port {port}: {e:#}");
+                    return;
+                }
+            };
+            loop {
+                match listener.accept() {
+                    Ok(mut stream) => {
+                        info!("Hyper-V socket: WSL2 host connected");
+                        let reader = stream.try_clone();
+                        std::thread::spawn(move || watch_commands(reader));
+                        while let Ok((w, h, payload, format, keyframe)) = rx.recv() {
+                            if let Err(e) =
+                                write_frame_with_format(&mut stream, w, h, format, keyframe, &payload)
+                            {
+                                warn!("send frame over Hyper-V socket failed: {e:#} — reconnecting");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Hyper-V socket accept failed: {e:#}");
+                        std::thread::sleep(Duration::from_millis(750));
+                    }
                 }
             }
         });
@@ -782,6 +870,21 @@ mod run {
                 BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             CaptureSource::Picker => {
+                // This process is launched from a background chain (WSL → cmd →
+                // powershell → this exe), not from the user clicking something —
+                // Windows' foreground-lock timeout denies a window from a process
+                // like that the right to steal focus, so the picker's owner
+                // window (crates.io windows-capture already does the correct
+                // IInitializeWithWindow dance) can end up created but never
+                // actually brought to the front: it opens invisibly behind
+                // everything, and there is nothing to click. ASFW_ANY lifts that
+                // restriction for the next SetForegroundWindow call from any
+                // process, which is exactly what the picker's own window needs.
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+                        windows::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+                    );
+                }
                 info!("open the Windows capture picker and choose a window or monitor…");
                 match GraphicsCapturePicker::pick_item().context("capture picker") {
                     Ok(Some(item)) => {
@@ -835,8 +938,7 @@ mod run {
                 if args.window.trim().is_empty() {
                     bail!("--source window requires --window TITLE_SUBSTRING");
                 }
-                let w = Window::from_contains_name(&args.window)
-                    .with_context(|| format!("no window matching '{}'", args.window))?;
+                let w = wait_for_window(&args.window)?;
                 info!(
                     "capturing window '{}' → {}",
                     w.title().unwrap_or_else(|_| args.window.clone()),

@@ -76,10 +76,12 @@ fn run_windows(args: Args) -> Result<()> {
         args.port,
         couchlink_pad::vhid_proto::VHID_PIPE_NAME
     );
-    info!("Emulator: P1 = host's own pad; each connection here plugs in one more (P2, P3, P4…)");
+    info!("Emulator: P1 = host's own pad; each connecting slot plugs in one more (P2, P3, P4…)");
 
     let tcp_backend_kind = args.backend;
+    let registry = session::SlotRegistry::new();
     let bind = format!("{}:{}", args.bind, args.port);
+    let tcp_registry = registry.clone();
     std::thread::spawn(move || {
         let listener = match TcpListener::bind(&bind) {
             Ok(l) => l,
@@ -89,27 +91,13 @@ fn run_windows(args: Args) -> Result<()> {
             }
         };
         info!("listening TCP {bind}");
-        let mut next_player: u32 = 1;
         for conn in listener.incoming() {
             match conn {
                 Ok(stream) => {
-                    let player = next_player;
-                    next_player += 1;
-                    // Each connection is one player's pad. A fresh backend means a
-                    // fresh ViGEm target — ViGEmBus assigns the next free XInput/DS4
-                    // slot on plugin() — and a fresh hub means this player only ever
-                    // hears its own rumble feedback, never another player's.
-                    let hub = session::OutputHub::new();
-                    let backend = match backend::create(tcp_backend_kind, hub.clone()) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!("player {player}: virtual pad create failed: {e:#}");
-                            continue;
-                        }
-                    };
+                    let registry = tcp_registry.clone();
                     std::thread::spawn(move || {
-                        if let Err(e) = session::serve_tcp(stream, backend, hub) {
-                            warn!("TCP session (player {player}): {e:#}");
+                        if let Err(e) = session::serve_tcp(stream, registry, tcp_backend_kind) {
+                            warn!("TCP session: {e:#}");
                         }
                     });
                 }
@@ -118,7 +106,7 @@ fn run_windows(args: Args) -> Result<()> {
         }
     });
 
-    pipe_win::serve_pipe(args.backend).context("named pipe server")?;
+    pipe_win::serve_pipe(registry, args.backend).context("named pipe server")?;
     Ok(())
 }
 

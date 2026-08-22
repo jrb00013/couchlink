@@ -15,10 +15,34 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+
+# docs/INCIDENT-2026-08-19-terminals-died.md: every console couchlink spawns
+# (this one included) attaches into the user's interactive Windows Terminal
+# by default, and enough of that from non-interactive tooling destabilizes
+# it. Idempotent — a cheap registry read after the first run.
+try {
+    & (Join-Path $Root "scripts\windows\fix-default-terminal.ps1") | Out-Null
+} catch {
+    Write-Host "WARN: fix-default-terminal.ps1 failed (non-fatal): $($_.Exception.Message)"
+}
+
 $BuildScript = Join-Path $Root "scripts\build-win-capture.ps1"
-$Bin = & $BuildScript
+$built = @(& $BuildScript)
+$Bin = "$($built | Select-Object -Last 1)".Trim()
 if (-not $Bin) { throw "build-win-capture.ps1 returned no binary path" }
-$Bin = "$Bin".Trim()
+
+# $Root resolves through the \\wsl.localhost\... UNC share this script was
+# invoked from, so $Bin does too — and Windows shows a blocking "Open File -
+# Security Warning" for an unsigned .exe run from a network location, with
+# nobody there to click it since this runs from a background-spawned
+# PowerShell. Every capture-picker-never-appeared symptom traced back to this:
+# the exe never even started. Stage it to a real local NTFS path first so it's
+# never in that zone to begin with — the fix, not a prompt-suppression hack.
+$LocalDir = Join-Path $env:LOCALAPPDATA "couchlink\bin"
+New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
+$LocalBin = Join-Path $LocalDir "couchlink-win-capture.exe"
+Copy-Item -Path $Bin -Destination $LocalBin -Force
+$Bin = $LocalBin
 
 if ($BuildOnly) { exit 0 }
 
@@ -37,4 +61,16 @@ if ($Source -eq "window") {
 }
 
 Write-Host "Windows capture: source=$Source connect=$Connect ${MaxWidth}x${MaxHeight} @ ${BitrateKbps}kbps"
-& $Bin @argList
+if ($Source -eq "window") {
+    # Title match can race the emulator: host start must not require PCSX2 to
+    # already exist. Retry until the window appears (or capture ends cleanly).
+    while ($true) {
+        & $Bin @argList
+        $code = $LASTEXITCODE
+        if ($null -eq $code -or $code -eq 0) { exit 0 }
+        Write-Host "Windows capture: no window matching '$Window' yet (exit $code) — retrying in 2s"
+        Start-Sleep -Seconds 2
+    }
+} else {
+    & $Bin @argList
+}

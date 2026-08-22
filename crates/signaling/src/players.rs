@@ -77,6 +77,20 @@ impl PlayerTable {
             .map(|i| i as u8 + 1)
     }
 
+    /// Bump the table epoch once per seated slot and return `(slot, epoch)`
+    /// so a reconnecting host is told to re-offer. Same epoch for every slot
+    /// would make the host ignore the 2nd and 3rd as stale.
+    pub fn replay_for_host(&mut self) -> Vec<(u8, u64)> {
+        let mut out = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if slot.is_some() {
+                self.epoch = self.epoch.saturating_add(1);
+                out.push((i as u8 + 1, self.epoch));
+            }
+        }
+        out
+    }
+
     pub fn occupied(&self) -> u8 {
         self.slots.iter().filter(|s| s.is_some()).count() as u8
     }
@@ -170,6 +184,16 @@ mod tests {
         let (slot, _) = t.assign(mine.clone()).unwrap();
         assert_eq!(t.slot_of(&mine), Some(slot));
         assert_eq!(t.slot_of(&tx()), None);
+    }
+
+    #[test]
+    fn replay_for_host_skips_empty_slots_and_bumps_epoch() {
+        let mut t = PlayerTable::default();
+        t.assign(tx()).unwrap();
+        t.assign(tx()).unwrap();
+        let replay = t.replay_for_host();
+        assert_eq!(replay.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(replay[1].1 > replay[0].1);
     }
 
     #[test]

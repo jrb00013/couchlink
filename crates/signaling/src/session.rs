@@ -27,6 +27,8 @@ pub struct Session {
     pub pin_failures: u32,
     pub locked_until: Option<DateTime<Utc>>,
     pub last_activity: DateTime<Utc>,
+    /// Host's own P1 pad (`kind`, `id`) so joining players can draw it.
+    pub host_pad: Option<(String, String)>,
 }
 
 pub struct SessionStore {
@@ -123,6 +125,7 @@ impl SessionStore {
                 pin_failures: 0,
                 locked_until: None,
                 last_activity: Utc::now(),
+                host_pad: None,
             }
         });
         Self::check_pin_lock(&entry)?;
@@ -140,6 +143,28 @@ impl SessionStore {
         self.audit
             .record(&session_id, AuditEventKind::HostRegistered, None);
         Ok(())
+    }
+
+    pub fn set_host_pad(&self, session_id: &str, kind: String, id: String) {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.host_pad = Some((kind, id));
+        }
+    }
+
+    pub fn host_pad(&self, session_id: &str) -> Option<(String, String)> {
+        self.sessions
+            .get(session_id)
+            .and_then(|e| e.host_pad.clone())
+    }
+
+    /// Seated players the new host must re-offer, with a fresh epoch each.
+    /// Without this, a host restart leaves browsers on "Waiting for host offer"
+    /// until they hard-refresh — PeerJoined was already sent to the dead host.
+    pub fn seated_for_host_replay(&self, session_id: &str) -> Vec<(u8, u64)> {
+        let Some(mut entry) = self.sessions.get_mut(session_id) else {
+            return Vec::new();
+        };
+        entry.players.replay_for_host()
     }
 
     /// Registers a player socket into the first free slot, returning `(slot, epoch)`.
@@ -304,12 +329,16 @@ impl SessionStore {
             WhoLeft::Player(slot) => {
                 // Name the slot so the host can tear down exactly that peer
                 // connection instead of guessing when more than one is up.
+                // Also reaches every other player (not just the host) so a
+                // controller debug view can drop that slot's pad info instead
+                // of showing a stale "connected" for someone who just left.
                 let peer_left = couchlink_proto::SignalMessage::PeerLeft { slot }
                     .to_json()
                     .unwrap_or_default();
                 if let Some(tx) = self.peer_tx(session_id, Role::Host) {
-                    let _ = tx.send(peer_left);
+                    let _ = tx.send(peer_left.clone());
                 }
+                self.broadcast_to_players(session_id, &peer_left);
             }
         }
         self.audit
@@ -386,6 +415,23 @@ mod tests {
             "the reloaded socket must take a fresh slot while the stale one is registered"
         );
         assert_eq!(s.players_status("sid"), Some((2, crate::players::MAX_PLAYERS)));
+    }
+
+    #[test]
+    fn reconnecting_host_is_told_about_seated_players() {
+        let s = store();
+        s.register_host("sid".into(), "pin".into(), None, None, None, chan())
+            .expect("host");
+        let (_slot1, _) = s
+            .register_player("sid".into(), "pin".into(), chan())
+            .expect("p1");
+        let (_slot2, _) = s
+            .register_player("sid".into(), "pin".into(), chan())
+            .expect("p2");
+
+        let replay = s.seated_for_host_replay("sid");
+        assert_eq!(replay.len(), 2);
+        assert!(replay[1].1 > replay[0].1, "each seated slot gets its own epoch");
     }
 
     /// Regression: a reconnecting host races itself. The old socket's close can be

@@ -1,6 +1,5 @@
 mod capture;
 mod config;
-mod emulator_keymap;
 mod emulator_pad;
 mod encode;
 mod invite;
@@ -91,6 +90,18 @@ async fn push_bounded(
     }
 }
 
+/// The host's own P1 pad — what friends draw next to their own device.
+/// Override with COUCHLINK_HOST_PAD_KIND / COUCHLINK_HOST_PAD_ID.
+fn host_physical_pad() -> (String, String) {
+    let kind = std::env::var("COUCHLINK_HOST_PAD_KIND").unwrap_or_else(|_| "dualsense".into());
+    let id = std::env::var("COUCHLINK_HOST_PAD_ID").unwrap_or_else(|_| match kind.as_str() {
+        "xbox" => "Host Xbox".into(),
+        "keyboard" | "keyboard+mouse" => "keyboard+mouse".into(),
+        _ => "Host DualSense".into(),
+    });
+    (kind, id)
+}
+
 /// One remote player's peer connection, virtual controller, and feedback loop.
 ///
 /// The host's own physical pad owns emulator P1, so a `PlayerConn` for slot `s`
@@ -104,9 +115,6 @@ struct PlayerConn {
     /// Last controller family this player reported, so the emulator rebind (a
     /// process spawn) only runs when the answer actually changes.
     last_pad_kind: Option<String>,
-    /// Last keyboard keymap this player reported, so the emulator-config
-    /// rewrite (a file write) only runs when the binding actually changes.
-    last_keymap: Option<String>,
     /// Rumble/adaptive-trigger feedback loop for this player's pad, aborted on
     /// leave/rebuild so a dead peer stops polling its (dropped) virtual pad.
     pad_feedback_task: Option<tokio::task::JoinHandle<()>>,
@@ -149,6 +157,7 @@ async fn build_player_conn(
     let player_slot = Arc::new(AtomicU8::new(slot));
     let pad = Arc::new(Mutex::new(webrtc_peer::create_virtual_pad(
         args.bluetooth_pad,
+        slot,
     )?));
     let (host, _pad_rx) = webrtc_peer::WebRtcHost::new(
         signal_out.clone(),
@@ -169,7 +178,6 @@ async fn build_player_conn(
         host,
         attached_player_epoch: epoch,
         last_pad_kind: None,
-        last_keymap: None,
         pad_feedback_task,
     })
 }
@@ -371,6 +379,10 @@ async fn handle_slot_join(
             warn!("offer failed for slot {slot}: {e}");
         }
     }
+    // Create the virtual pad's emulator binding now, not later on PadInfo.
+    // Keyboard+mouse players only announce a family on first input; waiting
+    // for that left their PCSX2 slot empty while they were already seated.
+    tokio::task::spawn_blocking(move || emulator_pad::apply_on_join(slot));
     Ok(())
 }
 
@@ -407,9 +419,13 @@ async fn main() -> Result<()> {
             Ok("1") | Ok("true") | Ok("yes") | Ok("on")
         );
     let default_filter = if verbose {
-        "couchlink_host=info,webrtc=info"
+        // couchlink_pad is where the VHID companion connect/reconnect
+        // attempts actually get logged (crates/pad/src/vhid_client.rs +
+        // virtual_pad.rs) — without it here, every controller-connect
+        // failure or reconnect attempt is invisible even in verbose mode.
+        "couchlink_host=info,couchlink_pad=info,webrtc=info"
     } else {
-        "warn,couchlink_host=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
+        "warn,couchlink_host=warn,couchlink_pad=warn,webrtc=error,webrtc_ice=error,hyper=error,tower_http=error"
     };
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -533,6 +549,14 @@ async fn main() -> Result<()> {
     .await?;
 
     let signal_out = signaling.outbound.clone();
+    {
+        let (kind, id) = host_physical_pad();
+        let _ = signal_out.send(SignalMessage::PadInfo {
+            kind,
+            id,
+            slot: 0,
+        });
+    }
     // One peer + one virtual controller per remote slot. The host's own pad owns
     // emulator P1; slots 1-3 fill P2-P4.
     let slots: Arc<Mutex<HashMap<u8, PlayerConn>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -742,21 +766,6 @@ async fn main() -> Result<()> {
                                 });
                             }
                         }
-                        SignalMessage::KeyMap { keymap, slot } => {
-                            let mut guard = slots.lock().await;
-                            let Some(conn) = guard.get_mut(&slot) else {
-                                warn!("key_map for unknown slot {slot} dropped");
-                                continue;
-                            };
-                            if conn.last_keymap.as_deref() != Some(keymap.as_str()) {
-                                conn.last_keymap = Some(keymap.clone());
-                                // Off the loop: this rewrites emulator config on
-                                // disk, and this same branch relays video.
-                                tokio::task::spawn_blocking(move || {
-                                    emulator_keymap::apply(&keymap, slot)
-                                });
-                            }
-                        }
                         SignalMessage::PresentPath { path, slot } => {
                             if let Some(conn) = slots.lock().await.get(&slot) {
                                 conn.host.set_present_path(&path);
@@ -872,8 +881,10 @@ async fn main() -> Result<()> {
                                             decided.bitrate_kbps, drop_pct
                                         );
                                     }
+                                    let received = capturer.take_received();
                                     eprintln!(
                                         "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
+                                         | received {received} from win-capture, pushed {window_frames} \
                                          | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",
                                         if dropped_frames == 0 {
                                             "link keeping up".to_string()

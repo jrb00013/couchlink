@@ -80,7 +80,12 @@ export class WebCodecsCanvasView {
   private onStats: ((s: WebCodecsStats) => void) | null = null;
   private onNeedKeyframe: (() => void) | null = null;
   private onFirstPaint: (() => void) | null = null;
+  private onStall: (() => void) | null = null;
   private lastPli = 0;
+  private lastPaintAt = 0;
+  private stallTimer: number | null = null;
+  /** After a first paint, this many ms without another means the GOP is dead. */
+  private static readonly STALL_MS = 1500;
   private description: Uint8Array | null = null;
   private codec = "avc1.4D0028";
   private running = false;
@@ -98,6 +103,11 @@ export class WebCodecsCanvasView {
   /** Fired once, the first time a decoded frame is painted on screen. */
   setFirstPaintHandler(cb: (() => void) | null) {
     this.onFirstPaint = cb;
+  }
+
+  /** Fired when we had picture and then went dark — show the live RTP canvas. */
+  setStallHandler(cb: (() => void) | null) {
+    this.onStall = cb;
   }
 
   /** True once at least one frame has been painted. */
@@ -141,6 +151,9 @@ export class WebCodecsCanvasView {
       return false;
     }
     this.running = true;
+    this.lastPaintAt = 0;
+    if (this.stallTimer !== null) window.clearInterval(this.stallTimer);
+    this.stallTimer = window.setInterval(() => this.checkStall(), 500);
     clog("webcodecs canvas ready", {
       secureContext: window.isSecureContext,
       desynchronized:
@@ -286,6 +299,7 @@ export class WebCodecsCanvasView {
     ctx.drawImage(frame, 0, 0);
     this.painted += 1;
     this.paintedTotal += 1;
+    this.lastPaintAt = performance.now();
     if (this.paintedTotal === 1) {
       this.onFirstPaint?.();
     }
@@ -324,8 +338,21 @@ export class WebCodecsCanvasView {
     }
   }
 
+  private checkStall() {
+    if (!this.running || this.paintedTotal === 0 || this.lastPaintAt === 0) return;
+    if (performance.now() - this.lastPaintAt < WebCodecsCanvasView.STALL_MS) return;
+    cwarn("webcodecs stall — no paint, resetting decoder and showing live RTP");
+    this.lastPaintAt = performance.now();
+    this.resetForKeyframe();
+    this.onStall?.();
+  }
+
   stop() {
     this.running = false;
+    if (this.stallTimer !== null) {
+      window.clearInterval(this.stallTimer);
+      this.stallTimer = null;
+    }
     try {
       this.decoder?.close();
     } catch {

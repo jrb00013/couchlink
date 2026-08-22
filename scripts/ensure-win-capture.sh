@@ -31,24 +31,51 @@ fi
 
 connect="${COUCHLINK_WIN_CAPTURE_CONNECT:-}"
 if [[ -z "$connect" ]]; then
-  # Which address Windows should dial depends on the WSL networking mode.
-  #
-  # NAT mode: WSL has its own private eth0 and 127.0.0.1 on the Windows side
-  # often hits a stuck wslrelay half-connection, so dial the eth0 address.
-  #
-  # Mirrored mode: the two share a network stack, so loopback is correct — and
-  # `hostname -I` is actively wrong there. It returns whichever of a dozen
-  # addresses sorts first, which was 10.66.0.1 (a WireGuard interface) — not
-  # routable from Windows. win-capture then never connected, the host blocked
-  # forever on its first frame, and the player saw only "waiting for host".
-  if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 [23]'; then
-    connect="127.0.0.1:9876"
-  else
-    wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    if [[ -n "$wsl_ip" ]]; then
-      connect="${wsl_ip}:9876"
-    else
+  if [[ "${COUCHLINK_CAPTURE_TRANSPORT:-hyperv}" == "tcp" ]]; then
+    # Which address Windows should dial depends on the WSL networking mode.
+    #
+    # NAT mode: WSL has its own private eth0 and 127.0.0.1 on the Windows side
+    # often hits a stuck wslrelay half-connection, so dial the eth0 address.
+    #
+    # Mirrored mode: the two share a network stack, so loopback is correct — and
+    # `hostname -I` is actively wrong there. It returns whichever of a dozen
+    # addresses sorts first, which was 10.66.0.1 (a WireGuard interface) — not
+    # routable from Windows. win-capture then never connected, the host blocked
+    # forever on its first frame, and the player saw only "waiting for host".
+    if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 [23]'; then
       connect="127.0.0.1:9876"
+    else
+      wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+      if [[ -n "$wsl_ip" ]]; then
+        connect="${wsl_ip}:9876"
+      else
+        connect="127.0.0.1:9876"
+      fi
+    fi
+  else
+    # Default transport: a Hyper-V socket over the VMBus channel WSL2 already
+    # uses internally, instead of TCP over the vEthernet/NAT hop above.
+    #
+    # Live-tested 2026-08-19: binding Windows' AF_HYPERV listener to the
+    # documented "any partition" wildcard VmId (HV_GUID_ZERO) does NOT work
+    # for WSL2's utility VM — the guest's connect times out (os error 110).
+    # The fix: give win-capture the *specific* WSL VM GUID to bind to.
+    # `wslinfo --vm-id` returns exactly that, with no admin rights needed
+    # (unlike `hcsdiag list`, which needs Hyper-V Administrators membership).
+    # Set COUCHLINK_CAPTURE_TRANSPORT=tcp to fall back to the old path.
+    if ! command -v wslinfo >/dev/null 2>&1; then
+      echo "warning: wslinfo not found (WSL package too old for --vm-id) — falling back to TCP capture transport" >&2
+      wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+      connect="${wsl_ip:-127.0.0.1}:9876"
+    else
+      vm_id="$(wslinfo --vm-id 2>/dev/null)"
+      if [[ -z "$vm_id" ]]; then
+        echo "warning: wslinfo --vm-id returned nothing — falling back to TCP capture transport" >&2
+        wsl_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        connect="${wsl_ip:-127.0.0.1}:9876"
+      else
+        connect="hyperv:9877:${vm_id}"
+      fi
     fi
   fi
 fi
@@ -75,28 +102,70 @@ fi
 build_ps1="$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
 start_ps1="$(wslpath -w "$ROOT/scripts/start-win-capture.ps1")"
 
-echo "==> ensuring Windows capture binary is built…"
-if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$build_ps1" >/dev/null 2>&1; then
-  echo "error: could not build couchlink-win-capture.exe" >&2
-  echo "       install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1" >&2
-  exit 1
+# Every powershell.exe from WSL opens a *visible* conhost (the blue window)
+# unless -WindowStyle Hidden is set. Host respawn calls this every 20s when
+# capture is down — without Hidden that looks like "couchlink is still on."
+psw() {
+  powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass "$@"
+}
+
+if [[ "${COUCHLINK_SKIP_WIN_CAPTURE_BUILD:-0}" != "1" ]]; then
+  echo "==> ensuring Windows capture binary is built…"
+  if ! psw -File "$build_ps1" >/dev/null 2>&1; then
+    echo "error: could not build couchlink-win-capture.exe" >&2
+    echo "       install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1" >&2
+    exit 1
+  fi
 fi
 
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
 fi
 
-style=Minimized
-[[ "$source_mode" == "picker" ]] && style=Normal
+# The picker UI lives on the capture exe, not this wrapper. Keep the
+# PowerShell host Hidden so respawn/build never flash a blue console.
+# Minimized still creates a conhost that pops then minimizes.
 
 if [[ "${COUCHLINK_VERBOSE:-0}" == "1" ]]; then
   echo "==> starting Windows capture (source=$source_mode → $connect @ ${wire_w}x${wire_h} ${bitrate_kbps}kbps)"
 fi
-# Build ArgumentList in PowerShell so quoting stays correct.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
-  \$argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
+
+# docs/INCIDENT-2026-08-19-terminals-died.md, root cause #1: `Start-Process`
+# here spawns win-capture as a descendant of *this* WSL session's process
+# tree. Windows Terminal puts every tab's whole tree in one Job Object with
+# kill-on-close, so a Start-Process child does not survive the terminal
+# crashing — it goes down with it, silently, and nothing ever relaunches it.
+# A Scheduled Task runs from the Task Scheduler service instead: it is never
+# a member of that job, so a dead terminal (crash or a closed window) cannot
+# take win-capture with it. `/IT` keeps it interactive (attached to the
+# logged-on session), which the picker window needs to be visible/clickable.
+#
+# `schtasks /TR` silently truncates around ~262 characters (verified live:
+# the full args + the `\\wsl.localhost\...` UNC path to start-win-capture.ps1
+# blew past it and `-BitrateKbps 18000` came out the other end as `180` — a
+# 100x bitrate cut with no error from schtasks at all). Fixed by writing the
+# real argument list into a short local launcher script once, in a fixed,
+# always-short local path, and pointing `/TR` at *that* instead — the task's
+# command line is then constant-length regardless of how many capture args
+# there are.
+task_name="couchlink-win-capture"
+psw -Command "
+  \$argList = @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
-  Start-Process -WindowStyle $style powershell.exe -ArgumentList \$argList
+  \$quoted = (\$argList | ForEach-Object { '\"' + \$_ + '\"' }) -join ' '
+  \$localDir = Join-Path \$env:LOCALAPPDATA 'couchlink\bin'
+  New-Item -ItemType Directory -Force -Path \$localDir | Out-Null
+  \$launcher = Join-Path \$localDir 'run-capture.ps1'
+  Set-Content -Path \$launcher -Value \"powershell.exe -NoProfile -WindowStyle Hidden \$quoted\" -Encoding UTF8
+  schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
+  \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
+    /TR \"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \$launcher\" 2>&1
+  if (\$LASTEXITCODE -ne 0) {
+    Write-Host \"schtasks create failed, falling back to Start-Process (win-capture will NOT survive a terminal crash): \$created\"
+    Start-Process -WindowStyle Hidden powershell.exe -ArgumentList \$argList
+  } else {
+    schtasks.exe /Run /TN '$task_name' | Out-Null
+  }
 " >/dev/null
 
 echo "==> Windows capture launched (choose a window in the picker if it appears)"

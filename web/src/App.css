@@ -42,8 +42,9 @@ body {
 .top {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .top-pills {
@@ -88,6 +89,53 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   background: rgba(255, 255, 255, 0.03);
+}
+
+.roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  justify-content: center;
+}
+
+.roster-slot {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--seat, var(--line)) 45%, var(--line));
+  border-radius: 999px;
+  padding: 0.28rem 0.75rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  background: var(--seat-dim, rgba(255, 255, 255, 0.02));
+}
+
+.roster-slot .roster-num {
+  font-weight: 800;
+  color: var(--seat, var(--ink));
+}
+
+.roster-slot .roster-role {
+  color: var(--ink);
+}
+
+.roster-slot.is-open {
+  background: transparent;
+  opacity: 0.72;
+}
+
+.roster-slot.is-open .roster-role {
+  color: var(--muted);
+}
+
+.roster-slot.is-you {
+  box-shadow: 0 0 0 1px var(--seat);
 }
 
 .state-connected {
@@ -275,9 +323,94 @@ button.ghost {
   background: rgba(8, 12, 18, 0.55);
 }
 
+.cv-p1 { --seat: #4aa3ff; --seat-dim: rgba(74, 163, 255, 0.14); --seat-glow: rgba(74, 163, 255, 0.5); }
+.cv-p2 { --seat: #ff4d4d; --seat-dim: rgba(255, 77, 77, 0.14); --seat-glow: rgba(255, 77, 77, 0.5); }
+.cv-p3 { --seat: #f0c14b; --seat-dim: rgba(240, 193, 75, 0.16); --seat-glow: rgba(240, 193, 75, 0.5); }
+.cv-p4 { --seat: #3ecf8e; --seat-dim: rgba(62, 207, 142, 0.14); --seat-glow: rgba(62, 207, 142, 0.5); }
+
+.cv-p1,
+.cv-p2,
+.cv-p3,
+.cv-p4 {
+  border-color: color-mix(in srgb, var(--seat) 55%, var(--line));
+}
+
 .cv.is-active {
-  border-color: rgba(62, 207, 142, 0.4);
-  background: rgba(62, 207, 142, 0.07);
+  border-color: var(--seat, rgba(62, 207, 142, 0.4));
+  background: var(--seat-dim, rgba(62, 207, 142, 0.07));
+}
+
+.cv-p1 .cv-slot,
+.cv-p2 .cv-slot,
+.cv-p3 .cv-slot,
+.cv-p4 .cv-slot,
+.cv.is-active .cv-slot {
+  color: var(--seat);
+}
+
+.cv-p1 .cv-ds .cv-lightbar,
+.cv-p2 .cv-ds .cv-lightbar,
+.cv-p3 .cv-ds .cv-lightbar,
+.cv-p4 .cv-ds .cv-lightbar {
+  fill: var(--seat);
+}
+
+.cv.kbmv {
+  flex: 1 1 280px;
+  max-width: 440px;
+}
+
+.kbmv-board {
+  fill: #1a2433;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 1.2;
+}
+
+.kbmv-key rect,
+.kbmv-key path {
+  fill: #2a3648;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 0.8;
+}
+
+.kbmv-key text {
+  fill: var(--muted);
+  font-size: 7px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.kbmv-key.is-on rect,
+.kbmv-key.is-on path {
+  fill: var(--seat, var(--accent));
+  filter: drop-shadow(0 0 5px var(--seat-glow, rgba(62, 207, 142, 0.5)));
+}
+
+.kbmv-key.is-on text {
+  fill: #04140c;
+}
+
+.kbmv-mouse-body {
+  fill: #243044;
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 1.2;
+}
+
+.kbmv-mouse-body.is-on {
+  stroke: var(--seat, var(--accent));
+}
+
+.kbmv-wheel {
+  fill: #3a4a5e;
+}
+
+.kbmv-wheel.is-on {
+  fill: var(--seat, var(--accent));
+}
+
+.kbmv-look {
+  fill: var(--seat, var(--accent));
+  opacity: 0.85;
 }
 
 .cv-svg {
@@ -578,10 +711,55 @@ button.ghost {
   background: rgba(255, 107, 107, 0.08);
 }
 
+.dt-tabs {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.7rem;
+}
+
+.dt-tab {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.dt-tab.is-active {
+  color: var(--ink);
+  background: rgba(62, 207, 142, 0.12);
+  border-color: rgba(62, 207, 142, 0.4);
+}
+
 .dt-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 0.85rem;
+}
+
+.dt-pad-row {
+  align-items: center;
+}
+
+.dt-pad-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--bad);
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.dt-pad-dot-live {
+  background: var(--good);
+  box-shadow: 0 0 6px rgba(62, 207, 142, 0.7);
+}
+
+.dt-pad-stale .dt-value {
+  color: var(--muted);
 }
 
 .dt-group h3 {
@@ -750,6 +928,113 @@ button.ghost {
   user-select: none;
 }
 
+.kbm-keybinds-btn {
+  padding: .3rem .75rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink);
+  font-size: .78rem;
+  cursor: pointer;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 1rem;
+}
+
+.modal {
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1.1rem 1.25rem;
+  max-width: 26rem;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.modal-close {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  width: 1.8rem;
+  height: 1.8rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.modal-hint {
+  margin: 0.4rem 0 0.9rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.keybinds-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.keybinds-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+
+.keybinds-row.is-button {
+  width: 100%;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: inherit;
+  font: inherit;
+}
+
+.keybinds-row.is-button:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.keybinds-row.is-capturing .keybinds-key {
+  color: #f0c14b;
+}
+
+.keybinds-key {
+  color: var(--accent, #4a9eff);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.keybinds-action {
+  color: var(--ink);
+  text-align: right;
+}
+
 /* ── Mobile layout ─────────────────────────────────────────────── */
 
 /* The fullscreen target on mobile wraps the stage + touch controller. On
@@ -812,6 +1097,100 @@ button.ghost {
   border-radius: 0;
   opacity: 0.55;
   background: transparent;
+}
+
+/* Landscape side-mode: phone on its side, video fills, sticks/buttons as
+   left/right rails. CSS fullscreen even when the Fullscreen API is denied
+   (typical on iOS Safari without a tap). */
+.shell.is-mobile.is-side .meta,
+.shell.is-mobile.is-side .dt-toggle,
+.shell.is-mobile.is-side .dt-panel {
+  display: none;
+}
+
+.mobile-game.is-mobile.is-side {
+  z-index: 40;
+  width: 100dvw;
+  height: 100dvh;
+  height: 100svh;
+}
+
+.mobile-game.is-mobile.is-side .stage-wrap {
+  background: #000;
+}
+
+.mobile-game.is-mobile.is-side .stage {
+  min-height: 0;
+  object-fit: contain;
+}
+
+.mobile-game.is-mobile.is-side .touch-dock {
+  opacity: 1;
+  background:
+    linear-gradient(90deg, rgba(4, 10, 16, 0.72) 0%, rgba(4, 10, 16, 0.28) 18%, transparent 32%),
+    linear-gradient(270deg, rgba(4, 10, 16, 0.72) 0%, rgba(4, 10, 16, 0.28) 18%, transparent 32%);
+  padding:
+    max(0.4rem, env(safe-area-inset-top))
+    max(0.4rem, env(safe-area-inset-right))
+    max(0.4rem, env(safe-area-inset-bottom))
+    max(0.4rem, env(safe-area-inset-left));
+}
+
+.mobile-game.is-mobile.is-side .touch-zone {
+  width: min(34%, 260px);
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-dpad {
+  left: max(0.5rem, env(safe-area-inset-left));
+  bottom: max(0.7rem, env(safe-area-inset-bottom));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-face {
+  right: max(0.5rem, env(safe-area-inset-right));
+  bottom: max(0.7rem, env(safe-area-inset-bottom));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-shoulder-l {
+  left: max(0.5rem, env(safe-area-inset-left));
+  top: max(0.5rem, env(safe-area-inset-top));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-shoulder-r {
+  right: max(0.5rem, env(safe-area-inset-right));
+  top: max(0.5rem, env(safe-area-inset-top));
+}
+
+.mobile-game.is-mobile.is-side .touch-btns-menu {
+  bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.tilt-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 0.85rem;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 14, 22, 0.82);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.tilt-hint-icon {
+  display: inline-block;
+  font-size: 1.05rem;
+  transform: rotate(90deg);
+}
+
+.is-mobile.is-side .tilt-hint {
+  display: none;
 }
 
 /* Touch controller internals. */

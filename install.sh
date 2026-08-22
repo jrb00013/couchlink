@@ -12,6 +12,89 @@ UNBLOCK_FIREWALL=0
 # Default = friend/player. Gaming PC uses --host.
 INSTALL_ROLE="${COUCHLINK_INSTALL_ROLE:-client}"
 INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
+FORCE_CLOUDFLARE=0
+TAILSCALE_CLOUD=0
+
+# Bare `./install.sh` with no flags on an interactive terminal: walk through
+# the same choices as an argument in a small wizard instead of silently
+# defaulting to "client / local / build only". Any flag at all (including
+# -h) skips this and goes straight to the flag-driven path above/below.
+if [[ $# -eq 0 && -t 0 && -t 1 ]]; then
+  BOLD=""; DIM=""; CYAN=""; GREEN=""; RESET=""
+  if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
+    BOLD="$(tput bold)"; DIM="$(tput dim)"; CYAN="$(tput setaf 6)"; GREEN="$(tput setaf 2)"; RESET="$(tput sgr0)"
+  fi
+
+  couchlink_ask() {
+    # couchlink_ask "Question" "1) label" "2) label" ... -> sets REPLY_IDX (1-based)
+    local question="$1"; shift
+    echo
+    echo "${BOLD}${CYAN}${question}${RESET}"
+    local i=1 opt
+    for opt in "$@"; do
+      echo "  ${GREEN}${i})${RESET} ${opt}"
+      i=$((i + 1))
+    done
+    local n=$#
+    local choice
+    while true; do
+      read -r -p "  ${DIM}choice [1-${n}, default 1]:${RESET} " choice
+      choice="${choice:-1}"
+      if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+        REPLY_IDX="$choice"
+        return 0
+      fi
+      echo "  please enter a number between 1 and ${n}"
+    done
+  }
+
+  echo "${BOLD}== couchlink setup ==${RESET}"
+  echo "${DIM}(pass any flag, e.g. --help, to skip this wizard)${RESET}"
+
+  # 1) Role first — it decides what gets built (host needs coturn/uinput/UI).
+  couchlink_ask "Is this device the host (the gaming PC) or a client (a friend / player)?" \
+    "Host — this PC shares its screen/input" \
+    "Client — this PC connects to a friend's host"
+  [[ "$REPLY_IDX" == "1" ]] && INSTALL_ROLE="host" || INSTALL_ROLE="client"
+
+  # 2) Network mode next — same LAN, or over the internet (mesh/TURN/etc).
+  couchlink_ask "Will you play on the same network (local) or over the internet (online)?" \
+    "Local — same Wi-Fi / LAN" \
+    "Online — over the internet (mesh + TURN fallback)"
+  [[ "$REPLY_IDX" == "1" ]] && RUN_MODE="local" || RUN_MODE="online"
+
+  # 3) Firewall unblock only makes sense for online mode.
+  if [[ "$RUN_MODE" == "online" ]]; then
+    couchlink_ask "Open the local OS firewall for mesh/TURN now?" \
+      "No — leave firewall as-is" \
+      "Yes — unblock (may prompt for admin/UAC)"
+    [[ "$REPLY_IDX" == "2" ]] && UNBLOCK_FIREWALL=1
+  fi
+
+  # 3b) Host + online: which internet-reachability path to use. This is the
+  # question that decides whether Cloudflare gets involved.
+  if [[ "$INSTALL_ROLE" == "host" && "$RUN_MODE" == "online" ]]; then
+    couchlink_ask "How should friends reach this host over the internet?" \
+      "Automatic (recommended) — Headscale/WireGuard mesh, then public IP + UPnP, falling back to a Cloudflare tunnel (trycloudflare.com) only if needed" \
+      "Always use a Cloudflare tunnel — skip mesh/UPnP, force cloudflared HTTPS (--force-cloudflare)" \
+      "Also install Tailscale Inc's cloud client as an extra fallback (needs a Tailscale login; not self-hosted)"
+    case "$REPLY_IDX" in
+      2) FORCE_CLOUDFLARE=1 ;;
+      3) TAILSCALE_CLOUD=1 ;;
+    esac
+  fi
+
+  # 4) Start couchlink immediately after install finishes?
+  couchlink_ask "Start couchlink right after install finishes?" \
+    "Yes — install then run" \
+    "No — just install, I'll run it myself later"
+  [[ "$REPLY_IDX" == "1" ]] && RUN_AFTER=1
+
+  echo
+  echo "${BOLD}==> ${INSTALL_ROLE} / ${RUN_MODE}$( [[ "$RUN_AFTER" == "1" ]] && echo " / run after install" )$( [[ "$UNBLOCK_FIREWALL" == "1" ]] && echo " / unblock firewall" )$( [[ "$FORCE_CLOUDFLARE" == "1" ]] && echo " / force cloudflare tunnel" )$( [[ "$TAILSCALE_CLOUD" == "1" ]] && echo " / +Tailscale Inc cloud" )${RESET}"
+  echo
+fi
+
 for arg in "$@"; do
   case "$arg" in
     --run) RUN_AFTER=1 ;;
@@ -50,6 +133,9 @@ done
 COUCHLINK_INSTALL_MESH="$INSTALL_MESH"
 COUCHLINK_INSTALL_ROLE="$INSTALL_ROLE"
 export COUCHLINK_INSTALL_MESH COUCHLINK_INSTALL_ROLE
+if [[ "$TAILSCALE_CLOUD" == "1" ]]; then
+  export COUCHLINK_INSTALL_TAILSCALE_CLOUD=1
+fi
 
 echo "==> couchlink install ($INSTALL_ROLE)"
 
@@ -273,6 +359,18 @@ if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "wsl" ]]; then
     bash "$ROOT/scripts/enable-wsl-mirrored.sh" ||       echo "warning: mirrored networking not configured — Cloudflare tunnel stays the fallback"
   fi
 
+  # docs/INCIDENT-2026-08-19-terminals-died.md: on a default Windows 11
+  # install every console couchlink spawns (including the non-interactive
+  # ones this installer itself runs) attaches into the user's interactive
+  # Windows Terminal, and a crash there can take the whole terminal — and any
+  # game session running under it — down with it. Fix it at install time,
+  # not just on first game session.
+  if command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+      "$(wslpath -w "$ROOT/scripts/windows/fix-default-terminal.ps1")" || \
+      echo "warning: could not set default terminal app — Windows Terminal stays a crash risk for spawned consoles"
+  fi
+
   echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
   if command -v powershell.exe >/dev/null 2>&1; then
     if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
@@ -419,6 +517,9 @@ if [[ "$RUN_AFTER" == "1" ]]; then
   RUN_ARGS=("$INSTALL_ROLE" "--${RUN_MODE}")
   if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
     RUN_ARGS+=(--unblock-firewall)
+  fi
+  if [[ "$FORCE_CLOUDFLARE" == "1" ]]; then
+    RUN_ARGS+=(--force-cloudflare)
   fi
   echo "==> starting ./scripts/run.sh ${RUN_ARGS[*]}"
   exec bash "$ROOT/scripts/run.sh" "${RUN_ARGS[@]}"

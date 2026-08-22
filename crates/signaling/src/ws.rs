@@ -108,6 +108,26 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 );
                 // A reconnecting host may be coming back to players already seated.
                 broadcast_status(&store, &sid);
+                for (slot, epoch) in store.seated_for_host_replay(&sid) {
+                    if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
+                        let delivered = host_tx
+                            .send(
+                                SignalMessage::PeerJoined {
+                                    role: Role::Player,
+                                    epoch,
+                                    slot,
+                                }
+                                .to_json()
+                                .unwrap(),
+                            )
+                            .is_ok();
+                        if delivered {
+                            info!(
+                                "re-offering seated player session {sid} (slot {slot}, epoch {epoch})"
+                            );
+                        }
+                    }
+                }
                 info!("host registered for session {}", session_id.as_deref().unwrap_or("?"));
             }
             SignalMessage::RegisterPlayer {
@@ -163,6 +183,13 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                             ),
                         }
                         broadcast_status(&store, &sid);
+                        if let Some((kind, id)) = store.host_pad(&sid) {
+                            let _ = tx.send(
+                                SignalMessage::PlayerPadInfo { slot: 0, kind, id }
+                                    .to_json()
+                                    .unwrap(),
+                            );
+                        }
                     }
                     Err(e) => {
                         let _ = tx.send(
@@ -225,8 +252,24 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 None => {}
             },
             SignalMessage::PadInfo { kind, id, .. } => {
-                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
-                    relay_to_host(&store, sid, &SignalMessage::PadInfo { kind, id, slot });
+                if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
+                    store.set_host_pad(sid, kind.clone(), id.clone());
+                    if let Ok(json) = (SignalMessage::PlayerPadInfo {
+                        slot: 0,
+                        kind,
+                        id,
+                    })
+                    .to_json()
+                    {
+                        store.broadcast(sid, &json);
+                    }
+                } else if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(&store, sid, &SignalMessage::PadInfo { kind: kind.clone(), id: id.clone(), slot });
+                    // Every player also gets to see it — a controller debug
+                    // view needs every seated player's pad, not just its own.
+                    if let Ok(json) = (SignalMessage::PlayerPadInfo { slot, kind, id }).to_json() {
+                        store.broadcast(sid, &json);
+                    }
                 }
             }
             SignalMessage::PresentPath { path, .. } => {

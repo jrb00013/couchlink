@@ -8,7 +8,7 @@ use couchlink_capture_bridge::{
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long to wait for a frame to start arriving. Deliberately tiny: the caller
 /// sends on a fixed cadence, so this must return promptly with either a fresh frame
@@ -17,8 +17,22 @@ use std::time::Duration;
 const IDLE_POLL: Duration = Duration::from_millis(2);
 /// Poll used while draining a backlog — only frames already buffered count.
 const DRAIN_POLL: Duration = Duration::from_millis(1);
+/// How long win-capture may be gone before we relaunch it ourselves — see
+/// `super::respawn_windows_capture`. Long enough that a normal reconnect (a
+/// picker window closing and reopening, a brief TCP blip) never triggers it.
+const RESPAWN_AFTER: Duration = Duration::from_secs(5);
+/// Floor between relaunch attempts, so a win-capture that keeps failing to
+/// start doesn't get hammered every capture-poll tick.
+const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// Once a frame has started, the rest is already in flight — allow plenty of time.
 const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// A hung (not crashed/disconnected) win-capture never trips `Err` from
+/// `read_frame` — the socket stays open, `latest_frame` just keeps returning
+/// `Ok(false)` forever because nothing new ever arrives. That silently starves
+/// `maybe_respawn`, which only fires off a real socket error. This is the
+/// second trigger: if no frame has landed in this long while the socket is
+/// still nominally connected, treat it exactly like a disconnect.
+const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
 
 /// A socket read timeout surfaces as `WouldBlock` (EAGAIN) on Unix and `TimedOut`
 /// on Windows. Both mean "no data yet", not "connection broken".
@@ -57,6 +71,18 @@ pub struct WindowsBridge {
     /// reconnecting client is re-told immediately; a fresh win-capture process
     /// starts from its CLI defaults until this reaches it.
     target: Option<EncodeTarget>,
+    /// Frames that finished `read_frame` successfully, regardless of whether the
+    /// relay stage later drops them. Compared against the win-capture side's own
+    /// "encoded" count, this pinpoints whether loss happens before or after the
+    /// Windows→WSL socket — see `docs/OPTIMIZATION_PLAN.md` step 1.
+    frames_received: u64,
+    /// When the current outage started, if any — `None` while connected.
+    disconnected_at: Option<Instant>,
+    /// When we last asked `ensure-win-capture.sh` to relaunch it.
+    last_respawn: Option<Instant>,
+    /// When the last frame (of any kind, including a stale-frame no-op) was
+    /// actually pulled off the socket. Drives `FRAME_STALE_AFTER`.
+    last_frame_at: Instant,
 }
 
 impl WindowsBridge {
@@ -85,6 +111,10 @@ impl WindowsBridge {
             format: FrameFormat::Bgra,
             keyframe: false,
             target: None,
+            frames_received: 0,
+            disconnected_at: None,
+            last_respawn: None,
+            last_frame_at: Instant::now(),
         };
         bridge.read_one()?;
         Ok(bridge)
@@ -195,7 +225,15 @@ impl WindowsBridge {
             // A stale frame at the old size would be misread at the new size.
             self.last = None;
         }
+        self.frames_received += 1;
         Ok(Some(info))
+    }
+
+    /// Drain the received-frame counter since the last call. Pair with
+    /// win-capture's own "encoded" log to see whether frames are lost before
+    /// or after the Windows→WSL socket.
+    pub fn take_received(&mut self) -> u64 {
+        std::mem::take(&mut self.frames_received)
     }
 
     /// Read the next frame.
@@ -266,11 +304,17 @@ impl WindowsBridge {
             return Ok(Some(Captured::Bgra(p)));
         }
         if self.stream.is_none() {
-            self.try_reconnect();
+            if self.try_reconnect() {
+                self.disconnected_at = None;
+                self.last_frame_at = Instant::now();
+            } else {
+                self.maybe_respawn();
+            }
             return Ok(self.stale_frame());
         }
         match self.latest_frame() {
             Ok(true) => {
+                self.last_frame_at = Instant::now();
                 // One copy, not two. At 720p each clone is 3.3MB and this runs on
                 // every frame; the old code cloned once for `last` and again for the
                 // caller.
@@ -284,16 +328,53 @@ impl WindowsBridge {
                 self.last = Some(frame.clone());
                 Ok(Some(Captured::Bgra(frame)))
             }
-            Ok(false) => Ok(self.stale_frame()),
+            Ok(false) => {
+                // Socket is still open and read cleanly returned "nothing yet" —
+                // no error, so the old code never noticed a win-capture that has
+                // hung (GPU/driver stall, deadlocked message pump, ...) rather
+                // than crashed or disconnected. Route a long silence through the
+                // same respawn path a real disconnect uses.
+                if self.last_frame_at.elapsed() >= FRAME_STALE_AFTER {
+                    tracing::warn!(
+                        "no frame from win-capture in {:?} (socket still open — \
+                         likely hung, not disconnected) — treating as dead",
+                        self.last_frame_at.elapsed()
+                    );
+                    self.stream = None;
+                    self.disconnected_at.get_or_insert_with(Instant::now);
+                    self.maybe_respawn();
+                }
+                Ok(self.stale_frame())
+            }
             // A dead client must not kill the session: keep showing the last frame
             // and wait for win-capture to come back.
             Err(e) => {
                 tracing::warn!("Windows capture client lost ({e:#}) — waiting for reconnect");
                 self.stream = None;
+                self.disconnected_at = Some(Instant::now());
                 self.try_reconnect();
                 Ok(self.stale_frame())
             }
         }
+    }
+
+    /// Postmortem: `docs/INCIDENT-2026-08-19-terminals-died.md`. Left alone, a
+    /// dead win-capture waits forever for a reconnect that nothing triggers —
+    /// this is the self-heal that closes that gap.
+    fn maybe_respawn(&mut self) {
+        let Some(since) = self.disconnected_at else {
+            return;
+        };
+        if since.elapsed() < RESPAWN_AFTER {
+            return;
+        }
+        if let Some(last) = self.last_respawn {
+            if last.elapsed() < RESPAWN_RETRY_INTERVAL {
+                return;
+            }
+        }
+        self.last_respawn = Some(Instant::now());
+        super::respawn_windows_capture();
     }
 
     /// Re-serving only makes sense for raw pixels; see `last`.

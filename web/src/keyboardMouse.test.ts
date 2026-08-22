@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { DEFAULT_KEYMAP, KeyboardMouseInput, keyLabel } from "./keyboardMouse";
+import { KeyboardMouseInput } from "./keyboardMouse";
 import { BTN } from "./clpd";
+import { DEFAULT_KBM_BINDS, setBind } from "./kbmBinds";
 
 /**
  * No jsdom dependency in this project — fake just enough DOM surface
@@ -64,6 +65,14 @@ describe("KeyboardMouseInput", () => {
     expect(state.ly).toBe(128);
   });
 
+  it("snapshot reports held keys without consuming them", () => {
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyW"));
+    const snap = kbm.snapshot();
+    expect(snap.keys).toContain("KeyW");
+    const state = kbm.sample(1);
+    expect(state.ly).toBe(0);
+  });
+
   it("releases keys on keyup", () => {
     (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyD"));
     (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyD"));
@@ -84,6 +93,17 @@ describe("KeyboardMouseInput", () => {
     expect(state.buttons).toBe(0);
   });
 
+  it("uses remapped binds so a custom jump key fires Cross", () => {
+    kbm.setBinds(setBind(DEFAULT_KBM_BINDS, "cross", "KeyZ"));
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyZ"));
+    const state = kbm.sample(1);
+    expect(state.buttons & BTN.CROSS).toBe(BTN.CROSS);
+    (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyZ"));
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "Space"));
+    const after = kbm.sample(2);
+    expect(after.buttons & BTN.CROSS).toBe(0);
+  });
+
   it("clears held keys when the tab is hidden", () => {
     const doc = (globalThis as any).document;
     doc.dispatchEvent(keyEvent("keydown", "KeyA")); // no-op target, just to prove doc listeners don't interfere
@@ -95,43 +115,5 @@ describe("KeyboardMouseInput", () => {
     doc.hidden = false;
 
     expect(kbm.hasInput()).toBe(false);
-  });
-
-  it("honours a remapped keymap instead of the defaults", () => {
-    kbm.stop();
-    kbm = new KeyboardMouseInput({ keymap: { cross: "KeyX", r2: "KeyZ" } });
-    kbm.start();
-
-    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyX"));
-    const state = kbm.sample(1);
-    expect(state.buttons & BTN.CROSS).toBe(BTN.CROSS);
-    // The default Space binding no longer fires.
-    expect(DEFAULT_KEYMAP.cross).toBe("Space");
-    expect(state.buttons & BTN.CROSS).toBe(BTN.CROSS);
-  });
-
-  it("keeps mouse triggers after a remap", () => {
-    kbm.stop();
-    kbm = new KeyboardMouseInput({ keymap: {} }); // wipe every key
-    kbm.start();
-
-    (globalThis as any).window.dispatchEvent(new (globalThis as any).MouseEvent("mousedown", { button: 0 }));
-    const state = kbm.sample(1);
-    expect(state.buttons & BTN.R2).toBe(BTN.R2);
-  });
-
-  it("serialises the keymap for the host", () => {
-    const json = kbm.keymapJson();
-    const parsed = JSON.parse(json);
-    expect(parsed.cross).toBe(DEFAULT_KEYMAP.cross);
-    expect(parsed.lstick_up).toBe("KeyW");
-  });
-
-  it("keyLabel renders readable names", () => {
-    expect(keyLabel("KeyW")).toBe("W");
-    expect(keyLabel("Space")).toBe("Space");
-    expect(keyLabel("ArrowUp")).toBe("↑");
-    expect(keyLabel("ShiftLeft")).toBe("Shift");
-    expect(keyLabel(undefined)).toBe("");
   });
 });
