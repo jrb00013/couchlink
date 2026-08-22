@@ -847,18 +847,24 @@ export class CouchlinkPlayer {
     this.notifyPresentPath("rtp", "WebCodecs fallback");
   }
 
+  /** WebCodecs went dark — keep both paths; the UI is switching to the live RTP canvas. */
+  resumeWarmup() {
+    this.notifyPresentPath(
+      "warmup",
+      "WebCodecs stalled — RTP stays live"
+    );
+  }
+
   /**
-   * WebCodecs has painted its first frame — cut RTP and go DataChannel-only.
-   *
-   * Called by the App when the WebCodecs canvas reports its first paint, so
-   * the host stops writing the RTP track nobody is looking at. The pre-paint
-   * state is "warmup", which keeps both paths live as a safety net.
+   * WebCodecs painted its first frame. Stay on warmup so the host never
+   * cuts RTP. Painting WebCodecs is a UI choice; cutting the rescue
+   * stream is what froze the last picture after a single lost IDR.
    */
   promoteWebcodecs() {
     if (!this.webcodecsPath) return;
     this.notifyPresentPath(
-      "webcodecs",
-      "CLVD DataChannel + WebCodecs (no RTP jitter buffer)"
+      "warmup",
+      "CLVD DataChannel + WebCodecs present — RTP stays live"
     );
   }
 

@@ -56,6 +56,20 @@ pub struct EncodeTarget {
 
 /// Write a `SET_TARGET` command. The reader side is the peer that owns the
 /// encoder, so this is deliberately the only writer in the capture-bridge crate.
+/// True when `needle` appears in the window title or the owning process name.
+///
+/// PCSX2 (and other emulators) replace the window title with the game name
+/// once a title is running, so title-only matching silently misses the window
+/// we actually want to stream.
+pub fn window_matches(needle: &str, title: &str, process: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    let needle = needle.to_ascii_lowercase();
+    title.to_ascii_lowercase().contains(&needle) || process.to_ascii_lowercase().contains(&needle)
+}
+
 pub fn write_set_target(w: &mut impl Write, target: EncodeTarget) -> Result<()> {
     w.write_all(&[SET_TARGET])?;
     w.write_all(&target.width.to_le_bytes())?;
@@ -283,5 +297,20 @@ mod tests {
     #[test]
     fn set_target_opcode_is_distinct_from_idr() {
         assert_ne!(SET_TARGET, REQUEST_IDR);
+    }
+
+    /// Live 2026-08-22: PCSX2's window title becomes the game name
+    /// ("Marvel - Ultimate Alliance") once a title is running, so matching
+    /// only "PCSX2" attached to nothing. Process name still says pcsx2-qt.
+    #[test]
+    fn pcsx2_needle_matches_the_running_game_window_by_process() {
+        assert!(window_matches(
+            "PCSX2",
+            "Marvel - Ultimate Alliance",
+            "pcsx2-qt"
+        ));
+        assert!(window_matches("PCSX2", "PCSX2", "pcsx2-qt"));
+        assert!(!window_matches("PCSX2", "Discord", "Discord"));
+        assert!(!window_matches("", "PCSX2", "pcsx2-qt"));
     }
 }

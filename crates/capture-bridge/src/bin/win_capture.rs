@@ -14,7 +14,7 @@ mod run {
     use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
-    use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
+    use couchlink_capture_bridge::{window_matches, write_frame_with_format, FrameFormat};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::io::BufWriter;
     use std::net::TcpStream;
@@ -653,6 +653,37 @@ mod run {
         Ok(())
     }
 
+    /// Title *or* process name, and keep looking until it exists.
+    ///
+    /// Emulators rewrite the window title to the game name, so a title-only
+    /// match for "PCSX2" misses "Marvel - Ultimate Alliance" owned by
+    /// pcsx2-qt. Waiting means the host can start before the emulator does.
+    fn wait_for_window(needle: &str) -> Result<Window> {
+        let mut attempt = 0u32;
+        loop {
+            if let Some(w) = find_window(needle)? {
+                return Ok(w);
+            }
+            attempt += 1;
+            if attempt == 1 || attempt % 15 == 0 {
+                warn!("no window matching {needle:?} by title or process — waiting");
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+
+    fn find_window(needle: &str) -> Result<Option<Window>> {
+        let wins = Window::enumerate().context("enumerate windows")?;
+        for w in wins {
+            let title = w.title().unwrap_or_default();
+            let proc = w.process_name().unwrap_or_default();
+            if window_matches(needle, &title, &proc) && !title.trim().is_empty() {
+                return Ok(Some(w));
+            }
+        }
+        Ok(None)
+    }
+
     /// Host commands, multiplexed on the reverse of the frame socket.
     ///
     /// `I` = request IDR (1 byte). `T` = SET_TARGET, followed by 16 bytes of
@@ -907,8 +938,7 @@ mod run {
                 if args.window.trim().is_empty() {
                     bail!("--source window requires --window TITLE_SUBSTRING");
                 }
-                let w = Window::from_contains_name(&args.window)
-                    .with_context(|| format!("no window matching '{}'", args.window))?;
+                let w = wait_for_window(&args.window)?;
                 info!(
                     "capturing window '{}' → {}",
                     w.title().unwrap_or_else(|_| args.window.clone()),

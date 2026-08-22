@@ -108,6 +108,26 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 );
                 // A reconnecting host may be coming back to players already seated.
                 broadcast_status(&store, &sid);
+                for (slot, epoch) in store.seated_for_host_replay(&sid) {
+                    if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
+                        let delivered = host_tx
+                            .send(
+                                SignalMessage::PeerJoined {
+                                    role: Role::Player,
+                                    epoch,
+                                    slot,
+                                }
+                                .to_json()
+                                .unwrap(),
+                            )
+                            .is_ok();
+                        if delivered {
+                            info!(
+                                "re-offering seated player session {sid} (slot {slot}, epoch {epoch})"
+                            );
+                        }
+                    }
+                }
                 info!("host registered for session {}", session_id.as_deref().unwrap_or("?"));
             }
             SignalMessage::RegisterPlayer {

@@ -142,6 +142,16 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Seated players the new host must re-offer, with a fresh epoch each.
+    /// Without this, a host restart leaves browsers on "Waiting for host offer"
+    /// until they hard-refresh — PeerJoined was already sent to the dead host.
+    pub fn seated_for_host_replay(&self, session_id: &str) -> Vec<(u8, u64)> {
+        let Some(mut entry) = self.sessions.get_mut(session_id) else {
+            return Vec::new();
+        };
+        entry.players.replay_for_host()
+    }
+
     /// Registers a player socket into the first free slot, returning `(slot, epoch)`.
     ///
     /// Never evicts a sitting player: once all 3 slots are full, further joins are
@@ -390,6 +400,23 @@ mod tests {
             "the reloaded socket must take a fresh slot while the stale one is registered"
         );
         assert_eq!(s.players_status("sid"), Some((2, crate::players::MAX_PLAYERS)));
+    }
+
+    #[test]
+    fn reconnecting_host_is_told_about_seated_players() {
+        let s = store();
+        s.register_host("sid".into(), "pin".into(), None, None, None, chan())
+            .expect("host");
+        let (_slot1, _) = s
+            .register_player("sid".into(), "pin".into(), chan())
+            .expect("p1");
+        let (_slot2, _) = s
+            .register_player("sid".into(), "pin".into(), chan())
+            .expect("p2");
+
+        let replay = s.seated_for_host_replay("sid");
+        assert_eq!(replay.len(), 2);
+        assert!(replay[1].1 > replay[0].1, "each seated slot gets its own epoch");
     }
 
     /// Regression: a reconnecting host races itself. The old socket's close can be

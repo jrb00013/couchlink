@@ -22,10 +22,14 @@
 use couchlink_capture_bridge::EncodeTarget;
 
 /// A sustained shed share above this (per window) steps the target down.
-const DOWN_TRIGGER_PCT: u32 = 2;
-/// Two consecutive clean windows step back up a rung — hysteresis against
-/// flapping at the boundary where the down edge just resolved.
-const UP_AFTER_CLEAN_WINDOWS: u32 = 2;
+/// 2% was noise: three WAN viewers shed a couple of frames every window,
+/// the governor climbed to 5000 kbps, immediately shed 7–19%, stepped back
+/// to 2500, and the yo-yo dropped IDRs that freeze WebCodecs.
+const DOWN_TRIGGER_PCT: u32 = 8;
+/// Clean windows required before climbing. Two 5s windows was ~10s at the
+/// floor then a failed climb — forever. Eight windows is ~40s of real
+/// headroom before we spend the extra bitrate.
+const UP_AFTER_CLEAN_WINDOWS: u32 = 8;
 
 /// The governor's persistent memory between windows.
 #[derive(Debug, Clone)]
@@ -173,9 +177,20 @@ mod tests {
     }
 
     #[test]
+    fn two_clean_windows_do_not_climb() {
+        let mut gov = LinkGov::new(P720);
+        gov.on_window(40, 100);
+        let down = gov.current();
+        assert_ne!(down, P720);
+        gov.on_window(0, 60);
+        gov.on_window(0, 60);
+        assert_eq!(gov.current(), down, "must stay down through the old 2-window climb");
+    }
+
+    #[test]
     fn a_single_blip_does_not_step_down() {
         let mut gov = LinkGov::new(P720);
-        let after_blip = gov.on_window(10, 100); // 10% shed > 2% trigger
+        let after_blip = gov.on_window(10, 100); // 10% shed > 8% trigger
         assert_eq!(after_blip, freeze(gov.current()));
         // One bad window alone is below the ladder floor — may still step; just
         // assert we then recover and never go below trickle.

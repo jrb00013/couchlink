@@ -57,13 +57,13 @@ fi
 # virtual pad and falls back to video-only. Never fatal — video still works.
 "$ROOT/scripts/ensure-ds-vhid.sh" || true
 
-# Bind the emulator's P2 slot to that virtual pad. RPCS3 keeps whatever device
-# was plugged in when its config was written, so a stale binding drops every
-# remote button without a single error anywhere.
-"$ROOT/scripts/link-emulator-pad.sh" || true
+# Do not pre-bind emulator pads here. Each remote slot is created and linked
+# when that player joins (emulator_pad::apply_on_join), so empty Pad3/4/5
+# sections are not written for people who never sat down.
 
-# The host re-runs both of the above when the player reports its controller
-# family, so it needs to find them from a binary living under target/.
+# The host re-runs ensure-ds-vhid + link-emulator-pad on join and again if
+# the player reports a different controller family, so it needs to find them
+# from a binary living under target/.
 export COUCHLINK_ROOT="$ROOT"
 
 # Release only: the BGRA→I420 conversion and scaler are per-pixel Rust loops, and

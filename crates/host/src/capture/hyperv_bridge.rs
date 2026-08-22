@@ -92,7 +92,13 @@ impl HyperVBridge {
         };
         configure(&stream)?;
         tracing::info!("Hyper-V capture socket connected");
-        let mut bridge = Self {
+        // Do not wait for the first frame here. `read_one` loops until a
+        // frame arrives; if win-capture is still bound to a dead host
+        // connection it never does, and this call sits on the host's only
+        // async thread — PeerJoined queues, no offer is sent, every friend
+        // hangs on "Waiting for host offer". Frames are drained from the
+        // select loop via `capture()` once we return.
+        Ok(Self {
             port,
             stream: Some(stream),
             width: 0,
@@ -107,9 +113,7 @@ impl HyperVBridge {
             disconnected_at: None,
             last_respawn: None,
             last_frame_at: Instant::now(),
-        };
-        bridge.read_one()?;
-        Ok(bridge)
+        })
     }
 
     pub fn set_target(&mut self, target: EncodeTarget) {
@@ -117,15 +121,6 @@ impl HyperVBridge {
         if let Some(stream) = self.stream.as_mut() {
             if let Err(e) = write_set_target(stream, target) {
                 tracing::warn!("could not command encode target over Hyper-V socket: {e}");
-            }
-        }
-    }
-
-    fn read_one(&mut self) -> Result<()> {
-        loop {
-            if self.read_frame(IDLE_POLL)?.is_some() {
-                self.pending = Some(self.buf.clone());
-                return Ok(());
             }
         }
     }

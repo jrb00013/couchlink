@@ -367,6 +367,10 @@ async fn handle_slot_join(
             warn!("offer failed for slot {slot}: {e}");
         }
     }
+    // Create the virtual pad's emulator binding now, not later on PadInfo.
+    // Keyboard+mouse players only announce a family on first input; waiting
+    // for that left their PCSX2 slot empty while they were already seated.
+    tokio::task::spawn_blocking(move || emulator_pad::apply_on_join(slot));
     Ok(())
 }
 

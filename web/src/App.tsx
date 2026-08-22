@@ -188,6 +188,16 @@ export default function App() {
       wcRef.current.setFirstPaintHandler(() => {
         promoteWebcodecsPresent();
       });
+      wcRef.current.setStallHandler(() => {
+        promotedRef.current = false;
+        playerRef.current?.resumeWarmup();
+        wcCanvasRef.current?.classList.add("is-hidden");
+        // RTP never stopped decoding — just show the canvas that was
+        // already painting under the WebCodecs layer.
+        canvasRef.current?.classList.remove("is-hidden");
+        videoRef.current?.classList.remove("is-hidden");
+        setVideoDiag("webcodecs stalled — showing live RTP");
+      });
     }
     // Don't tear down a live decoder on every callback.
     if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
@@ -197,28 +207,26 @@ export default function App() {
     return true;
   }
 
-  /** WebCodecs painted its first frame — take over the canvas and cut RTP. */
+  /** WebCodecs painted — show it, but keep RTP decoding on the hidden canvas. */
   function promoteWebcodecsPresent() {
     if (promotedRef.current) return;
     promotedRef.current = true;
     clearRtpFallbackTimer();
-    viewRef.current?.stop();
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-      videoRef.current.classList.add("is-hidden");
-    }
+    // Do not stop the RTP renderer or null the <video> — a lost CLVD
+    // IDR used to freeze the last picture because nothing else was live.
     canvasRef.current?.classList.add("is-hidden");
+    videoRef.current?.classList.add("is-hidden");
     wcCanvasRef.current?.classList.remove("is-hidden");
     setPresentMode("webcodecs");
-    clog("present mode: WebCodecs + CLVD (promoted after first paint)");
+    clog("present mode: WebCodecs + CLVD (RTP stays live, hidden)");
     playerRef.current?.promoteWebcodecs();
   }
 
   function attachStream(stream: MediaStream) {
     heldStreamRef.current = stream;
-    // WebCodecs owns the canvas once promoted — keep the RTP stream for
-    // fallback only. During warm-up it is NOT promoted, so RTP keeps painting
-    // as the visible safety net while the WebCodecs decoder warms up.
+    // WebCodecs is on screen once promoted, but the RTP renderer stays
+    // started — a stall just unhides that canvas. During warm-up RTP is
+    // the visible safety net.
     if (promotedRef.current) {
       if (heldLoggedRef.current !== stream) {
         heldLoggedRef.current = stream;
