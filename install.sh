@@ -12,6 +12,8 @@ UNBLOCK_FIREWALL=0
 # Default = friend/player. Gaming PC uses --host.
 INSTALL_ROLE="${COUCHLINK_INSTALL_ROLE:-client}"
 INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
+FORCE_CLOUDFLARE=0
+TAILSCALE_CLOUD=0
 
 # Bare `./install.sh` with no flags on an interactive terminal: walk through
 # the same choices as an argument in a small wizard instead of silently
@@ -69,6 +71,19 @@ if [[ $# -eq 0 && -t 0 && -t 1 ]]; then
     [[ "$REPLY_IDX" == "2" ]] && UNBLOCK_FIREWALL=1
   fi
 
+  # 3b) Host + online: which internet-reachability path to use. This is the
+  # question that decides whether Cloudflare gets involved.
+  if [[ "$INSTALL_ROLE" == "host" && "$RUN_MODE" == "online" ]]; then
+    couchlink_ask "How should friends reach this host over the internet?" \
+      "Automatic (recommended) — Headscale/WireGuard mesh, then public IP + UPnP, falling back to a Cloudflare tunnel (trycloudflare.com) only if needed" \
+      "Always use a Cloudflare tunnel — skip mesh/UPnP, force cloudflared HTTPS (--force-cloudflare)" \
+      "Also install Tailscale Inc's cloud client as an extra fallback (needs a Tailscale login; not self-hosted)"
+    case "$REPLY_IDX" in
+      2) FORCE_CLOUDFLARE=1 ;;
+      3) TAILSCALE_CLOUD=1 ;;
+    esac
+  fi
+
   # 4) Start couchlink immediately after install finishes?
   couchlink_ask "Start couchlink right after install finishes?" \
     "Yes — install then run" \
@@ -76,7 +91,7 @@ if [[ $# -eq 0 && -t 0 && -t 1 ]]; then
   [[ "$REPLY_IDX" == "1" ]] && RUN_AFTER=1
 
   echo
-  echo "${BOLD}==> ${INSTALL_ROLE} / ${RUN_MODE}$( [[ "$RUN_AFTER" == "1" ]] && echo " / run after install" )$( [[ "$UNBLOCK_FIREWALL" == "1" ]] && echo " / unblock firewall" )${RESET}"
+  echo "${BOLD}==> ${INSTALL_ROLE} / ${RUN_MODE}$( [[ "$RUN_AFTER" == "1" ]] && echo " / run after install" )$( [[ "$UNBLOCK_FIREWALL" == "1" ]] && echo " / unblock firewall" )$( [[ "$FORCE_CLOUDFLARE" == "1" ]] && echo " / force cloudflare tunnel" )$( [[ "$TAILSCALE_CLOUD" == "1" ]] && echo " / +Tailscale Inc cloud" )${RESET}"
   echo
 fi
 
@@ -118,6 +133,9 @@ done
 COUCHLINK_INSTALL_MESH="$INSTALL_MESH"
 COUCHLINK_INSTALL_ROLE="$INSTALL_ROLE"
 export COUCHLINK_INSTALL_MESH COUCHLINK_INSTALL_ROLE
+if [[ "$TAILSCALE_CLOUD" == "1" ]]; then
+  export COUCHLINK_INSTALL_TAILSCALE_CLOUD=1
+fi
 
 echo "==> couchlink install ($INSTALL_ROLE)"
 
@@ -499,6 +517,9 @@ if [[ "$RUN_AFTER" == "1" ]]; then
   RUN_ARGS=("$INSTALL_ROLE" "--${RUN_MODE}")
   if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
     RUN_ARGS+=(--unblock-firewall)
+  fi
+  if [[ "$FORCE_CLOUDFLARE" == "1" ]]; then
+    RUN_ARGS+=(--force-cloudflare)
   fi
   echo "==> starting ./scripts/run.sh ${RUN_ARGS[*]}"
   exec bash "$ROOT/scripts/run.sh" "${RUN_ARGS[@]}"
