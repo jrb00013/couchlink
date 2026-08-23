@@ -110,4 +110,18 @@ mod tests {
     fn ricardo_playable_rtt_matches_budget_constant() {
         assert!((A::RTT_MS - RICARDO_RTT_MS).abs() < 1e-9);
     }
+
+    #[test]
+    fn live_sim_target_clears_wow_bar_at_ricardo_rtt() {
+        use crate::latency_live_sim::{beats_ricardo, SessionMetrics};
+        let m = SessionMetrics {
+            push_fps: A::PUSH_FPS,
+            shed_pct: 0,
+            encoder_kbps: A::ENCODER_KBPS,
+            paint_fps: A::PAINT_FPS,
+            input_s_p50_ms: 35.0,
+        };
+        assert!(beats_ricardo(m));
+        assert!(live_photon_wow_ok(35.0 + RICARDO_RTT_MS, RICARDO_RTT_MS));
+    }
 }
