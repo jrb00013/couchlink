@@ -13,8 +13,10 @@ import {
 describe("inputPhoton", () => {
   beforeEach(() => resetInputPhoton());
 
-  it("returns null before any pad send", () => {
-    expect(inputFreshnessMs(100)).toBeNull();
+  it("freshness improves when pad sends on the same tick as paint", () => {
+    notePadSent(100);
+    notePhotonPaint(102, 1);
+    expect(inputFreshnessMs(102)).toBe(2);
   });
 
   it("reports freshness as paint − last pad send", () => {
