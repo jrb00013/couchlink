@@ -15,8 +15,8 @@ import {
 } from "./h264Avc";
 import {
   ageBand,
+  decodeBacklogPolicy,
   shouldReplacePending,
-  shouldSkipDecode,
   type AgeBand,
 } from "./presentAge";
 
@@ -389,9 +389,9 @@ export class WebCodecsCanvasView {
         });
       }
 
-      if (shouldSkipDecode(dec.decodeQueueSize, keyframe)) {
-        // Decoder is backed up locally — drop delta to catch up.
+      if (decodeBacklogPolicy(dec.decodeQueueSize, keyframe) === "skip-request-idr") {
         this.dropped += 1;
+        this.requestKeyframe();
         return;
       }
 
