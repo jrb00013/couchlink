@@ -32,7 +32,7 @@ const IDR_INTERVAL: Duration = Duration::from_secs(2);
 ///
 /// Three frame times at 60fps. Past that the peer is not keeping up and the
 /// frame is already too old to be worth showing.
-const PUSH_BUDGET: Duration = Duration::from_millis(50);
+const PUSH_BUDGET: Duration = Duration::from_millis(20);
 
 /// Longest a *keyframe* push may hold the loop.
 ///
@@ -213,9 +213,9 @@ fn spawn_pad_feedback(
 
 /// Push one frame to every currently-connected slot, concurrently.
 ///
-/// Sequential awaits would be wrong: `push_bounded`'s own budget is up to 50ms
+/// Sequential awaits would be wrong: `push_bounded`'s own budget is up to 20ms
 /// per peer (1s for keyframes), and the cadence tick can be as tight as 2ms on
-/// the pre-encoded path — four sequential 50ms awaits would stall the whole
+/// the pre-encoded path — four sequential 20ms awaits would stall the whole
 /// capture loop. Returns `(received_by_any, dropped_total)`: the caller counts
 /// a produced frame once (when at least one viewer took it) and feeds the link
 /// governor the *sum* of every slot's sheds — one shared governor commands the

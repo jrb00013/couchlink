@@ -944,6 +944,7 @@ dependencies = [
  "couchlink-proto",
  "futures-util",
  "interceptor",
+ "nix 0.29.0",
  "openh264",
  "qrcode",
  "rand 0.8.7",
@@ -2644,6 +2645,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "cfg_aliases 0.2.2",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]

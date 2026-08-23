@@ -873,15 +873,15 @@ export class CouchlinkPlayer {
   }
 
   /**
-   * WebCodecs painted its first frame. Stay on warmup so the host never
-   * cuts RTP. Painting WebCodecs is a UI choice; cutting the rescue
-   * stream is what froze the last picture after a single lost IDR.
+   * WebCodecs painted its first frame. Promote to "webcodecs" so the host
+   * thins RTP to IDR-only (path_flags still keeps the track alive). Staying
+   * on "warmup" forever forced full dual-send and blew the push budget.
    */
   promoteWebcodecs() {
     if (!this.webcodecsPath) return;
     this.notifyPresentPath(
-      "warmup",
-      "CLVD DataChannel + WebCodecs present — RTP stays live"
+      "webcodecs",
+      "CLVD DataChannel + WebCodecs present — RTP IDR-only rescue"
     );
   }
 

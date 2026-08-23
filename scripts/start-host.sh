@@ -17,6 +17,13 @@ _KEEP_MESH_NEED_TURN="${COUCHLINK_MESH_NEED_TURN:-}"
 _KEEP_HS_URL="${COUCHLINK_HS_URL:-}"
 _KEEP_TS_AUTHKEY="${COUCHLINK_TS_AUTHKEY:-}"
 _KEEP_ICE_IPS="${COUCHLINK_ICE_IPS:-}"
+# Capture source/window: allow the parent (run.sh) to force picker even when
+# .env.couchlink pins COUCHLINK_CAPTURE_WINDOW=PCSX2 — otherwise the picker
+# never appears and win-capture silently waits for a closed emulator.
+_KEEP_CAPTURE_SOURCE="${COUCHLINK_CAPTURE_SOURCE:-}"
+_HAS_CAPTURE_WINDOW=0
+[[ -v COUCHLINK_CAPTURE_WINDOW ]] && _HAS_CAPTURE_WINDOW=1
+_KEEP_CAPTURE_WINDOW="${COUCHLINK_CAPTURE_WINDOW:-}"
 # `set -a` matters: .env.couchlink assigns without `export`, so without it the
 # settings stay shell-local. The host binary still looked correct because its
 # preset is passed as an argument, while ensure-win-capture.sh runs as a child
@@ -37,6 +44,12 @@ set +a
 [[ -n "$_KEEP_TS_AUTHKEY" ]] && export COUCHLINK_TS_AUTHKEY="$_KEEP_TS_AUTHKEY"
 [[ -n "$_KEEP_ICE_IPS" ]] && COUCHLINK_ICE_IPS="$_KEEP_ICE_IPS"
 [[ -n "$_KEEP_TURN_EXTERNAL_IP" ]] && COUCHLINK_TURN_EXTERNAL_IP="$_KEEP_TURN_EXTERNAL_IP"
+if [[ -n "$_KEEP_CAPTURE_SOURCE" ]]; then
+  export COUCHLINK_CAPTURE_SOURCE="$_KEEP_CAPTURE_SOURCE"
+fi
+if [[ "$_HAS_CAPTURE_WINDOW" == "1" ]]; then
+  export COUCHLINK_CAPTURE_WINDOW="$_KEEP_CAPTURE_WINDOW"
+fi
 # Empty TURN in local mode is intentional. Mesh on native Linux skips TURN;
 # WSL mesh keeps TURN on the mesh IP (COUCHLINK_MESH_NEED_TURN=1).
 if [[ "$_KEEP_MODE" == "local" ]]; then
@@ -52,6 +65,29 @@ fi
 
 # On WSL, bring up Windows DXGI capture before the host connects to it.
 "$ROOT/scripts/ensure-win-capture.sh"
+
+# Picker mode: give the user time to choose a window before the host binary
+# starts. Without this, the host races ahead, fails the first Hyper-V connect,
+# and (before the ever_connected guard) respawned as Hidden desktop — which
+# is why the picker looked like it "never appeared".
+if [[ "${COUCHLINK_CAPTURE_SOURCE:-picker}" == "picker" ]] \
+  && [[ -z "${COUCHLINK_CAPTURE_WINDOW:-}" ]] \
+  && command -v tasklist.exe >/dev/null 2>&1; then
+  echo "==> waiting for you to pick a capture window (up to 90s)…"
+  _picked=0
+  for _ in $(seq 1 90); do
+    if tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
+      | grep -qi couchlink-win-capture; then
+      echo "==> win-capture is running — continuing host start"
+      _picked=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$_picked" != "1" ]]; then
+    echo "warning: no capture window picked yet — host will start anyway and attach when you do" >&2
+  fi
+fi
 
 # Same deal for controller input: without the Windows companion the host has no
 # virtual pad and falls back to video-only. Never fatal — video still works.

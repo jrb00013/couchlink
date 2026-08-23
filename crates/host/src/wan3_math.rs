@@ -53,28 +53,30 @@ pub const P720: EncodeTarget = EncodeTarget {
 
 /// Same construction as `link_gov::rungs_from` — must stay a copy so a ladder
 /// change fails these tests instead of silently drifting the WAN model.
+/// Hold `baseline.fps`; step bitrate only (fps-hold invariant).
 pub fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
-    let half_fps = EncodeTarget {
-        fps: (baseline.fps / 2).max(1),
-        ..*baseline
-    };
-    let same_bits_30 = EncodeTarget {
-        fps: 30,
-        bitrate_kbps: (baseline.bitrate_kbps / 4).max(1),
-        ..*baseline
-    };
-    let trickle = EncodeTarget {
-        fps: 15,
-        bitrate_kbps: baseline.bitrate_kbps / 4,
-        ..*baseline
-    };
     let mut rungs = vec![*baseline];
-    for extra in [half_fps, same_bits_30, trickle] {
+    let mut kbps = baseline.bitrate_kbps;
+    for _ in 0..3 {
+        kbps = (kbps / 2).max(1);
+        let extra = EncodeTarget {
+            fps: baseline.fps,
+            bitrate_kbps: kbps,
+            ..*baseline
+        };
         if !rungs.iter().any(|r| *r == extra) {
             rungs.push(extra);
         }
     }
     rungs
+}
+
+/// Host uplink with IDR-only RTP rescue on WebCodecs (CLVD full + RTP IDRs).
+/// `idr_bytes` / `gop_s` size the IDR tax; default GOP ≈ 1 s.
+pub fn host_uplink_idr_only_kbps(enc_kbps: u32, n: u32, idr_bytes: u64, gop_s: f64) -> u32 {
+    let clvd = enc_kbps.saturating_mul(n);
+    let idr_kbps = ((idr_bytes as f64) * 8.0 / 1000.0 / gop_s.max(0.001)).ceil() as u32;
+    clvd.saturating_add(idr_kbps.saturating_mul(n))
 }
 
 /// Frame period T (ms). Fundamental unit of unsynchronized wait.
@@ -156,25 +158,32 @@ mod tests {
     // ── Inventory locked to measurements ──────────────────────────────
 
     #[test]
-    fn live_trickle_is_the_p720_ladder_floor() {
-        let floor = *rungs_from(&P720).last().unwrap();
-        assert_eq!(
-            floor, LIVE_TRICKLE,
-            "rungs_from(P720) floor must be the live 15/2500 WAN rung"
-        );
+    fn every_rung_from_p720_holds_60_fps() {
+        for r in rungs_from(&P720) {
+            assert_eq!(r.fps, 60, "fps-hold violated: {r:?}");
+        }
     }
 
     #[test]
-    fn p720_ladder_climbs_same_bits_30_before_spending_uplink() {
+    fn p720_ladder_steps_bitrate_only() {
         let r = rungs_from(&P720);
         assert_eq!(r.len(), 4);
         assert_eq!(r[0], P720);
-        assert_eq!(r[1].fps, 30);
-        assert_eq!(r[1].bitrate_kbps, 10_000);
-        assert_eq!(r[2].fps, 30);
-        assert_eq!(r[2].bitrate_kbps, 2_500);
-        assert_eq!(r[3].fps, 15);
-        assert_eq!(r[3].bitrate_kbps, 2_500);
+        assert_eq!(r[1], EncodeTarget { bitrate_kbps: 5_000, ..P720 });
+        assert_eq!(r[2], EncodeTarget { bitrate_kbps: 2_500, ..P720 });
+        assert_eq!(r[3], EncodeTarget { bitrate_kbps: 1_250, ..P720 });
+        let floor = *r.last().unwrap();
+        assert_eq!(floor.fps, 60);
+        assert_eq!(floor.bitrate_kbps, 1_250);
+    }
+
+    #[test]
+    fn live_trickle_is_historical_observation_not_ladder_floor() {
+        // LIVE_TRICKLE is the 2026-08-22 measured death-spiral floor; the
+        // fps-hold ladder floor is 60@1250, not 15@2500.
+        assert_eq!(LIVE_TRICKLE.fps, 15);
+        assert_eq!(LIVE_TRICKLE.bitrate_kbps, 2_500);
+        assert_ne!(*rungs_from(&P720).last().unwrap(), LIVE_TRICKLE);
     }
 
     #[test]
@@ -198,10 +207,10 @@ mod tests {
             2.0,
             1e-9,
         );
-        // half-fps rung keeps 10 Mbps: 30 fps has half the bits/frame of 15@10M, not of trickle.
+        // At held 60 fps, halving R halves bits/frame.
         almost(
-            bits_per_frame(10_000, 30),
-            bits_per_frame(10_000, 60) * 2.0,
+            bits_per_frame(5_000, 60),
+            bits_per_frame(10_000, 60) / 2.0,
             1e-9,
         );
     }
@@ -255,17 +264,18 @@ mod tests {
     }
 
     #[test]
-    fn first_climb_off_trickle_is_30_at_same_2500() {
+    fn first_climb_off_floor_doubles_bits_keeps_60() {
         let r = rungs_from(&P720);
-        let trickle = r[3];
-        let same_bits_30 = r[2];
-        assert_eq!(trickle, LIVE_TRICKLE);
-        assert_eq!(same_bits_30.fps, 30);
-        assert_eq!(same_bits_30.bitrate_kbps, trickle.bitrate_kbps);
+        let floor = r[3];
+        let climb = r[2];
+        assert_eq!(floor.fps, 60);
+        assert_eq!(floor.bitrate_kbps, 1_250);
+        assert_eq!(climb.fps, 60);
+        assert_eq!(climb.bitrate_kbps, 2_500);
         almost(climb_ready_s(), 40.0, 1e-9);
         assert_eq!(
-            host_uplink_kbps(same_bits_30.bitrate_kbps, N_FRIENDS, PATHS_WEBCODECS),
-            15_000
+            host_uplink_idr_only_kbps(2_500, N_FRIENDS, 60_000, 1.0),
+            8_940
         );
     }
 
@@ -355,22 +365,23 @@ mod tests {
 
     #[test]
     fn rungs_from_must_not_take_the_live_floor_as_baseline() {
-        // If tonight's 15/2500 is passed to rungs_from as *baseline* (not as the
-        // P720 floor), fps is not monotone: 15 → 7 → 3 → 15, and trickle bitrate
-        // collapses to 625. Production must keep P720 (or a 60/10M preset) as
-        // baseline so the live hold stays the *floor*, not a new ladder origin.
-        let broken = rungs_from(&LIVE_TRICKLE);
-        assert_eq!(broken[0].fps, 15);
-        assert_eq!(broken[0].bitrate_kbps, 2_500);
+        // fps-hold relative to *whatever* baseline is passed: every rung keeps
+        // that fps. Passing LIVE_TRICKLE as baseline must not invent 7 fps.
+        let from_trickle = rungs_from(&LIVE_TRICKLE);
+        for r in &from_trickle {
+            assert_eq!(r.fps, 15, "fps-hold relative to LIVE_TRICKLE: {r:?}");
+        }
+        assert_eq!(from_trickle[0].bitrate_kbps, 2_500);
         assert!(
-            broken.iter().any(|r| r.bitrate_kbps == 625),
-            "floor-as-baseline still collapses trickle bits: {broken:?}"
+            from_trickle.iter().any(|r| r.bitrate_kbps == 312)
+                || from_trickle.iter().any(|r| r.bitrate_kbps == 625),
+            "bitrate still halves: {from_trickle:?}"
         );
-        assert_ne!(broken.last().copied(), Some(LIVE_TRICKLE));
         let from_p720 = rungs_from(&P720);
-        assert!(from_p720[0].fps >= from_p720[1].fps);
-        assert!(from_p720[1].fps >= from_p720[2].fps);
-        assert_eq!(from_p720[3], LIVE_TRICKLE);
+        for r in &from_p720 {
+            assert_eq!(r.fps, 60);
+        }
+        assert_eq!(from_p720[3].bitrate_kbps, 1_250);
     }
 
     #[test]
@@ -432,12 +443,13 @@ mod tests {
     }
 
     #[test]
-    fn plan_b_30fps_same_bits_keeps_15mbps_uplink() {
-        let via_old_half = host_uplink_kbps(10_000, N_FRIENDS, PATHS_WEBCODECS);
-        let via_same_bits = host_uplink_kbps(2_500, N_FRIENDS, PATHS_WEBCODECS);
-        assert_eq!(via_old_half, 60_000);
-        assert_eq!(via_same_bits, 15_000);
+    fn plan_b_idr_only_uplink_under_full_dual() {
+        let dual = host_uplink_kbps(2_500, N_FRIENDS, PATHS_WEBCODECS);
+        let idr_only = host_uplink_idr_only_kbps(2_500, N_FRIENDS, 60_000, 1.0);
+        assert_eq!(dual, 15_000);
+        assert_eq!(idr_only, 8_940);
+        assert!(idr_only < dual);
         assert_eq!(rungs_from(&P720)[2].bitrate_kbps, 2_500);
-        assert_eq!(rungs_from(&P720)[2].fps, 30);
+        assert_eq!(rungs_from(&P720)[2].fps, 60);
     }
 }

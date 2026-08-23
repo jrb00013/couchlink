@@ -151,13 +151,33 @@ const PATH_RTP: u8 = 2;
 /// (Safari / no WebCodecs), which skip the DataChannel. Cutting RTP after
 /// the first WebCodecs paint left a single unordered DC; one lost IDR
 /// froze the last picture until a hard refresh. `PATH_UNKNOWN` and
-/// `PATH_WEBCODECS` both send both streams so the hidden RTP decoder
-/// stays current and a stall can unhide it immediately.
+/// `PATH_WEBCODECS` both keep the RTP flag so the track stays alive —
+/// WebCodecs friends still only *send* IDRs on RTP (see `should_send_rtp`).
 fn path_flags(path: u8) -> (bool, bool) {
     match path {
         PATH_RTP => (true, false),
         _ => (true, true),
     }
+}
+
+/// Opt into full dual-send (every AU on RTP+DC). Default is IDR-only RTP
+/// rescue for WebCodecs so 3-friend WAN does not pay `N·2·R` uplink.
+fn rtp_full_dual() -> bool {
+    matches!(
+        std::env::var("COUCHLINK_RTP_FULL").as_deref(),
+        Ok("1") | Ok("true")
+    ) || matches!(
+        std::env::var("COUCHLINK_RTP_EVERY_N").as_deref(),
+        Ok("1")
+    )
+}
+
+/// Whether this AU should hit the RTP media track.
+///
+/// WebCodecs paints from CLVD; RTP is an IDR-only rescue (and Safari /
+/// unknown stay full dual so a silent non-WebCodecs client cannot starve).
+fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool {
+    full_dual || path == PATH_RTP || path == PATH_UNKNOWN || keyframe
 }
 
 /// Parse a client-reported present path. An unrecognised value maps to
@@ -505,7 +525,8 @@ impl WebRtcHost {
         use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
         use rtp::extension::HeaderExtension;
 
-        let (send_rtp, send_dc) = path_flags(self.present_path.load(Ordering::Relaxed));
+        let path = self.present_path.load(Ordering::Relaxed);
+        let (send_rtp, send_dc) = path_flags(path);
         let mut delivered = false;
 
         // RTP first when sent at all. It is the only path every browser can
@@ -516,9 +537,12 @@ impl WebRtcHost {
         // viewer on the same host was fine, because Chrome was being fed by
         // the very channel that starved it.
         //
+        // WebCodecs: IDR-only on RTP (thin rescue). Full P-frame dual-send
+        // was the push bottleneck on 3-friend WAN (~N·2·R uplink).
+        //
         // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
         // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
-        if send_rtp {
+        if send_rtp && should_send_rtp(keyframe, path, rtp_full_dual()) {
             let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
             self.video
                 .sample_writer()
@@ -773,6 +797,21 @@ mod controller_host_tests {
     #[test]
     fn webcodecs_path_keeps_rtp_so_a_lost_idr_has_a_live_fallback() {
         assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+    }
+
+    #[test]
+    fn should_send_rtp_idr_only_on_webcodecs_full_on_safari_and_unknown() {
+        assert!(should_send_rtp(true, PATH_WEBCODECS, false));
+        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(false, PATH_RTP, false));
+        assert!(should_send_rtp(false, PATH_UNKNOWN, false));
+        assert!(should_send_rtp(false, PATH_WEBCODECS, true));
+    }
+
+    #[test]
+    fn skipping_a_webcodecs_p_on_rtp_is_not_a_path_flag_cut() {
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
     }
 
     #[test]

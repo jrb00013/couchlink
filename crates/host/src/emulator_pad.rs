@@ -82,18 +82,18 @@ fn prebind_slots() -> impl Iterator<Item = u8> {
 
 /// Write every remote slot's emulator binding once, before anyone connects.
 ///
-/// PCSX2 reads `PCSX2.ini` exactly once, at launch: an edit made while it is
-/// running is ignored, and it rewrites the file from memory on exit. Binding a
-/// slot only when its player joins therefore forces a brittle order on the
-/// host — every player has to be seated *before* PCSX2 starts, or their pad is
-/// simply absent for the entire session, and relaunching PCSX2 to pick up a
-/// late joiner discards whatever was written in the meantime.
+/// Two independent pieces (do not conflate them):
 ///
-/// Nothing about writing the binding actually needs a connected player: the
-/// slot -> device mapping is fixed (slot 1 -> XInput-0 -> port 1B, slot 2 ->
-/// XInput-1 -> 1C, slot 3 -> XInput-2 -> 1D), and a binding whose XInput
-/// device never shows up is inert — PCSX2 just sees no input on that port. So
-/// write them all up front and let PCSX2 be started whenever, in any order.
+/// **A — Persistent ViGEm seats** (`ensure-ds-vhid` / companion preallocate):
+/// XInput-0/1/2 exist for the companion lifetime. Late joins attach; no PnP.
+///
+/// **B — Runtime PCSX2 reconfiguration** (headless):
+/// Prefer `inputprofiles/couchlink.ini` + `EmuCore/InputProfileName=couchlink`
+/// on the game settings layer so `UpdateGameSettingsLayer` / Load() picks up
+/// Pad* without UI. Join does not need to mutate Pad*. Optional UIA Apply
+/// Profile remains behind `COUCHLINK_PCSX2_LIVE_APPLY=1` only.
+///
+/// Slot → device map is fixed: slot 1 → XInput-0 → port 1B, etc.
 ///
 /// Best-effort like the rest of this module: a failure here leaves the
 /// per-join `apply` path as the fallback it always was.
@@ -103,9 +103,8 @@ pub fn prebind_all() {
         return;
     };
     let backend = backend_for(JOIN_PAD_KIND);
-    // Companion first so the virtual pads exist as early as possible; PCSX2
-    // hot-plugs devices, but a device already present at launch is one less
-    // thing depending on that.
+    // Companion first so the three remote ViGEm seats exist (and claim
+    // stable XInput indices) before we name them in the emulator ini.
     run(&root, "scripts/ensure-ds-vhid.sh", backend, None);
     for slot in prebind_slots() {
         run(

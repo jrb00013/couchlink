@@ -211,7 +211,9 @@ impl StreamPreset {
         width: 1280,
         height: 720,
         fps: 60,
-        bitrate_kbps: 10_000,
+        // 10 Mbps × 3 friends blew the push budget even with IDR-only RTP.
+        // 5 Mbps holds 60 fps on 3-friend WAN; governor climbs back if clean.
+        bitrate_kbps: 5_000,
     };
     pub const P720_30: Self = Self {
         width: 1280,

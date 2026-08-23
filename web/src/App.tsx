@@ -44,6 +44,14 @@ function preferLegacyVideo(): boolean {
   return new URLSearchParams(location.search).get("legacyVideo") === "1";
 }
 
+function padDisplayName(kind: string, id: string): string {
+  if (id === "keyboard+mouse") return "Keyboard + Mouse";
+  if (id === "touch") return "Touch";
+  if (kind === "dualsense") return "DualSense";
+  if (kind === "xbox") return "Xbox";
+  return "Gamepad";
+}
+
 function secureContextHint(): string | null {
   if (typeof window === "undefined") return null;
   if (window.isSecureContext) return null;
@@ -586,6 +594,13 @@ export default function App() {
     id: hostReported?.id || "host",
     label: hostReported?.id === "keyboard+mouse" ? "Keyboard + Mouse" : "Host",
   };
+  /** Fellow seated players (slot 0 is the host, drawn above; our own slot is
+   * drawn live below) — announced via player_pad_info heartbeats, so everyone
+   * sees who else joined and on what device, not just their own pad. */
+  const otherPlayerPads = Object.entries(playerPads)
+    .map(([slot, p]) => ({ slot: Number(slot), ...p }))
+    .filter((p) => p.slot !== 0 && p.slot !== mySlot)
+    .sort((a, b) => a.slot - b.slot);
 
   useEffect(() => {
     setKbmActive(!hasPhysicalPad && !isMobile);
@@ -772,7 +787,11 @@ export default function App() {
         {connected && !isMobile && (
           <section className="pads" aria-live="polite">
             <div className="pads-head">
-              <span className="pads-count">host + you</span>
+              <span className="pads-count">
+                {otherPlayerPads.length > 0
+                  ? `host + you +${otherPlayerPads.length}`
+                  : "host + you"}
+              </span>
               <span className="pads-hint">
                 {hasPhysicalPad
                   ? "host’s pad · your pad"
@@ -806,6 +825,29 @@ export default function App() {
                   slotLabel="you"
                   active
                 />
+              )}
+              {otherPlayerPads.map((p) =>
+                p.id === "keyboard+mouse" ? (
+                  <KeyboardMouseViz
+                    key={`remote-p${p.slot}`}
+                    input={null}
+                    seat={seatForRemoteSlot(p.slot)}
+                    slotLabel="keyboard"
+                  />
+                ) : (
+                  <ControllerViz
+                    key={`remote-p${p.slot}`}
+                    pad={silhouettePad(
+                      (["dualsense", "xbox", "generic"].includes(p.kind)
+                        ? p.kind
+                        : "generic") as ControllerKind,
+                      p.id,
+                      padDisplayName(p.kind, p.id),
+                    )}
+                    seat={seatForRemoteSlot(p.slot)}
+                    slotLabel={padDisplayName(p.kind, p.id)}
+                  />
+                ),
               )}
             </div>
             {!hasPhysicalPad && (
