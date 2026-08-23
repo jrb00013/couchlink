@@ -118,6 +118,18 @@ if [[ "${COUCHLINK_SKIP_WIN_CAPTURE_BUILD:-0}" != "1" ]]; then
   fi
 fi
 
+# One healthy capture is enough. Host maybe_respawn + ensure used to stack
+# multiple win-capture.exe and starve Hyper-V attach. >1 means a race — kill
+# and relaunch a single instance.
+if command -v tasklist.exe >/dev/null 2>&1; then
+  _cap_n=$(tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
+    | grep -ci couchlink-win-capture || true)
+  if [[ "$_cap_n" -eq 1 ]]; then
+    echo "==> Windows capture already running (source=$source_mode) — leaving it alone"
+    exit 0
+  fi
+fi
+
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
 fi
@@ -168,15 +180,9 @@ psw -Command "
     # Interactive first launch: show the picker on the desktop now.
     Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$argList
   } else {
-    schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
-    \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
-      /TR \"powershell.exe -NoProfile -WindowStyle $_ps_style -ExecutionPolicy Bypass -File \$launcher\" 2>&1
-    if (\$LASTEXITCODE -ne 0) {
-      Write-Host \"schtasks create failed, falling back to Start-Process: \$created\"
-      Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$argList
-    } else {
-      schtasks.exe /Run /TN '$task_name' | Out-Null
-    }
+    # Window/desktop: Start-Process only. schtasks /Run raced with host
+    # maybe_respawn and left two win-capture.exe fighting over Hyper-V.
+    Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$argList
   }
 " >/dev/null
 

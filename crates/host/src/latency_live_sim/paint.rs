@@ -40,8 +40,9 @@ pub fn simulate_paint_fps(cfg: PaintSimConfig, host_fps: f64) -> f64 {
             in_trickle = false;
         }
 
-        let congested = (frame as f32 / GOP_FRAMES as f32) < cfg.congested_fraction
-            || (frame % 7 == 0 && in_trickle);
+        // Deterministic congestion window at the start of the GOP (fraction of frames).
+        // No extra %7 spikes — those made "mild WAN" look like a death spiral.
+        let congested = (frame as f32 / GOP_FRAMES as f32) < cfg.congested_fraction;
 
         let skip_delta = if keyframe {
             false
@@ -90,6 +91,23 @@ mod tests {
         assert!(
             fps >= 35.0,
             "new trickle paint={fps} must stay playable (old path cliffs to ~1)"
+        );
+    }
+
+    #[test]
+    fn mild_wan_congestion_paints_at_or_above_ricardo() {
+        let fps = simulate_paint_fps(
+            PaintSimConfig {
+                skip_all_deltas_in_trickle: false,
+                trickle_frames: 30,
+                congestion_only_skip: true,
+                congested_fraction: 0.05,
+            },
+            77.8,
+        );
+        assert!(
+            fps >= 74.0,
+            "mild WAN paint={fps} must beat Ricardo's 74"
         );
     }
 

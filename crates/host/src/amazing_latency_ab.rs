@@ -124,4 +124,16 @@ mod tests {
         assert!(beats_ricardo(m));
         assert!(live_photon_wow_ok(35.0 + RICARDO_RTT_MS, RICARDO_RTT_MS));
     }
+
+    #[test]
+    fn mediocre_session_does_not_claim_beat_ricardo() {
+        use crate::latency_live_sim::{beats_ricardo, SessionMetrics};
+        assert!(!beats_ricardo(SessionMetrics {
+            push_fps: 50.0,
+            shed_pct: 8,
+            encoder_kbps: A::ENCODER_KBPS,
+            paint_fps: 70.0,
+            input_s_p50_ms: 44.0,
+        }));
+    }
 }

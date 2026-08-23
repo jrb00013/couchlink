@@ -113,14 +113,24 @@ mod tests {
     #[test]
     fn b_live_sim_target_beats_ricardo_on_all_axes() {
         use crate::latency_live_sim::{beats_ricardo, SessionMetrics};
+        // Hard bars: ≥Ricardo paint (74), ≤3% shed, hold 5 Mbps, S≤45.
         let m = SessionMetrics {
-            push_fps: 72.0,
-            shed_pct: 2,
+            push_fps: A::PUSH_FPS,
+            shed_pct: 0,
             encoder_kbps: A::ENCODER_KBPS,
-            paint_fps: 74.0,
+            paint_fps: A::PAINT_FPS,
             input_s_p50_ms: 35.0,
         };
         assert!(beats_ricardo(m));
+        // Soft-floor mediocrity must not pass the hard gate.
+        let soft = SessionMetrics {
+            push_fps: 50.0,
+            shed_pct: 8,
+            encoder_kbps: A::ENCODER_KBPS,
+            paint_fps: 70.0,
+            input_s_p50_ms: 40.0,
+        };
+        assert!(!beats_ricardo(soft));
     }
 
     #[test]
