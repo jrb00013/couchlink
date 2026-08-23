@@ -379,6 +379,9 @@ export class WebCodecsCanvasView {
           codedWidth: au.width || undefined,
           codedHeight: au.height || undefined,
           optimizeForLatency: true,
+          // Software decode caps paint fps on many laptops; Ricardo's GPU path
+          // is the bar — prefer hardware and stay decode-bound only on failure.
+          hardwareAcceleration: "prefer-hardware",
         });
         this.configured = true;
         clog("VideoDecoder configured", {

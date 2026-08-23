@@ -80,12 +80,10 @@ pub(crate) fn sanitize_nat_1to1_ips(ice_ips: Vec<String>) -> Vec<String> {
 }
 
 /// Queue depth on the video DataChannel past which frames are shed rather than
-/// awaited. Roughly 200ms at the 10 Mbps 720p60 preset — enough to ride out a
-/// normal congestion blip, short enough that a real stall is cut off before it
-/// can back up into the capture socket.
-/// Shed P-frames before the SCTP queue is deep enough to burn the push budget.
-/// 256 KiB let IDRs pile up until the 1s keyframe timeout pinned the session.
-const VIDEO_DC_MAX_BUFFERED: usize = 96 * 1024;
+/// awaited. At 5 Mbps (~625 KB/s), 24 KiB ≈ 39 ms — inside the 45 ms input
+/// wow-bar so trickle/governor react before bufferbloat eats the whole budget.
+/// (96 KiB was ~157 ms — congestion looked healthy while paint died.)
+const VIDEO_DC_MAX_BUFFERED: usize = 24 * 1024;
 
 /// Any friend's pad report coalesces here. Video loop takes it once.
 static EXPEDITE: AtomicBool = AtomicBool::new(false);
@@ -452,15 +450,14 @@ impl WebRtcHost {
         )
         .await;
 
-        // Video: unordered, but allow a short retransmit window so fragmented
-        // IDRs (often >64 KiB) are not permanently lost on a single drop.
-        // Browser WebCodecs consumes this and skips Chrome's media JB.
+        // Video: unordered, short lifetime — FEC recovers single fragment loss;
+        // stale retransmits after ~40ms are useless (decodeBacklogPolicy asks IDR).
         let video_dc = pc2
             .create_data_channel(
                 VIDEO_CHANNEL,
                 Some(webrtc::data_channel::data_channel_init::RTCDataChannelInit {
                     ordered: Some(false),
-                    max_packet_life_time: Some(100),
+                    max_packet_life_time: Some(40),
                     ..Default::default()
                 }),
             )
@@ -932,6 +929,18 @@ mod controller_host_tests {
     #[test]
     fn webcodecs_path_is_clvd_only_so_push_budget_survives() {
         assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
+    }
+
+    #[test]
+    fn video_dc_buffer_cap_fits_input_wow_bar_at_5mbps() {
+        // Keep in sync with VIDEO_DC_MAX_BUFFERED (24 KiB @ 5 Mbps ≈ 39 ms < 45 ms wow).
+        let cap_bytes = 24 * 1024u64;
+        let bytes_per_sec = 5_000u64 * 1000 / 8;
+        let queue_ms = cap_bytes * 1000 / bytes_per_sec;
+        assert!(
+            queue_ms <= 45,
+            "SCTP buffer cap {queue_ms}ms must stay inside S_p50 wow bar"
+        );
     }
 
     #[test]
