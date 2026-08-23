@@ -59,6 +59,33 @@ export function webcodecsDiagnosis(
   return "healthy";
 }
 
+type HardwareAcceleration =
+  | "no-preference"
+  | "prefer-hardware"
+  | "prefer-software";
+
+/**
+ * Prefer hardware (Ricardo bar), then software, then no-preference.
+ * Headless / WSL Chromium often reports prefer-hardware unsupported — probing
+ * avoids OperationError on configure and keeps WebCodecs (and S_p50) alive.
+ */
+export function pickHardwareAcceleration(
+  supported: ReadonlyArray<{
+    accel: HardwareAcceleration;
+    supported: boolean;
+  }>
+): HardwareAcceleration {
+  const order: HardwareAcceleration[] = [
+    "prefer-hardware",
+    "prefer-software",
+    "no-preference",
+  ];
+  for (const accel of order) {
+    if (supported.find((s) => s.accel === accel)?.supported) return accel;
+  }
+  return "prefer-software";
+}
+
 export type WebCodecsStats = {
   mode: "webcodecs";
   presentFps: number;
@@ -127,6 +154,9 @@ export class WebCodecsCanvasView {
   private description: Uint8Array | null = null;
   private codec = "avc1.4D0028";
   private running = false;
+  /** Resolved once via isConfigSupported — prefer-hardware when the GPU path exists. */
+  private hwAccel: HardwareAcceleration | null = null;
+  private hwAccelProbe: Promise<HardwareAcceleration> | null = null;
 
   /** Newest decoded frame waiting for the compositor — older ones are closed. */
   private pending: VideoFrame | null = null;
@@ -210,6 +240,9 @@ export class WebCodecsCanvasView {
     this.lastPaintAt = 0;
     if (this.stallTimer !== null) window.clearInterval(this.stallTimer);
     this.stallTimer = window.setInterval(() => this.checkStall(), 500);
+    // Probe accel before the first IDR so configure is not deferred past the
+    // App's WebCodecs→RTP fallback timer (headless has no prefer-hardware).
+    void this.resolveHwAccel(1280, 720);
     clog("webcodecs canvas ready (latest-frame-wins)", {
       secureContext: window.isSecureContext,
       desynchronized:
@@ -255,6 +288,42 @@ export class WebCodecsCanvasView {
     this.decoder = null;
     this.createDecoder();
     this.requestKeyframe();
+  }
+
+  /** Probe once which acceleration mode this browser can actually configure. */
+  private resolveHwAccel(width: number, height: number): Promise<HardwareAcceleration> {
+    if (this.hwAccel) return Promise.resolve(this.hwAccel);
+    if (this.hwAccelProbe) return this.hwAccelProbe;
+    const codec = this.codec;
+    const description = this.description;
+    this.hwAccelProbe = (async () => {
+      const candidates: HardwareAcceleration[] = [
+        "prefer-hardware",
+        "prefer-software",
+        "no-preference",
+      ];
+      const results: { accel: HardwareAcceleration; supported: boolean }[] = [];
+      for (const accel of candidates) {
+        try {
+          const r = await VideoDecoder.isConfigSupported({
+            codec,
+            description: description ?? undefined,
+            codedWidth: width || undefined,
+            codedHeight: height || undefined,
+            optimizeForLatency: true,
+            hardwareAcceleration: accel,
+          });
+          results.push({ accel, supported: !!r.supported });
+        } catch {
+          results.push({ accel, supported: false });
+        }
+      }
+      const picked = pickHardwareAcceleration(results);
+      this.hwAccel = picked;
+      clog("VideoDecoder accel", { picked, results });
+      return picked;
+    })();
+    return this.hwAccelProbe;
   }
 
   /**
@@ -373,22 +442,38 @@ export class WebCodecsCanvasView {
           this.resetForKeyframe();
           return;
         }
-        dec.configure({
-          codec: this.codec,
-          description: this.description,
-          codedWidth: au.width || undefined,
-          codedHeight: au.height || undefined,
-          optimizeForLatency: true,
-          // Software decode caps paint fps on many laptops; Ricardo's GPU path
-          // is the bar — prefer hardware and stay decode-bound only on failure.
-          hardwareAcceleration: "prefer-hardware",
-        });
+        if (!this.hwAccel) {
+          // Probe async; skip this AU and ask for a fresh IDR once we know
+          // which acceleration mode this browser actually supports.
+          void this.resolveHwAccel(au.width, au.height).then(() => {
+            this.requestKeyframe();
+          });
+          return;
+        }
+        try {
+          dec.configure({
+            codec: this.codec,
+            description: this.description,
+            codedWidth: au.width || undefined,
+            codedHeight: au.height || undefined,
+            optimizeForLatency: true,
+            hardwareAcceleration: this.hwAccel,
+          });
+        } catch (e) {
+          // Last resort if the probe lied — force software and recreate.
+          cwarn("VideoDecoder configure failed; forcing prefer-software", e);
+          this.hwAccel = "prefer-software";
+          this.resetForKeyframe();
+          this.requestKeyframe();
+          return;
+        }
         this.configured = true;
         clog("VideoDecoder configured", {
           codec: this.codec,
           w: au.width,
           h: au.height,
           annexB: au.annexB.byteLength,
+          hardwareAcceleration: this.hwAccel,
         });
       }
 

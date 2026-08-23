@@ -151,6 +151,27 @@ export default function App() {
       surplusP50Ms: surplus ?? undefined,
     };
   }
+  /** Headless Ricardo scrape (`regression-latency-live.mjs`) reads this. */
+  useEffect(() => {
+    type RicardoHook = {
+      presentMode: string;
+      rttMs: number;
+      hostStats: typeof hostStats;
+      present: typeof present;
+      inputPhoton: ReturnType<typeof getInputPhotonSnapshot>;
+    };
+    const w = window as Window & { __couchlinkRicardo?: () => RicardoHook };
+    w.__couchlinkRicardo = () => ({
+      presentMode,
+      rttMs: rttRef.current,
+      hostStats,
+      present,
+      inputPhoton: getInputPhotonSnapshot(rttRef.current),
+    });
+    return () => {
+      delete w.__couchlinkRicardo;
+    };
+  }, [presentMode, hostStats, present]);
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
   const [keybindsOpen, setKeybindsOpen] = useState(false);
@@ -237,7 +258,7 @@ export default function App() {
         secure: window.isSecureContext,
       });
       setPresentStuck(reason);
-    }, 2500);
+    }, 6000);
   }
 
   function ensureWebCodecs(): boolean {

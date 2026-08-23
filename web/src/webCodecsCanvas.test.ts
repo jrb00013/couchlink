@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { webcodecsDiagnosis } from "./webCodecsCanvas";
+import {
+  pickHardwareAcceleration,
+  webcodecsDiagnosis,
+} from "./webCodecsCanvas";
 
 describe("webcodecsDiagnosis", () => {
   it("labels a fast, full-rate stream healthy", () => {
@@ -29,5 +32,27 @@ describe("webcodecsDiagnosis", () => {
     // network-loss guess just because frames were also dropped.
     const d = webcodecsDiagnosis(20, 15, 5);
     expect(d).toContain("decode-bound");
+  });
+});
+
+describe("pickHardwareAcceleration", () => {
+  it("prefers hardware when the GPU path is supported", () => {
+    expect(
+      pickHardwareAcceleration([
+        { accel: "prefer-hardware", supported: true },
+        { accel: "prefer-software", supported: true },
+        { accel: "no-preference", supported: true },
+      ])
+    ).toBe("prefer-hardware");
+  });
+
+  it("falls back to software when hardware is unsupported (headless/WSL)", () => {
+    expect(
+      pickHardwareAcceleration([
+        { accel: "prefer-hardware", supported: false },
+        { accel: "prefer-software", supported: true },
+        { accel: "no-preference", supported: true },
+      ])
+    ).toBe("prefer-software");
   });
 });

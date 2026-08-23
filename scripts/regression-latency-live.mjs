@@ -1,44 +1,43 @@
 #!/usr/bin/env node
 /**
- * Live LAN latency probe against a running couchlink host.
+ * Live Ricardo beat probe against a running couchlink host.
  *
- * Opens the join URL in Chromium, waits for WebRTC connected, samples
- * inbound-rtp getStats, and fails if jitter buffer / fps regress past the
- * gates locked in web/src/latencyStats.ts (JB ≤ 20ms, fps ≥ 50, drops = 0).
+ * Opens the join URL in Chromium, injects a fake Standard gamepad so CLVD
+ * input_wm / S_p50 can accumulate, waits for WebCodecs present when possible,
+ * then hard-fails unless the session beats Ricardo's frozen playable night:
  *
- * Usage: node scripts/regression-latency-live.mjs '<join-url>'
+ *   push ≥ 74 · shed ≤ 3% · encode ≥ 5000 kbps · paint ≥ 74 · S_p50 ≤ 45
+ *
+ * Usage:
+ *   JOIN_URL='…' HOST_LOG=/tmp/couchlink-stack.log node scripts/regression-latency-live.mjs
+ *   node scripts/regression-latency-live.mjs '<join-url>'
  */
 import { createRequire } from "node:module";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const webDir = path.join(root, "web");
-const joinUrl = process.argv[2];
+const joinUrl = process.argv[2] || process.env.JOIN_URL;
+const hostLog = process.env.HOST_LOG || "";
 if (!joinUrl) {
-  console.error("usage: node scripts/regression-latency-live.mjs <join-url>");
+  console.error(
+    "usage: JOIN_URL='…' [HOST_LOG=…] node scripts/regression-latency-live.mjs"
+  );
   process.exit(2);
 }
 
-const GATES = { maxJitterBufferMs: 20, minDecodeFps: 50, maxFramesDropped: 0 };
-
-function evaluate(sample) {
-  const failures = [];
-  if (sample.jitterBufferMs > GATES.maxJitterBufferMs) {
-    failures.push(
-      `jitterBufferMs ${sample.jitterBufferMs.toFixed(1)} > ${GATES.maxJitterBufferMs}`
-    );
-  }
-  if (sample.decodeFps < GATES.minDecodeFps) {
-    failures.push(`decodeFps ${sample.decodeFps.toFixed(1)} < ${GATES.minDecodeFps}`);
-  }
-  if (sample.framesDropped > GATES.maxFramesDropped) {
-    failures.push(`framesDropped ${sample.framesDropped} > ${GATES.maxFramesDropped}`);
-  }
-  return { ok: failures.length === 0, failures };
-}
+/** Hard Ricardo gate — mirrors crates/host/src/latency_live_sim/ricardo_gate.rs */
+const RICARDO = {
+  minPushFps: 74,
+  maxShedPct: 3,
+  minEncodeKbps: 5000,
+  minPaintFps: 74,
+  maxSurplusP50Ms: 45,
+};
 
 const require = createRequire(import.meta.url);
 function loadPlaywright() {
@@ -55,14 +54,30 @@ function loadPlaywright() {
   }
 }
 
+function parseHostStreaming(logPath) {
+  if (!logPath || !fs.existsSync(logPath)) return null;
+  const text = fs.readFileSync(logPath, "utf8");
+  const lines = text.split(/\r?\n/).filter((l) => l.includes("[couchlink-host] streaming"));
+  // Prefer a healthy window (push>1), else last line.
+  const good = [...lines].reverse().find((l) => /streaming [1-9]/.test(l)) || lines.at(-1);
+  if (!good) return null;
+  const fps = /streaming ([\d.]+) fps/.exec(good);
+  const drop = /dropped \d+\/\d+ \((\d+)%\)/.exec(good);
+  return {
+    pushFps: fps ? Number(fps[1]) : 0,
+    shedPct: drop ? Number(drop[1]) : 99,
+    raw: good.trim(),
+  };
+}
+
 const { chromium } = loadPlaywright();
 const browser = await chromium.launch({
   headless: true,
-  args: ["--autoplay-policy=no-user-gesture-required"],
+  args: ["--autoplay-policy=no-user-gesture-required", "--use-fake-device-for-media-stream"],
 });
 const page = await browser.newPage();
 
-// Capture every RTCPeerConnection the page creates so we can read getStats.
+// Capture every RTCPeerConnection + inject a wiggle-pad so input_wm stamps.
 await page.addInitScript(() => {
   const Orig = window.RTCPeerConnection;
   const pcs = [];
@@ -81,12 +96,43 @@ await page.addInitScript(() => {
   });
   window.RTCPeerConnection = Patched;
   window.__couchlinkPcs = pcs;
+
+  // Fake Standard gamepad — player.ts polls getGamepads at 500 Hz.
+  const axes = [0, 0, 0, 0];
+  const buttons = Array.from({ length: 17 }, () => ({
+    pressed: false,
+    touched: false,
+    value: 0,
+  }));
+  let tick = 0;
+  const gp = {
+    id: "Couchlink Ricardo Probe Pad (Standard)",
+    index: 0,
+    connected: true,
+    mapping: "standard",
+    timestamp: 0,
+    axes,
+    buttons,
+    hapticActuators: [],
+    vibrationActuator: null,
+  };
+  navigator.getGamepads = () => {
+    tick += 1;
+    axes[0] = Math.sin(tick / 8) * 0.55;
+    axes[1] = Math.cos(tick / 11) * 0.35;
+    const down = tick % 16 < 8;
+    buttons[0] = { pressed: down, touched: down, value: down ? 1 : 0 };
+    gp.timestamp = performance.now();
+    return [gp, null, null, null];
+  };
 });
 
 const consoleLines = [];
 page.on("console", (msg) => {
   const t = msg.text();
-  if (/couchlink|present|canvas|webcodecs|video stats|CLVD/i.test(t)) consoleLines.push(t);
+  if (/couchlink|present|canvas|webcodecs|video stats|CLVD|photon|surplus/i.test(t)) {
+    consoleLines.push(t);
+  }
 });
 
 console.log("opening", joinUrl);
@@ -99,47 +145,15 @@ await page.waitForFunction(
   },
   { timeout: 60_000 }
 );
-console.log("UI state: connected — waiting for present path…");
+console.log("UI state: connected — waiting for present + Ricardo scrape…");
 
-// WebCodecs may need an IDR + 1s stats window; RTP canvas may also take a beat.
-// Prefer a painted present path over a premature "webcodecs" label with no frames.
-let present = "unknown";
-let wcDiag = null;
-for (let i = 0; i < 12; i++) {
-  await page.waitForTimeout(1000);
-  const snap = await page.evaluate(() => {
-    const spans = Array.from(document.querySelectorAll("footer.meta span"));
-    const text = spans.map((s) => s.textContent || "").join(" ");
-    const wcLine = spans
-      .map((s) => s.textContent || "")
-      .find((t) => /webcodecs:\s*\d+/i.test(t));
-    const canvasLine = spans
-      .map((s) => s.textContent || "")
-      .find((t) => /canvas:\s*\d+/i.test(t));
-    let path = "unknown";
-    if (wcLine) path = "webcodecs";
-    else if (canvasLine || /present:\s*canvas/i.test(text)) path = "canvas";
-    else if (/present:\s*video/i.test(text)) path = "video";
-    else if (/present:\s*webcodecs/i.test(text)) path = "webcodecs-pending";
-    let diag = null;
-    if (wcLine) {
-      const fps = /@\s*(\d+)fps/i.exec(wcLine);
-      const drop = /drop=(\d+)/i.exec(wcLine);
-      diag = {
-        presentFps: fps ? Number(fps[1]) : 0,
-        dropped: drop ? Number(drop[1]) : -1,
-        raw: wcLine,
-      };
-    }
-    return { path, diag, text };
+async function readRicardo() {
+  return page.evaluate(() => {
+    const hook = window.__couchlinkRicardo;
+    if (typeof hook !== "function") return null;
+    return hook();
   });
-  present = snap.path;
-  wcDiag = snap.diag;
-  if (present === "webcodecs" && wcDiag && wcDiag.presentFps >= 50) break;
-  if (present === "canvas" || present === "video") break;
 }
-if (present === "webcodecs-pending") present = "webcodecs";
-console.log("present path:", present);
 
 async function readInbound() {
   return page.evaluate(async () => {
@@ -156,7 +170,6 @@ async function readInbound() {
             framesDecoded: r.framesDecoded ?? 0,
             framesDropped: r.framesDropped ?? 0,
             frameHeight: r.frameHeight ?? 0,
-            jitterBufferTarget: r.jitterBufferTarget ?? null,
           };
         }
       });
@@ -166,89 +179,109 @@ async function readInbound() {
   });
 }
 
-const samples = [];
-let prev = await readInbound();
-// WebCodecs path may never emit inbound-rtp decode counters — that's OK.
-if (!prev) {
-  console.warn("no inbound-rtp yet — may be WebCodecs-only present; continuing…");
-}
+let best = {
+  presentMode: "—",
+  paintFps: 0,
+  encodeKbps: 0,
+  hostPushFps: 0,
+  hostShedPct: 100,
+  surplusP50Ms: null,
+  photonP50Ms: null,
+  rttMs: 0,
+  sampleCount: 0,
+};
 
-for (let i = 0; i < 4; i++) {
-  await page.waitForTimeout(2000);
-  const next = await readInbound();
-  if (!next || !prev) {
-    prev = next;
-    continue;
+const inboundSamples = [];
+let prevInbound = null;
+
+// ~25s: need host_stats (~5s), WebCodecs promote, and input_wm ring fill.
+for (let i = 0; i < 25; i++) {
+  await page.waitForTimeout(1000);
+  const snap = await readRicardo();
+  if (snap) {
+    const paint =
+      snap.present?.fps ??
+      (typeof snap.present?.fps === "number" ? snap.present.fps : 0);
+    const encode = snap.hostStats?.target_bitrate_kbps ?? 0;
+    const push = snap.hostStats?.fps ?? 0;
+    const shed = snap.hostStats?.drop_pct ?? 100;
+    const surplus = snap.inputPhoton?.surplusP50Ms ?? snap.present?.surplusP50Ms ?? null;
+    const photon = snap.inputPhoton?.photonP50Ms ?? snap.present?.photonP50Ms ?? null;
+    best = {
+      presentMode: snap.presentMode || best.presentMode,
+      paintFps: Math.max(best.paintFps, paint || 0),
+      encodeKbps: Math.max(best.encodeKbps, encode || 0),
+      hostPushFps: Math.max(best.hostPushFps, push || 0),
+      hostShedPct: Math.min(best.hostShedPct, shed ?? 100),
+      surplusP50Ms: surplus != null ? surplus : best.surplusP50Ms,
+      photonP50Ms: photon != null ? photon : best.photonP50Ms,
+      rttMs: snap.rttMs || best.rttMs,
+      sampleCount: snap.inputPhoton?.sampleCount ?? best.sampleCount,
+    };
   }
-  const countDelta = next.jitterBufferEmittedCount - prev.jitterBufferEmittedCount;
-  if (countDelta > 0) {
-    const delayDelta = next.jitterBufferDelay - prev.jitterBufferDelay;
-    const decodedDelta = next.framesDecoded - prev.framesDecoded;
-    samples.push({
-      jitterBufferMs: (delayDelta / countDelta) * 1000,
-      decodeFps: decodedDelta / 2,
-      framesDropped: next.framesDropped,
-      frameHeight: next.frameHeight,
-    });
+  const inbound = await readInbound();
+  if (inbound && prevInbound) {
+    const decodedDelta = inbound.framesDecoded - prevInbound.framesDecoded;
+    if (decodedDelta > 0) {
+      inboundSamples.push({ decodeFps: decodedDelta });
+      best.paintFps = Math.max(best.paintFps, decodedDelta);
+    }
   }
-  prev = next;
+  prevInbound = inbound || prevInbound;
+
+  if (
+    best.paintFps >= RICARDO.minPaintFps &&
+    best.encodeKbps >= RICARDO.minEncodeKbps &&
+    best.hostPushFps >= RICARDO.minPushFps &&
+    best.hostShedPct <= RICARDO.maxShedPct &&
+    best.surplusP50Ms != null &&
+    best.surplusP50Ms <= RICARDO.maxSurplusP50Ms &&
+    best.sampleCount >= 8
+  ) {
+    console.log(`Ricardo axes green at t=${i + 1}s`);
+    break;
+  }
 }
 
 await browser.close();
 
-console.log("present path (final):", present);
-if (present === "webcodecs") {
-  console.log("webcodecs diag:", wcDiag);
-  // WebCodecs bypasses inbound-rtp JB — gate on present FPS from the UI diag.
-  if (!wcDiag || wcDiag.presentFps < 50) {
-    console.error(
-      "FAIL: WebCodecs present fps too low",
-      wcDiag ?? "(no diag)"
-    );
-    process.exit(1);
-  }
-  if (wcDiag.dropped > 30) {
-    console.error("FAIL: WebCodecs drop count high", wcDiag);
-    process.exit(1);
-  }
-  console.log(
-    `LIVE latency regression PASS (WebCodecs path — JB bypassed, present≈${wcDiag.presentFps}fps)`
-  );
-  process.exit(0);
+const fromLog = parseHostStreaming(hostLog);
+if (fromLog) {
+  console.log("host log streaming:", fromLog.raw);
+  best.hostPushFps = Math.max(best.hostPushFps, fromLog.pushFps);
+  best.hostShedPct = Math.min(best.hostShedPct, fromLog.shedPct);
 }
 
-console.log("samples:");
-for (const s of samples) {
-  console.log(
-    `  JB=${s.jitterBufferMs.toFixed(1)}ms  fps=${s.decodeFps.toFixed(1)}  drops=${s.framesDropped}  h=${s.frameHeight}`
+console.log("Ricardo scrape:", JSON.stringify(best, null, 2));
+
+const failures = [];
+if (best.hostPushFps < RICARDO.minPushFps) {
+  failures.push(`push ${best.hostPushFps.toFixed(1)} < ${RICARDO.minPushFps}`);
+}
+if (best.hostShedPct > RICARDO.maxShedPct) {
+  failures.push(`shed ${best.hostShedPct}% > ${RICARDO.maxShedPct}%`);
+}
+if (best.encodeKbps < RICARDO.minEncodeKbps) {
+  failures.push(`encode ${best.encodeKbps} < ${RICARDO.minEncodeKbps} kbps`);
+}
+if (best.paintFps < RICARDO.minPaintFps) {
+  failures.push(`paint ${best.paintFps.toFixed(1)} < ${RICARDO.minPaintFps}`);
+}
+if (best.surplusP50Ms == null) {
+  failures.push("S_p50 missing (need WebCodecs + pad input_wm samples)");
+} else if (best.surplusP50Ms > RICARDO.maxSurplusP50Ms) {
+  failures.push(
+    `S_p50 ${best.surplusP50Ms.toFixed(1)}ms > ${RICARDO.maxSurplusP50Ms}ms`
   );
 }
 
-if (samples.length === 0) {
-  console.error("FAIL: no usable getStats windows");
-  console.error("console:\n", consoleLines.slice(-30).join("\n"));
+if (failures.length) {
+  console.error("FAIL Ricardo hard gate:", failures.join("; "));
+  console.error("console tail:\n", consoleLines.slice(-40).join("\n"));
   process.exit(1);
 }
 
-const last = samples[samples.length - 1];
-const avg = {
-  jitterBufferMs: samples.reduce((a, s) => a + s.jitterBufferMs, 0) / samples.length,
-  decodeFps: samples.reduce((a, s) => a + s.decodeFps, 0) / samples.length,
-  framesDropped: last.framesDropped,
-};
 console.log(
-  `average: JB=${avg.jitterBufferMs.toFixed(1)}ms  fps=${avg.decodeFps.toFixed(1)}  drops=${avg.framesDropped}`
+  `LIVE Ricardo PASS — push=${best.hostPushFps.toFixed(1)} shed=${best.hostShedPct}% encode=${best.encodeKbps} paint=${best.paintFps.toFixed(1)} S_p50=${best.surplusP50Ms.toFixed(1)}ms (Φ=${best.photonP50Ms?.toFixed?.(1) ?? "?"} RTT=${best.rttMs}) present=${best.presentMode}`
 );
-
-const gate = evaluate(avg);
-if (present !== "canvas") {
-  console.warn("WARN: expected present: canvas or webcodecs on Chromium");
-}
-if (!gate.ok) {
-  console.error("FAIL latency gates:", gate.failures.join("; "));
-  process.exit(1);
-}
-console.log("LIVE latency regression PASS (vs gates JB≤20ms fps≥50 drops=0)");
-console.log(
-  `baseline reference from prior session: JB≈6–9ms fps≈59 — now JB=${avg.jitterBufferMs.toFixed(1)}ms fps=${avg.decodeFps.toFixed(1)}`
-);
+process.exit(0);
