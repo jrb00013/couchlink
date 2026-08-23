@@ -1,6 +1,7 @@
 # Design: Amazing interactive latency (post-playable)
 
-**Status:** draft for approval → then implement via companion plan  
+**Status:** design locked → implement via companion plan  
+
 **Date:** 2026-08-23  
 **Context:** Ricardo’s session is already *playable* (push ~0.1ms, ~78fps, 5Mbps@60, 0% shed). Incremental fps/push tuning feels “barely.” Friends need a **felt** step-change.
 
