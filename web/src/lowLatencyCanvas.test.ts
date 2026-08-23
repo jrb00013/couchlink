@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ageBand, decodeBacklogPolicy, shouldReplacePending, shouldSkipDecode } from "./presentAge";
+import { ageBand, decodeBacklogPolicy, shouldReplacePending } from "./presentAge";
 
 /** Canvas present-path age uses the same bands as WebCodecs. */
 describe("canvas present age bands (B-R)", () => {
