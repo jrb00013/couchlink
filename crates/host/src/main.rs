@@ -1,4 +1,5 @@
 mod age;
+mod amazing_latency_math;
 mod capture;
 mod config;
 mod emulator_pad;

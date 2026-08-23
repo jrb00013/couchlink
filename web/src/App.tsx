@@ -9,6 +9,7 @@ import {
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
 import { inputFreshnessMs } from "./inputPhoton";
+import { classifyPresentStuck } from "./presentPromote";
 import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
 import type { ControllerKind } from "./controllerKind";
 import { seatForRemoteSlot } from "./seat";
@@ -150,6 +151,10 @@ export default function App() {
   const viewRef = useRef<LowLatencyCanvasView | null>(null);
   const wcRef = useRef<WebCodecsCanvasView | null>(null);
   const webcodecsActiveRef = useRef(false);
+  /** Saw at least one CLVD access unit this session (for stuck taxonomy). */
+  const sawAuRef = useRef(false);
+  /** WebCodecs stalled this session (warmup rescue); cleared on promote. */
+  const stalledRef = useRef(false);
   /** WebCodecs has painted and owns the visible canvas (RTP no longer on screen). */
   const promotedRef = useRef(false);
   const rtpFallbackTimer = useRef<number | null>(null);
@@ -193,8 +198,16 @@ export default function App() {
       wcCanvasRef.current?.classList.add("is-hidden");
       canvasRef.current?.classList.remove("is-hidden");
       setVideoDiag("webcodecs: no frames yet — RTP safety net (warmup)");
-      clog("webcodecs not promoted yet", {
-        reason: "fallback_timer_2.5s_no_paint",
+      const reason = classifyPresentStuck({
+        preferLegacy: preferLegacyVideo(),
+        hasDecoder: typeof VideoDecoder === "function",
+        sawAu: sawAuRef.current,
+        painted: !!wcRef.current?.hasPainted(),
+        stalled: stalledRef.current,
+        fallbackFired: true,
+      });
+      clog("present stuck", {
+        reason,
         hasDecoder: typeof VideoDecoder === "function",
         secure: window.isSecureContext,
       });
@@ -240,6 +253,7 @@ export default function App() {
       });
       wcRef.current.setStallHandler(() => {
         promotedRef.current = false;
+        stalledRef.current = true;
         playerRef.current?.resumeWarmup();
         // Keep WebCodecs running — re-promote on next paint via first-paint /
         // stats path. Stopping here used to leave friends stuck on canvas.
@@ -247,7 +261,19 @@ export default function App() {
         canvasRef.current?.classList.remove("is-hidden");
         videoRef.current?.classList.remove("is-hidden");
         setVideoDiag("webcodecs stalled — showing live RTP (decoder kept warm)");
-        clog("webcodecs stall → warmup; decoder still running for re-promote");
+        const reason = classifyPresentStuck({
+          preferLegacy: preferLegacyVideo(),
+          hasDecoder: typeof VideoDecoder === "function",
+          sawAu: sawAuRef.current,
+          painted: false,
+          stalled: true,
+          fallbackFired: false,
+        });
+        clog("present stuck", {
+          reason,
+          hasDecoder: typeof VideoDecoder === "function",
+          secure: window.isSecureContext,
+        });
       });
     }
     // Don't tear down a live decoder on every callback.
@@ -262,6 +288,7 @@ export default function App() {
   function promoteWebcodecsPresent() {
     if (promotedRef.current) return;
     promotedRef.current = true;
+    stalledRef.current = false;
     clearRtpFallbackTimer();
     // Do not stop the RTP renderer or null the <video> — a lost CLVD
     // IDR used to freeze the last picture because nothing else was live.
@@ -440,6 +467,8 @@ export default function App() {
         wcRef.current?.stop();
         webcodecsActiveRef.current = false;
         promotedRef.current = false;
+        sawAuRef.current = false;
+        stalledRef.current = false;
         setPresent(null);
       }
     },
@@ -457,6 +486,7 @@ export default function App() {
       setCtxHint(secureContextHint());
     },
     onVideoAccessUnit: (au, recvMs) => {
+      sawAuRef.current = true;
       if (!webcodecsActiveRef.current) {
         if (!ensureWebCodecs()) return;
       }
