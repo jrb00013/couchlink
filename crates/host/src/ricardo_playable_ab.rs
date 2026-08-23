@@ -106,8 +106,21 @@ mod tests {
     fn b_trickle_isolates_slow_peer_without_killing_healthy() {
         assert!(should_enter_trickle(8));
         assert!(!should_enter_trickle(7));
-        assert!(should_exit_trickle(8));
-        assert!(!should_exit_trickle(7));
+        assert!(should_exit_trickle(4));
+        assert!(!should_exit_trickle(3));
+    }
+
+    #[test]
+    fn b_live_sim_target_beats_ricardo_on_all_axes() {
+        use crate::latency_live_sim::{beats_ricardo, SessionMetrics};
+        let m = SessionMetrics {
+            push_fps: 72.0,
+            shed_pct: 2,
+            encoder_kbps: A::ENCODER_KBPS,
+            paint_fps: 74.0,
+            input_s_p50_ms: 35.0,
+        };
+        assert!(beats_ricardo(m));
     }
 
     #[test]
