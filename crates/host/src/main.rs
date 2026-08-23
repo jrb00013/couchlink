@@ -60,28 +60,22 @@ const KEYFRAME_PUSH_BUDGET: Duration = Duration::from_millis(120);
 /// Guarding the individual awaits is whack-a-mole — the invariant is that
 /// nothing here may block indefinitely, so the budget is enforced at the edge
 /// and covers any await added inside later.
-/// `Ok(true)` means the frame was dropped (budget timeout, or shed by SCTP
-/// congestion in `push_h264`), not sent.
 ///
-/// The caller must not count a dropped frame as delivered — this used to
-/// return `Ok(())` on both a real send and a timeout indistinguishably, so
-/// the periodic fps/stage diagnostics silently over-counted during exactly
-/// the congestion they exist to reveal. The same blind spot also shed
-/// congestion-stalled frames as "sent", so the link governor never stepped
-/// the encoder down on a saturated path.
+/// Returns the per-peer [`webrtc_peer::PushFate`]. Budget timeout counts as
+/// a real congestion shed (governor-visible).
 async fn push_bounded(
     host: &webrtc_peer::WebRtcHost,
     nal: Vec<u8>,
     dur: Duration,
     keyframe: bool,
-) -> Result<bool> {
+) -> Result<webrtc_peer::PushFate> {
     match tokio::time::timeout(
         if keyframe { KEYFRAME_PUSH_BUDGET } else { PUSH_BUDGET },
         host.push_h264(nal, dur, keyframe),
     )
     .await
     {
-        Ok(Ok(shed)) => Ok(shed),
+        Ok(Ok(fate)) => Ok(fate),
         Ok(Err(e)) => Err(e),
         Err(_) => {
             // Never request another IDR from a failed IDR push — that was the
@@ -93,7 +87,7 @@ async fn push_bounded(
             } else {
                 warn!("frame push exceeded budget — dropped (no IDR storm)");
             }
-            Ok(true)
+            Ok(webrtc_peer::PushFate::Shed)
         }
     }
 }
@@ -222,10 +216,9 @@ fn spawn_pad_feedback(
 /// Sequential awaits would be wrong: `push_bounded`'s own budget is up to 50ms
 /// per peer (1s for keyframes), and the cadence tick can be as tight as 2ms on
 /// the pre-encoded path — sequential awaits would stall the whole
-/// capture loop. Returns `(received_by_any, dropped_total)`: the caller counts
-/// a produced frame once (when at least one viewer took it) and feeds the link
-/// governor the *sum* of every slot's sheds — one shared governor commands the
-/// one shared encoder knob, so N per-slot governors would fight over it.
+/// capture loop. Returns `(received_by_any, congestion_sheds)`: intentional
+/// trickle skips are *not* sheds — counting them pinned drop% at ~50% with two
+/// peers and floored the shared encoder while a healthy peer was fine.
 async fn push_to_all(
     slots: &Arc<Mutex<HashMap<u8, PlayerConn>>>,
     nal: Vec<u8>,
@@ -240,16 +233,14 @@ async fn push_to_all(
         push_bounded(&conn.host, nal.clone(), dur, keyframe)
     }))
     .await;
-    let mut any = false;
-    let mut dropped = 0u64;
+    let mut fates = Vec::with_capacity(results.len());
     for r in results {
         match r {
-            Ok(true) => dropped += 1,
-            Ok(false) => any = true,
+            Ok(fate) => fates.push(fate),
             Err(e) => warn!("push h264 (fan-out): {e}"),
         }
     }
-    (any, dropped)
+    webrtc_peer::governor_shed_counts(&fates)
 }
 
 /// Drain a rejoin burst from the inbound queue. One reload (or a double-tab /
@@ -834,42 +825,26 @@ async fn main() -> Result<()> {
                                 conn.host.set_video_size(w, h);
                             }
                         }
-                        // Relay every encoded frame that has arrived, not one per
-                        // tick. The encoder's cadence is set on the Windows side; a
-                        // backlog here would be shown late, and H.264 frames cannot
-                        // be skipped to catch up without corrupting the decoder.
-                        let mut queue = vec![(nal, keyframe)];
-                        while let Some(capture::Captured::H264 { nal, keyframe }) =
-                            capturer.capture()?
-                        {
-                            queue.push((nal, keyframe));
-                            if queue.len() >= 8 {
-                                break;
-                            }
-                        }
-                        // Spread the real elapsed time across the burst. Timing each
-                        // frame from the previous *push* would report ~1ms for every
-                        // frame after the first, so RTP media time would advance far
-                        // slower than the wall clock and the receiver would grow its
-                        // buffer to cover the drift — delay that accumulates.
+                        // One AU per cadence tick — H.264 stays in encode order on
+                        // the wire. Bursting every drained frame stacked host age
+                        // (~58ms p50 live) while the browser is latest-frame-wins;
+                        // the extra P-frames did not improve paint, only SCTP depth.
                         let burst_gap = last_push
                             .elapsed()
                             .clamp(Duration::from_millis(1), Duration::from_millis(500));
-                        let per_frame = burst_gap / queue.len().max(1) as u32;
                         last_push = std::time::Instant::now();
-                        for (nal, keyframe) in queue {
-                            if keyframe {
-                                last_idr = std::time::Instant::now();
-                            }
-                            let t_push = std::time::Instant::now();
-                            let (any, dropped) =
-                                push_to_all(&slots, nal, per_frame, keyframe).await;
-                            dropped_frames += dropped;
-                            if any {
-                                frames_out += 1;
-                                stage_capture += ms_capture;
-                                stage_push += t_push.elapsed();
-                                if rate_window.elapsed() >= Duration::from_secs(5) {
+                        if keyframe {
+                            last_idr = std::time::Instant::now();
+                        }
+                        let t_push = std::time::Instant::now();
+                        let (any, dropped) =
+                            push_to_all(&slots, nal, burst_gap, keyframe).await;
+                        dropped_frames += dropped;
+                        if any {
+                            frames_out += 1;
+                            stage_capture += ms_capture;
+                            stage_push += t_push.elapsed();
+                            if rate_window.elapsed() >= Duration::from_secs(5) {
                                     let window_frames = frames_out - rate_mark;
                                     let fps =
                                         window_frames as f64 / rate_window.elapsed().as_secs_f64();
@@ -948,7 +923,6 @@ async fn main() -> Result<()> {
                                     stage_encode = Duration::ZERO;
                                     stage_push = Duration::ZERO;
                                 }
-                            }
                         }
                         // Keyframe control lives on the Windows side here, so ask for
                         // one rather than pretending we own the GOP.

@@ -15,7 +15,6 @@ import {
 } from "./h264Avc";
 import {
   ageBand,
-  AGE_DROP_MS,
   shouldReplacePending,
   shouldSkipDecode,
   type AgeBand,
@@ -70,6 +69,8 @@ export type WebCodecsStats = {
   /** Receive → present age of the last painted frame (ms). */
   ageMs: number;
   ageBand: AgeBand;
+  /** Present-path triage string from webcodecsDiagnosis. */
+  diagnosis?: string;
 };
 
 /** Fired when a frame is actually painted — for host age_echo. */
@@ -119,6 +120,8 @@ export class WebCodecsCanvasView {
   private lastPli = 0;
   private lastPaintAt = 0;
   private stallTimer: number | null = null;
+  /** Min ms between paints — ~120Hz cap; immediate paint beats rAF for Ricardo-class fps. */
+  private static readonly MIN_PAINT_MS = 1000 / 120;
   /** After a first paint, this many ms without another means the GOP is dead. */
   private static readonly STALL_MS = 1500;
   private description: Uint8Array | null = null;
@@ -256,7 +259,8 @@ export class WebCodecsCanvasView {
 
   /**
    * Park the newest decoded frame; close any older pending frame.
-   * Presentation happens on rAF — never drain a queue of old pictures.
+   * Paint immediately when budget allows (Ricardo canvas path) — rAF alone
+   * capped Joel at ~31fps while host pushed ~92fps.
    */
   private parkDecoded(frame: VideoFrame) {
     const ts = frame.timestamp;
@@ -276,15 +280,28 @@ export class WebCodecsCanvasView {
 
     if (this.pending) {
       this.pending.close();
-      this.dropped += 1;
+      // LFW supersede — not a loss; don't inflate the dropped counter.
     }
     this.pending = frame;
     this.pendingMeta = meta;
     this.pendingTs = ts;
-    this.schedulePresent();
+    this.schedulePresent(true);
   }
 
-  private schedulePresent() {
+  /** Present pending frame — immediate when allowed, else coalesce on rAF. */
+  private schedulePresent(preferImmediate = false) {
+    const now = performance.now();
+    if (
+      preferImmediate &&
+      now - this.lastPaintAt >= WebCodecsCanvasView.MIN_PAINT_MS
+    ) {
+      if (this.raf) {
+        cancelAnimationFrame(this.raf);
+        this.raf = 0;
+      }
+      this.presentLatest();
+      return;
+    }
     if (this.raf) return;
     this.raf = requestAnimationFrame(() => {
       this.raf = 0;
@@ -373,21 +390,7 @@ export class WebCodecsCanvasView {
       }
 
       if (shouldSkipDecode(dec.decodeQueueSize, keyframe)) {
-        // Decoder is backed up locally (slow paint/GPU, not a network issue).
-        // Drop the frame to let it catch up, but do NOT set waitingKeyframe —
-        // the decoder is still configured and the last keyframe is still valid.
-        this.dropped += 1;
-        return;
-      }
-
-      // If we already hold a pending frame older than the drop budget, prefer
-      // not to enqueue more deltas until the presenter drains.
-      if (
-        this.pending &&
-        this.pendingMeta &&
-        !keyframe &&
-        performance.now() - this.pendingMeta.recvMs > AGE_DROP_MS
-      ) {
+        // Decoder is backed up locally — drop delta to catch up.
         this.dropped += 1;
         return;
       }

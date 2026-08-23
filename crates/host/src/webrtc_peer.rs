@@ -500,8 +500,9 @@ impl WebRtcHost {
 
     /// Sustained sheds before this peer skips non-keyframes (slow-peer isolation).
     const TRICKLE_ENTER_SHEDS: u32 = 8;
-    /// Clean deliveries while trickling before full rate resumes.
-    const TRICKLE_EXIT_OKS: u32 = 30;
+    /// Clean *keyframe* deliveries while trickling before full rate resumes.
+    /// Deltas are skipped on purpose and must not reset this streak (see PushFate).
+    const TRICKLE_EXIT_OKS: u32 = 8;
 
     fn note_shed(&self) {
         self.ok_streak.store(0, Ordering::Relaxed);
@@ -605,16 +606,14 @@ impl WebRtcHost {
 
     /// Push one H.264 frame to the viewer(s).
     ///
-    /// Returns `Ok(true)` when the frame was deliberately shed because the
-    /// video DataChannel is congested — it was *not* delivered on the active
-    /// path, so the caller must count it as dropped, not sent. `Ok(false)`
-    /// means at least the path the viewer paints from actually carried it.
+    /// See [`PushFate`]: congestion sheds feed the link governor; intentional
+    /// trickle skips must not (N=2 + one slow peer used to pin drop% at ~50%).
     pub async fn push_h264(
         &self,
         annex_b: Vec<u8>,
         duration: Duration,
         keyframe: bool,
-    ) -> Result<bool> {
+    ) -> Result<PushFate> {
         use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
         use rtp::extension::HeaderExtension;
 
@@ -622,11 +621,11 @@ impl WebRtcHost {
         let (send_rtp, send_dc) = path_flags(path);
         let mut delivered = false;
 
-        // Slow-peer isolation: after sustained sheds, skip deltas so this peer
-        // cannot pin join_all wall-clock for healthy friends (max-peer wait).
+        // Slow-peer isolation: skip deltas so this peer cannot pin join_all for
+        // healthy friends. Do NOT note_shed — that reset ok_streak and made
+        // trickle a permanent trap (exit needed 30 clean oks that never came).
         if !keyframe && self.trickle.load(Ordering::Relaxed) {
-            self.note_shed();
-            return Ok(true);
+            return Ok(PushFate::TrickleSkip);
         }
 
         // RTP first when sent at all. It is the only path every browser can
@@ -710,11 +709,32 @@ impl WebRtcHost {
         }
         if delivered {
             self.note_delivered();
+            Ok(PushFate::Delivered)
         } else {
             self.note_shed();
+            Ok(PushFate::Shed)
         }
-        Ok(!delivered)
     }
+}
+
+/// Per-peer outcome of one frame push — the state variable the governor needs.
+///
+/// Hand-worked (N=2 peers, one trickling, one healthy), every cadence tick:
+/// - Old: trickle returned "shed" → dropped+=1, any=true → drop% → 50% forever
+/// - Then link governor floored bitrate; push_fps collapsed to IDR rate (~0.8)
+/// - New: TrickleSkip is invisible to the governor; only real Shed counts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushFate {
+    Delivered,
+    Shed,
+    TrickleSkip,
+}
+
+/// Aggregate fan-out fates into (any_delivered, congestion_sheds).
+pub fn governor_shed_counts(fates: &[PushFate]) -> (bool, u64) {
+    let any = fates.iter().any(|f| *f == PushFate::Delivered);
+    let shed = fates.iter().filter(|f| **f == PushFate::Shed).count() as u64;
+    (any, shed)
 }
 
 async fn setup_video_channel(dc: Arc<RTCDataChannel>, keyframe_wanted: Arc<AtomicBool>) {
@@ -917,8 +937,22 @@ mod controller_host_tests {
         assert!(!should_enter_trickle(0));
         assert!(!should_enter_trickle(7));
         assert!(should_enter_trickle(8));
-        assert!(!should_exit_trickle(29));
-        assert!(should_exit_trickle(30));
+        assert!(!should_exit_trickle(7));
+        assert!(should_exit_trickle(8));
+    }
+
+    #[test]
+    fn two_peer_one_trickle_does_not_report_fifty_pct_to_governor() {
+        // The death-spiral arithmetic: healthy Delivered + slow TrickleSkip
+        // must yield shed=0. Counting TrickleSkip as Shed pinned drop% at 50.
+        let (any, shed) =
+            governor_shed_counts(&[PushFate::Delivered, PushFate::TrickleSkip]);
+        assert!(any);
+        assert_eq!(shed, 0);
+        let (any2, shed2) =
+            governor_shed_counts(&[PushFate::Shed, PushFate::TrickleSkip]);
+        assert!(!any2);
+        assert_eq!(shed2, 1);
     }
 
     #[test]
@@ -1000,5 +1034,5 @@ pub fn should_enter_trickle(shed_streak: u32) -> bool {
 }
 
 pub fn should_exit_trickle(ok_streak: u32) -> bool {
-    ok_streak >= 30
+    ok_streak >= 8
 }

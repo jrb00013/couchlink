@@ -38,7 +38,7 @@ describe("shouldSkipDecode", () => {
 
   it("skips deltas when the decoder queue is backed up", () => {
     expect(shouldSkipDecode(0, false)).toBe(false);
-    expect(shouldSkipDecode(1, false)).toBe(false);
-    expect(shouldSkipDecode(2, false)).toBe(true);
+    expect(shouldSkipDecode(3, false)).toBe(false);
+    expect(shouldSkipDecode(4, false)).toBe(true);
   });
 });

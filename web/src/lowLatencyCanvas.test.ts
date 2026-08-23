@@ -16,7 +16,7 @@ describe("sacred latest-frame-wins (S6)", () => {
   });
 
   it("skips deltas when decode queue backs up", () => {
-    expect(shouldSkipDecode(2, false)).toBe(true);
-    expect(shouldSkipDecode(2, true)).toBe(false);
+    expect(shouldSkipDecode(4, false)).toBe(true);
+    expect(shouldSkipDecode(4, true)).toBe(false);
   });
 });

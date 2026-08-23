@@ -106,7 +106,8 @@ mod tests {
     fn b_trickle_isolates_slow_peer_without_killing_healthy() {
         assert!(should_enter_trickle(8));
         assert!(!should_enter_trickle(7));
-        assert!(should_exit_trickle(30));
+        assert!(should_exit_trickle(8));
+        assert!(!should_exit_trickle(7));
     }
 
     #[test]

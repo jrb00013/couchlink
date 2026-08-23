@@ -126,7 +126,8 @@ const MEDIA_RECOVER_DELAY_MS = 12_000;
 /** Shorter delay when the peer was never healthy (first-connect failure). */
 const MEDIA_RECOVER_DELAY_COLD_MS = 5_000;
 /** 250Hz — matches the native client and keeps sampling off the display clock. */
-const PAD_POLL_MS = 4;
+/** 500Hz pad poll — halves input quantisation vs 250Hz (Ricardo native path). */
+const PAD_POLL_MS = 2;
 
 function preferLegacyRtp(): boolean {
   if (typeof location === "undefined") return false;

@@ -35,11 +35,14 @@ export function shouldReplacePending(
 /**
  * Decode-queue policy: if the decoder is already backed up, skip this AU
  * (except keyframes, which re-anchor the GOP).
+ *
+ * Default queue 3 — at ~90fps host push a depth of 2 is normal while one
+ * frame decodes; maxQueue=1 was starving paint toward ~30fps (Joel live).
  */
 export function shouldSkipDecode(
   decodeQueueSize: number,
   keyframe: boolean,
-  maxQueue = 1
+  maxQueue = 3
 ): boolean {
   if (keyframe) return false;
   return decodeQueueSize > maxQueue;
