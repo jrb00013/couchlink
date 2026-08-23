@@ -7,6 +7,7 @@ mod emulator_pad;
 mod encode;
 mod invite;
 mod latency;
+mod latency_live_sim;
 mod link_gov;
 mod motion;
 mod ricardo_playable_ab;
