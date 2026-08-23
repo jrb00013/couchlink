@@ -48,13 +48,19 @@ export function shouldSkipDecode(
   return decodeQueueSize > maxQueue;
 }
 
-/** When decode backlog forces a delta drop, request IDR (H.264 LFW recovery). */
+/** When decode backlog forces a delta drop, skip without IDR by default.
+ *
+ * Requesting an IDR on CPU backlog reintroduces the skip→IDR→bigger-frame→
+ * more-skip death spiral. Only ask for IDR when the frame is already late
+ * (`ageBand` drop/emergency) — that is network/staleness, not local queue.
+ */
 export function decodeBacklogPolicy(
   decodeQueueSize: number,
-  keyframe: boolean
-): "decode" | "skip-request-idr" {
-  if (shouldSkipDecode(decodeQueueSize, keyframe)) {
-    return keyframe ? "decode" : "skip-request-idr";
-  }
-  return "decode";
+  keyframe: boolean,
+  age: AgeBand = "ok"
+): "decode" | "skip" | "skip-request-idr" {
+  if (!shouldSkipDecode(decodeQueueSize, keyframe)) return "decode";
+  if (keyframe) return "decode";
+  if (age === "drop" || age === "emergency") return "skip-request-idr";
+  return "skip";
 }

@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
- * Live Ricardo beat probe against a running couchlink host.
+ * Live Ricardo + self-beat probe against a running couchlink host.
  *
  * Opens the join URL in Chromium, injects a fake Standard gamepad so CLVD
  * input_wm / S_p50 can accumulate, waits for WebCodecs present when possible,
- * then hard-fails unless the session beats Ricardo's frozen playable night:
+ * then hard-fails unless the session beats:
  *
- *   push ≥ 74 · shed ≤ 3% · encode ≥ 5000 kbps · paint ≥ 74 · S_p50 ≤ 45
+ *   Ricardo floor:  push ≥ 74 · shed ≤ 3% · encode ≥ 5000 · paint ≥ 74 · S_p50 ≤ 45
+ *   Self-beat bars: push ≥ 90 · shed ≤ 1% · encode ≥ 5000 · paint ≥ 100 · S_p50 ≤ 5
+ *     (frozen self baseline was ~74.8 / 84 / 7.4 — beat-self is a clear margin)
  *
  * Usage:
  *   JOIN_URL='…' HOST_LOG=/tmp/couchlink-stack.log node scripts/regression-latency-live.mjs
- *   node scripts/regression-latency-live.mjs '<join-url>'
+ *   BEAT_SELF=0 …  # Ricardo floor only
  */
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -38,6 +40,19 @@ const RICARDO = {
   minPaintFps: 74,
   maxSurplusP50Ms: 45,
 };
+
+/** Beat-self bars — clear margin over frozen self baseline (74.8/84/7.4). */
+const SELF = {
+  minPushFps: 90,
+  maxShedPct: 1,
+  minEncodeKbps: 5000,
+  minPaintFps: 100,
+  maxSurplusP50Ms: 5,
+};
+
+const beatSelf =
+  process.env.BEAT_SELF !== "0" && process.env.BEAT_SELF !== "false";
+const GATE = beatSelf ? SELF : RICARDO;
 
 const require = createRequire(import.meta.url);
 function loadPlaywright() {
@@ -276,10 +291,10 @@ for (let i = 0; i < 50; i++) {
   const hostSteady = hostWindows.filter((w) => w.pushFps >= 60);
   const clientGreen =
     best.presentMode === "webcodecs" &&
-    best.paintFps >= RICARDO.minPaintFps &&
-    best.encodeKbps >= RICARDO.minEncodeKbps &&
+    best.paintFps >= GATE.minPaintFps &&
+    best.encodeKbps >= GATE.minEncodeKbps &&
     best.surplusP50Ms != null &&
-    best.surplusP50Ms <= RICARDO.maxSurplusP50Ms &&
+    best.surplusP50Ms <= GATE.maxSurplusP50Ms &&
     best.sampleCount >= 16 &&
     best.watermarkActive;
   // Stay connected until we have post-marker host windows — streaming lines
@@ -316,17 +331,17 @@ if (hostLog && !scoreWindows.length) {
 if (best.presentMode !== "webcodecs") {
   failures.push(`presentMode=${best.presentMode} (need webcodecs for honest S_p50)`);
 }
-if (best.hostPushFps < RICARDO.minPushFps) {
-  failures.push(`push ${best.hostPushFps.toFixed(1)} < ${RICARDO.minPushFps}`);
+if (best.hostPushFps < GATE.minPushFps) {
+  failures.push(`push ${best.hostPushFps.toFixed(1)} < ${GATE.minPushFps}`);
 }
-if (best.hostShedPct > RICARDO.maxShedPct) {
-  failures.push(`shed ${best.hostShedPct}% > ${RICARDO.maxShedPct}%`);
+if (best.hostShedPct > GATE.maxShedPct) {
+  failures.push(`shed ${best.hostShedPct}% > ${GATE.maxShedPct}%`);
 }
-if (best.encodeKbps < RICARDO.minEncodeKbps) {
-  failures.push(`encode ${best.encodeKbps} < ${RICARDO.minEncodeKbps} kbps`);
+if (best.encodeKbps < GATE.minEncodeKbps) {
+  failures.push(`encode ${best.encodeKbps} < ${GATE.minEncodeKbps} kbps`);
 }
-if (best.paintFps < RICARDO.minPaintFps) {
-  failures.push(`paint ${best.paintFps.toFixed(1)} < ${RICARDO.minPaintFps}`);
+if (best.paintFps < GATE.minPaintFps) {
+  failures.push(`paint ${best.paintFps.toFixed(1)} < ${GATE.minPaintFps}`);
 }
 if (!best.watermarkActive || best.sampleCount < 16) {
   failures.push(
@@ -335,19 +350,22 @@ if (!best.watermarkActive || best.sampleCount < 16) {
 }
 if (best.surplusP50Ms == null) {
   failures.push("S_p50 missing (need WebCodecs + pad input_wm samples)");
-} else if (best.surplusP50Ms > RICARDO.maxSurplusP50Ms) {
+} else if (best.surplusP50Ms > GATE.maxSurplusP50Ms) {
   failures.push(
-    `S_p50 ${best.surplusP50Ms.toFixed(1)}ms > ${RICARDO.maxSurplusP50Ms}ms`
+    `S_p50 ${best.surplusP50Ms.toFixed(1)}ms > ${GATE.maxSurplusP50Ms}ms`
   );
 }
 
 if (failures.length) {
-  console.error("FAIL Ricardo hard gate:", failures.join("; "));
+  console.error(
+    `FAIL ${beatSelf ? "beat-self" : "Ricardo"} hard gate:`,
+    failures.join("; ")
+  );
   console.error("console tail:\n", consoleLines.slice(-50).join("\n"));
   process.exit(1);
 }
 
 console.log(
-  `LIVE Ricardo PASS — push≥${best.hostPushFps.toFixed(1)} shed≤${best.hostShedPct}% encode=${best.encodeKbps} paint=${best.paintFps.toFixed(1)} S_p50=${best.surplusP50Ms.toFixed(1)}ms (Φ=${best.photonP50Ms?.toFixed?.(1) ?? "?"} RTT=${best.rttMs}) present=${best.presentMode} samples=${best.sampleCount}`
+  `LIVE ${beatSelf ? "SELF" : "Ricardo"} PASS — push≥${best.hostPushFps.toFixed(1)} shed≤${best.hostShedPct}% encode=${best.encodeKbps} paint=${best.paintFps.toFixed(1)} S_p50=${best.surplusP50Ms.toFixed(1)}ms (Φ=${best.photonP50Ms?.toFixed?.(1) ?? "?"} RTT=${best.rttMs}) present=${best.presentMode} samples=${best.sampleCount}`
 );
 process.exit(0);

@@ -482,9 +482,18 @@ export class WebCodecsCanvasView {
         });
       }
 
-      if (decodeBacklogPolicy(dec.decodeQueueSize, keyframe) === "skip-request-idr") {
+      const backlog = decodeBacklogPolicy(
+        dec.decodeQueueSize,
+        keyframe,
+        this.lastAgeBand
+      );
+      if (backlog === "skip-request-idr") {
         this.dropped += 1;
         this.requestKeyframe();
+        return;
+      }
+      if (backlog === "skip") {
+        this.dropped += 1;
         return;
       }
 

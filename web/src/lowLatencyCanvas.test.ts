@@ -16,7 +16,8 @@ describe("sacred latest-frame-wins (S6)", () => {
   });
 
   it("decode backlog on delta requests IDR recovery", () => {
-    expect(decodeBacklogPolicy(4, false)).toBe("skip-request-idr");
+    expect(decodeBacklogPolicy(4, false)).toBe("skip");
+    expect(decodeBacklogPolicy(4, false, "drop")).toBe("skip-request-idr");
     expect(decodeBacklogPolicy(2, false)).toBe("decode");
   });
 });

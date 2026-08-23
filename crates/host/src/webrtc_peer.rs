@@ -138,6 +138,10 @@ pub struct WebRtcHost {
     player_slot: Arc<AtomicU8>,
     /// Set when a viewer reports it cannot decode and needs a fresh keyframe.
     keyframe_wanted: Arc<AtomicBool>,
+    /// Per-peer coalesce clock for keyframe requests (ms since unix epoch).
+    /// Process-global coalesce starved the congested peer when a healthy peer
+    /// ate the shared token — keep this on the peer.
+    keyframe_coalesce_ms: Arc<AtomicU64>,
     /// Which path the viewer is actually painting from (`PATH_*` below).
     ///
     /// Chrome paints the DataChannel; Safari has no WebCodecs here and
@@ -230,19 +234,18 @@ impl WebRtcHost {
     }
 
     /// Same as `request_keyframe`, but rate-limited so a burst of sheds cannot
-    /// force the encoder into IDR-only mode.
+    /// force the encoder into IDR-only mode. Coalesce clock is **per peer**.
     pub fn request_keyframe_coalesced(&self) {
-        use std::sync::atomic::AtomicU64;
-        static LAST_MS: AtomicU64 = AtomicU64::new(0);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let prev = LAST_MS.load(Ordering::Relaxed);
+        let prev = self.keyframe_coalesce_ms.load(Ordering::Relaxed);
         if now.saturating_sub(prev) < 750 {
             return;
         }
-        if LAST_MS
+        if self
+            .keyframe_coalesce_ms
             .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
@@ -382,7 +385,9 @@ impl WebRtcHost {
         // keyframe — up to IDR_INTERVAL of garbage. Watch for the standard
         // "send me a keyframe" feedback and answer it.
         let keyframe_wanted = Arc::new(AtomicBool::new(false));
+        let keyframe_coalesce_ms = Arc::new(AtomicU64::new(0));
         let kf = Arc::clone(&keyframe_wanted);
+        let kf_ms = Arc::clone(&keyframe_coalesce_ms);
         tokio::spawn(async move {
             while let Ok((packets, _)) = rtp_sender.read_rtcp().await {
                 for p in packets {
@@ -390,7 +395,7 @@ impl WebRtcHost {
                     if any.downcast_ref::<PictureLossIndication>().is_some()
                         || any.downcast_ref::<FullIntraRequest>().is_some()
                     {
-                        kf.store(true, Ordering::Relaxed);
+                        coalesce_keyframe_request(&kf, &kf_ms);
                     }
                 }
             }
@@ -463,7 +468,8 @@ impl WebRtcHost {
             )
             .await?;
         let kf_dc = Arc::clone(&keyframe_wanted);
-        setup_video_channel(Arc::clone(&video_dc), kf_dc).await;
+        let kf_dc_ms = Arc::clone(&keyframe_coalesce_ms);
+        setup_video_channel(Arc::clone(&video_dc), kf_dc, kf_dc_ms).await;
 
         Ok((
             Self {
@@ -478,6 +484,7 @@ impl WebRtcHost {
                 offer_epoch,
                 player_slot,
                 keyframe_wanted,
+                keyframe_coalesce_ms,
                 present_path: Arc::new(AtomicU8::new(PATH_UNKNOWN)),
                 // On by default: a single lost CLVD fragment used to freeze the
                 // viewer until the next complete IDR made it through, which on
@@ -622,44 +629,20 @@ impl WebRtcHost {
         // mid-GOP without IDR recovery (Sunshine/Moonlight + FrameHandoff pattern).
         // Old path skipped every delta while trickling → IDR-only → ~1fps paint.
 
-        // RTP first when sent at all. It is the only path every browser can
-        // decode: Safari has no WebCodecs here, so it falls back to the media
-        // track and nothing else. Sending the DataChannel first meant a slow
-        // CLVD send could burn the whole per-frame budget and the RTP write
-        // never happened — the Safari viewer stayed black while a Chrome
-        // viewer on the same host was fine, because Chrome was being fed by
-        // the very channel that starved it.
+        // Warmup (PATH_UNKNOWN): CLVD **first** so WebCodecs can paint and stamp
+        // input_wm / S_p50. RTP-first at 90–160fps dual-send left the DC
+        // permanently congested — WC never warmed, presentMode stuck on canvas.
+        // Safari/RTP-only path still gets RTP immediately after (or alone).
         //
-        // WebCodecs: CLVD only (path_flags). Full dual via COUCHLINK_RTP_FULL.
-        // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
-        // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
-        if send_rtp && should_send_rtp(keyframe, path, rtp_full_dual()) {
-            let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
-            self.video
-                .sample_writer()
-                .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
-                    min_delay, max_delay,
-                )))
-                .write_sample(&Sample {
-                    data: Bytes::from(annex_b.clone()),
-                    duration,
-                    ..Default::default()
-                })
-                .await?;
-            delivered = true;
-        }
+        // WebCodecs healthy: CLVD only (path_flags). Full dual via COUCHLINK_RTP_FULL.
+        let clvd_first = send_dc && (path == PATH_UNKNOWN || path == PATH_WEBCODECS);
 
-        // Accelerated path, second: browser WebCodecs paints without waiting on
-        // the RTP jitter buffer. Native clients and Safari ignore this channel.
-        // A keyframe is never shed — dropping it was a death spiral: skip, ask
-        // for an IDR, then skip the IDR too because it is the largest frame of
-        // all, and the viewer's canvas froze while RTP kept decoding beside it.
-        if send_dc {
+        let mut push_clvd = async || -> (bool, bool) {
+            let mut delivered = false;
+            let mut trickle_skip = false;
             let dc_open = self.video_dc.ready_state()
                 == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open;
             let congested = dc_open && self.video_dc_congested().await;
-            // Never start an IDR into a full SCTP buffer — partial IDRs are
-            // useless and the old "always try keyframe" path burned 1s budgets.
             if dc_open && !congested {
                 let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
                 let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
@@ -669,7 +652,7 @@ impl WebRtcHost {
                     width: w,
                     height: h,
                     keyframe,
-                    annex_b,
+                    annex_b: annex_b.clone(),
                     stamp_us: crate::age::now_us(),
                     input_wm: self.last_input_wm.load(Ordering::Relaxed),
                 };
@@ -693,7 +676,6 @@ impl WebRtcHost {
                 if sent_all {
                     delivered = true;
                 } else {
-                    // Incomplete AU — decoder may need a later IDR; coalesce.
                     self.request_keyframe_coalesced();
                 }
             } else if dc_open && congested && !keyframe {
@@ -702,7 +684,37 @@ impl WebRtcHost {
                     trickle_skip = true;
                 }
             }
-            // Channel not open / congested keyframe → skip silently; IDR_INTERVAL retries.
+            (delivered, trickle_skip)
+        };
+
+        if clvd_first {
+            let (d, t) = push_clvd().await;
+            delivered |= d;
+            trickle_skip |= t;
+        }
+
+        // RTP: every browser can decode this. After CLVD on warmup so WC is fed.
+        // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
+        if send_rtp && should_send_rtp(keyframe, path, rtp_full_dual()) {
+            let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
+            self.video
+                .sample_writer()
+                .with_extension(HeaderExtension::PlayoutDelay(PlayoutDelayExtension::new(
+                    min_delay, max_delay,
+                )))
+                .write_sample(&Sample {
+                    data: Bytes::from(annex_b.clone()),
+                    duration,
+                    ..Default::default()
+                })
+                .await?;
+            delivered = true;
+        }
+
+        if send_dc && !clvd_first {
+            let (d, t) = push_clvd().await;
+            delivered |= d;
+            trickle_skip |= t;
         }
         if delivered {
             self.note_delivered();
@@ -736,17 +748,39 @@ pub fn governor_shed_counts(fates: &[PushFate]) -> (bool, u64) {
     (any, shed)
 }
 
-async fn setup_video_channel(dc: Arc<RTCDataChannel>, keyframe_wanted: Arc<AtomicBool>) {
+fn coalesce_keyframe_request(wanted: &AtomicBool, coalesce_ms: &AtomicU64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev = coalesce_ms.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) < 750 {
+        return;
+    }
+    if coalesce_ms
+        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        wanted.store(true, Ordering::Relaxed);
+    }
+}
+
+async fn setup_video_channel(
+    dc: Arc<RTCDataChannel>,
+    keyframe_wanted: Arc<AtomicBool>,
+    keyframe_coalesce_ms: Arc<AtomicU64>,
+) {
     dc.on_open(Box::new(move || {
         info!("video datachannel open (CLVD → browser WebCodecs)");
         Box::pin(async {})
     }));
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
         let keyframe_wanted = Arc::clone(&keyframe_wanted);
+        let keyframe_coalesce_ms = Arc::clone(&keyframe_coalesce_ms);
         Box::pin(async move {
             // Any inbound message = viewer lost sync / decoder reset.
             let _ = msg;
-            keyframe_wanted.store(true, Ordering::Relaxed);
+            coalesce_keyframe_request(&keyframe_wanted, &keyframe_coalesce_ms);
         })
     }));
 }

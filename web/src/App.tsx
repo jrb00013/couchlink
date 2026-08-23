@@ -260,7 +260,7 @@ export default function App() {
         secure: window.isSecureContext,
       });
       setPresentStuck(reason);
-    }, 6000);
+    }, 15000);
   }
 
   function ensureWebCodecs(): boolean {
@@ -346,7 +346,12 @@ export default function App() {
     // Don't tear down a live decoder on every callback.
     if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
     webcodecsActiveRef.current = true;
-    clog("webcodecs decoder warming — RTP stays live until first paint");
+    // Ask the host for CLVD-only *before* first paint. Waiting until paint left
+    // warmup dual-send at 90–150fps permanently congesting the DC — WC never
+    // painted and S_p50 died. RTP canvas stays visible until promote/software
+    // path decides; a short freeze beats a permanent canvas-only session.
+    playerRef.current?.promoteWebcodecs();
+    clog("webcodecs decoder warming — host switched to CLVD-primary");
     armWebCodecsFallback();
     return true;
   }

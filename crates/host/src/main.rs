@@ -49,6 +49,28 @@ const PUSH_BUDGET: Duration = Duration::from_millis(50);
 /// not a second of capture starvation. Failed IDRs wait for `IDR_INTERVAL`.
 const KEYFRAME_PUSH_BUDGET: Duration = Duration::from_millis(120);
 
+/// Commanded Windows encode fps.
+///
+/// Preset fps (often 60) used to clamp `SET_TARGET` even when
+/// `COUCHLINK_CAPTURE_FPS=120`, leaving push stuck ~75. Prefer an explicit
+/// `COUCHLINK_ENCODE_FPS`, else raise toward capture fps — but cap the
+/// auto-raise at 96 so dual-send warmup still leaves room for CLVD/WebCodecs
+/// (160fps dual drowned software WC and killed S_p50).
+fn encode_fps_target(preset_fps: u32) -> u32 {
+    if let Ok(s) = std::env::var("COUCHLINK_ENCODE_FPS") {
+        if let Ok(n) = s.parse::<u32>() {
+            return n.max(1);
+        }
+    }
+    if let Ok(s) = std::env::var("COUCHLINK_CAPTURE_FPS") {
+        if let Ok(n) = s.parse::<u32>() {
+            const AUTO_RAISE_CAP: u32 = 96;
+            return n.max(preset_fps).min(AUTO_RAISE_CAP).max(1);
+        }
+    }
+    preset_fps.max(1)
+}
+
 /// Push one frame, but never let it park the caller.
 ///
 /// `push_h264` awaits twice — the SCTP DataChannel and the RTP sample writer —
@@ -582,15 +604,20 @@ async fn main() -> Result<()> {
             "local display"
         }
     );
-    // Command the Windows encoder to match the preset so the wire size, rate and
-    // bitrate can never silently diverge from what the host advertises. Without
-    // this a directly-launched host and a stale win-capture stream e.g. 1728x1080
-    // while the player is told 1280x720 — overloading both the link and a remote
-    // decoder that cannot shrink the stream in time.
+    // Command the Windows encoder to match the preset size/bitrate, but allow
+    // encode fps to track capture headroom (`COUCHLINK_CAPTURE_FPS` /
+    // `COUCHLINK_ENCODE_FPS`) so a 720p60 label does not clamp a 120 Hz path.
+    let encode_fps = encode_fps_target(preset.fps);
+    if encode_fps != preset.fps {
+        info!(
+            "encode fps {encode_fps} (preset {} — capture/encode env raised the ceiling)",
+            preset.fps
+        );
+    }
     capturer.set_target(couchlink_capture_bridge::EncodeTarget {
         width: preset.width,
         height: preset.height,
-        fps: preset.fps,
+        fps: encode_fps,
         bitrate_kbps: preset.bitrate_kbps,
     });
     // Close the loop between the link and the Windows encoder: when the push
@@ -601,7 +628,7 @@ async fn main() -> Result<()> {
     let mut link_gov = link_gov::LinkGov::new(couchlink_capture_bridge::EncodeTarget {
         width: preset.width,
         height: preset.height,
-        fps: preset.fps,
+        fps: encode_fps,
         bitrate_kbps: preset.bitrate_kbps,
     });
     let mut commanded_target = link_gov.current();

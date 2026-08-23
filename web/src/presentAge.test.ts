@@ -50,8 +50,15 @@ describe("shouldSkipDecode", () => {
 });
 
 describe("decodeBacklogPolicy", () => {
-  it("requests IDR when dropping a backed-up delta (LFW)", () => {
-    expect(decodeBacklogPolicy(4, false)).toBe("skip-request-idr");
+  it("skips deltas on backlog without requesting IDR (CPU congestion)", () => {
+    expect(decodeBacklogPolicy(4, false)).toBe("skip");
+    expect(decodeBacklogPolicy(4, false, "ok")).toBe("skip");
+    expect(decodeBacklogPolicy(4, false, "warn")).toBe("skip");
+  });
+
+  it("requests IDR only when backlog coincides with late age", () => {
+    expect(decodeBacklogPolicy(4, false, "drop")).toBe("skip-request-idr");
+    expect(decodeBacklogPolicy(4, false, "emergency")).toBe("skip-request-idr");
   });
 
   it("decodes when queue is healthy", () => {

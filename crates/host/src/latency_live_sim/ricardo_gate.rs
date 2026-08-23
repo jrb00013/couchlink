@@ -48,6 +48,35 @@ pub fn strictly_beats_ricardo(m: SessionMetrics) -> bool {
     beats_ricardo(m) && m.input_s_p50_ms <= 30.0
 }
 
+/// Frozen self baseline from the first honest LIVE Ricardo PASS on this branch
+/// (2026-08-23 probe10 / probe-ci): push 74.8 · paint 84 · S_p50 7.4 · 5 Mbps · 0% shed.
+pub mod self_baseline {
+    pub const PUSH_FPS: f64 = 74.8;
+    pub const PAINT_FPS: f64 = 84.0;
+    pub const SURPLUS_P50_MS: f64 = 7.4;
+    pub const ENCODER_KBPS: u32 = 5_000;
+    pub const SHED_PCT: u32 = 0;
+}
+
+/// Beat-self bars — clear margin over the frozen self baseline, not a skim.
+pub mod self_beat {
+    pub const MIN_PUSH_FPS: f64 = 90.0;
+    pub const MIN_PAINT_FPS: f64 = 100.0;
+    pub const MAX_SURPLUS_P50_MS: f64 = 5.0;
+    pub const MIN_ENCODER_KBPS: u32 = 5_000;
+    pub const MAX_SHED_PCT: u32 = 1;
+}
+
+/// Must clear Ricardo **and** the beat-self margin over our own locked scorecard.
+pub fn beats_self(m: SessionMetrics) -> bool {
+    beats_ricardo(m)
+        && m.push_fps >= self_beat::MIN_PUSH_FPS
+        && m.shed_pct <= self_beat::MAX_SHED_PCT
+        && m.encoder_kbps >= self_beat::MIN_ENCODER_KBPS
+        && m.paint_fps >= self_beat::MIN_PAINT_FPS
+        && m.input_s_p50_ms <= self_beat::MAX_SURPLUS_P50_MS
+}
+
 pub fn beats_ricardo_push_and_paint(m: SessionMetrics) -> bool {
     m.push_fps >= A::PUSH_FPS * 0.9 && m.paint_fps >= A::PAINT_FPS
 }
@@ -157,6 +186,34 @@ mod tests {
             beats_ricardo(m),
             "composed Joel path must beat Ricardo hard gate: {m:?}"
         );
+    }
+
+    #[test]
+    fn frozen_self_scorecard_fails_beat_self_margin() {
+        let m = SessionMetrics {
+            push_fps: self_baseline::PUSH_FPS,
+            shed_pct: self_baseline::SHED_PCT,
+            encoder_kbps: self_baseline::ENCODER_KBPS,
+            paint_fps: self_baseline::PAINT_FPS,
+            input_s_p50_ms: self_baseline::SURPLUS_P50_MS,
+        };
+        assert!(beats_ricardo(m), "self baseline still clears Ricardo");
+        assert!(
+            !beats_self(m),
+            "barely-Ricardo self scorecard must fail beat-self bars"
+        );
+    }
+
+    #[test]
+    fn target_session_beats_self() {
+        let m = SessionMetrics {
+            push_fps: 95.0,
+            shed_pct: 0,
+            encoder_kbps: 5_000,
+            paint_fps: 105.0,
+            input_s_p50_ms: 4.0,
+        };
+        assert!(beats_self(m));
     }
 
     #[test]
