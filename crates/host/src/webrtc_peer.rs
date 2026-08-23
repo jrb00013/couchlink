@@ -212,6 +212,22 @@ pub(crate) fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool
     full_dual || path == PATH_RTP || path == PATH_UNKNOWN || keyframe
 }
 
+/// Whether this AU should hit the CLVD DataChannel.
+///
+/// During warmup dual-send, full-rate CLVD+RTP at 90–150fps permanently
+/// congests SCTP and WebCodecs never paints. Keep RTP full for paint fps;
+/// thin CLVD to keyframes + every 4th delta so input_wm / S_p50 still fill.
+pub(crate) fn should_send_clvd(keyframe: bool, path: u8, seq: u32) -> bool {
+    let (_, send_dc) = path_flags(path);
+    if !send_dc {
+        return false;
+    }
+    if path != PATH_UNKNOWN {
+        return true;
+    }
+    keyframe || seq % 4 == 0
+}
+
 /// Parse a client-reported present path. An unrecognised value maps to
 /// `PATH_UNKNOWN` — a typo here must never be the reason a viewer goes black.
 fn parse_present_path(path: &str) -> u8 {
@@ -636,10 +652,15 @@ impl WebRtcHost {
         //
         // WebCodecs healthy: CLVD only (path_flags). Full dual via COUCHLINK_RTP_FULL.
         let clvd_first = send_dc && (path == PATH_UNKNOWN || path == PATH_WEBCODECS);
+        // Peek seq for warmup thinning without consuming it on skipped frames.
+        let next_seq = self.video_seq.load(Ordering::Relaxed);
 
         let mut push_clvd = async || -> (bool, bool) {
             let mut delivered = false;
             let mut trickle_skip = false;
+            if !should_send_clvd(keyframe, path, next_seq) {
+                return (false, false);
+            }
             let dc_open = self.video_dc.ready_state()
                 == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open;
             let congested = dc_open && self.video_dc_congested().await;
@@ -963,6 +984,15 @@ mod controller_host_tests {
     #[test]
     fn webcodecs_path_is_clvd_only_so_push_budget_survives() {
         assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
+    }
+
+    #[test]
+    fn warmup_thins_clvd_but_keeps_keyframes() {
+        assert!(should_send_clvd(true, PATH_UNKNOWN, 1));
+        assert!(should_send_clvd(false, PATH_UNKNOWN, 0));
+        assert!(should_send_clvd(false, PATH_UNKNOWN, 4));
+        assert!(!should_send_clvd(false, PATH_UNKNOWN, 1));
+        assert!(should_send_clvd(false, PATH_WEBCODECS, 1));
     }
 
     #[test]

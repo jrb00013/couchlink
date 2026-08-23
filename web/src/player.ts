@@ -895,7 +895,9 @@ export class CouchlinkPlayer {
    * on "warmup" forever forced full dual-send and blew the push budget.
    */
   promoteWebcodecs() {
-    if (!this.webcodecsPath) return;
+    // Allow early promote before the first paint so high-fps warmup can leave
+    // dual-send; mark the path live even if the DC open handler has not run.
+    this.webcodecsPath = true;
     this.notifyPresentPath(
       "webcodecs",
       "CLVD DataChannel + WebCodecs present — RTP off (stall → warmup rescue)"
