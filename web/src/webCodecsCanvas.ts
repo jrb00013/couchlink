@@ -197,6 +197,11 @@ export class WebCodecsCanvasView {
     return this.paintedTotal > 0;
   }
 
+  /** Acceleration mode chosen by isConfigSupported (null until probed). */
+  hardwareAcceleration(): HardwareAcceleration | null {
+    return this.hwAccel;
+  }
+
   isRunning(): boolean {
     return this.running;
   }
@@ -592,7 +597,19 @@ export class WebCodecsCanvasView {
 
   private checkStall() {
     if (!this.running || this.paintedTotal === 0 || this.lastPaintAt === 0) return;
-    if (performance.now() - this.lastPaintAt < WebCodecsCanvasView.STALL_MS) return;
+    // Software decode (headless/WSL) can pause briefly between IDRs without being
+    // dead — a full reset+RTP fallback there thrashes the host into shed cliffs.
+    const budget =
+      this.hwAccel === "prefer-software" || this.hwAccel === "no-preference"
+        ? 5000
+        : WebCodecsCanvasView.STALL_MS;
+    if (performance.now() - this.lastPaintAt < budget) return;
+    if (this.hwAccel === "prefer-software" || this.hwAccel === "no-preference") {
+      cwarn("webcodecs software stall — IDR only (skip full reset)");
+      this.lastPaintAt = performance.now();
+      this.requestKeyframe();
+      return;
+    }
     cwarn("webcodecs stall — no paint, resetting decoder and showing live RTP");
     this.lastPaintAt = performance.now();
     this.resetForKeyframe();

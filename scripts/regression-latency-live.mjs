@@ -54,27 +54,63 @@ function loadPlaywright() {
   }
 }
 
-function parseHostStreaming(logPath) {
-  if (!logPath || !fs.existsSync(logPath)) return null;
+function parseHostStreamingWindows(logPath, n = 3, afterMarker = null) {
+  if (!logPath || !fs.existsSync(logPath)) return [];
   const text = fs.readFileSync(logPath, "utf8");
-  const lines = text.split(/\r?\n/).filter((l) => l.includes("[couchlink-host] streaming"));
-  // Prefer a healthy window (push>1), else last line.
-  const good = [...lines].reverse().find((l) => /streaming [1-9]/.test(l)) || lines.at(-1);
-  if (!good) return null;
-  const fps = /streaming ([\d.]+) fps/.exec(good);
-  const drop = /dropped \d+\/\d+ \((\d+)%\)/.exec(good);
-  return {
-    pushFps: fps ? Number(fps[1]) : 0,
-    shedPct: drop ? Number(drop[1]) : 99,
-    raw: good.trim(),
-  };
+  let body = text;
+  if (afterMarker) {
+    const idx = text.lastIndexOf(afterMarker);
+    if (idx >= 0) body = text.slice(idx);
+  }
+  const lines = body
+    .split(/\r?\n/)
+    .filter((l) => l.includes("[couchlink-host] streaming"));
+  const out = [];
+  for (const line of lines.slice(-n)) {
+    const fps = /streaming ([\d.]+) fps/.exec(line);
+    const drop = /dropped \d+\/\d+ \((\d+)%\)/.exec(line);
+    const pushFps = fps ? Number(fps[1]) : 0;
+    // Ignore the first post-join blip (0.x / 1.x fps) — not a steady window.
+    if (pushFps < 10) continue;
+    out.push({
+      pushFps,
+      shedPct: drop ? Number(drop[1]) : 99,
+      raw: line.trim(),
+    });
+  }
+  return out;
 }
 
 const { chromium } = loadPlaywright();
-const browser = await chromium.launch({
+// Only score host streaming lines written after this probe starts — otherwise
+// a dead host can still "pass" on stale healthy windows from earlier.
+const probeMarker = `[ricardo-probe] start ${Date.now()}`;
+if (hostLog) {
+  try {
+    fs.appendFileSync(hostLog, `\n${probeMarker}\n`);
+  } catch (e) {
+    console.warn("could not append probe marker to HOST_LOG:", e.message || e);
+  }
+}
+const launchOpts = {
   headless: true,
   args: ["--autoplay-policy=no-user-gesture-required", "--use-fake-device-for-media-stream"],
-});
+};
+// Prefer installed Chrome/Edge when present — they often expose prefer-hardware
+// where Playwright's bundled Chromium does not (WSL/headless).
+let browser;
+try {
+  browser = await chromium.launch({ ...launchOpts, channel: "chrome" });
+  console.log("browser: chrome channel");
+} catch {
+  try {
+    browser = await chromium.launch({ ...launchOpts, channel: "msedge" });
+    console.log("browser: msedge channel");
+  } catch {
+    browser = await chromium.launch(launchOpts);
+    console.log("browser: bundled chromium");
+  }
+}
 const page = await browser.newPage();
 
 // Capture every RTCPeerConnection + inject a wiggle-pad so input_wm stamps.
@@ -189,19 +225,23 @@ let best = {
   photonP50Ms: null,
   rttMs: 0,
   sampleCount: 0,
+  watermarkActive: false,
 };
 
 const inboundSamples = [];
 let prevInbound = null;
 
-// ~25s: need host_stats (~5s), WebCodecs promote, and input_wm ring fill.
-for (let i = 0; i < 25; i++) {
+// ~50s: accel probe, WebCodecs promote, host_stats, input_wm ring fill,
+// and ≥1 host streaming window (~5s cadence) while still connected.
+for (let i = 0; i < 50; i++) {
   await page.waitForTimeout(1000);
   const snap = await readRicardo();
   if (snap) {
-    const paint =
-      snap.present?.fps ??
-      (typeof snap.present?.fps === "number" ? snap.present.fps : 0);
+    const paint = Math.max(
+      snap.present?.fps || 0,
+      // RTP inbound decode fps while dual-send / software-background WC
+      0
+    );
     const encode = snap.hostStats?.target_bitrate_kbps ?? 0;
     const push = snap.hostStats?.fps ?? 0;
     const shed = snap.hostStats?.drop_pct ?? 100;
@@ -217,6 +257,9 @@ for (let i = 0; i < 25; i++) {
       photonP50Ms: photon != null ? photon : best.photonP50Ms,
       rttMs: snap.rttMs || best.rttMs,
       sampleCount: snap.inputPhoton?.sampleCount ?? best.sampleCount,
+      watermarkActive: !!(
+        snap.inputPhoton?.watermarkActive || best.watermarkActive
+      ),
     };
   }
   const inbound = await readInbound();
@@ -229,32 +272,50 @@ for (let i = 0; i < 25; i++) {
   }
   prevInbound = inbound || prevInbound;
 
-  if (
+  const hostWindows = parseHostStreamingWindows(hostLog, 8, probeMarker);
+  const hostSteady = hostWindows.filter((w) => w.pushFps >= 60);
+  const clientGreen =
+    best.presentMode === "webcodecs" &&
     best.paintFps >= RICARDO.minPaintFps &&
     best.encodeKbps >= RICARDO.minEncodeKbps &&
-    best.hostPushFps >= RICARDO.minPushFps &&
-    best.hostShedPct <= RICARDO.maxShedPct &&
     best.surplusP50Ms != null &&
     best.surplusP50Ms <= RICARDO.maxSurplusP50Ms &&
-    best.sampleCount >= 8
-  ) {
-    console.log(`Ricardo axes green at t=${i + 1}s`);
+    best.sampleCount >= 16 &&
+    best.watermarkActive;
+  // Stay connected until we have post-marker host windows — streaming lines
+  // stop once the probe browser closes.
+  if (clientGreen && hostSteady.length >= 1) {
+    console.log(
+      `client+host axes green at t=${i + 1}s (paint/encode/S_p50 + ${hostSteady.length} host window(s))`
+    );
     break;
   }
 }
 
 await browser.close();
 
-const fromLog = parseHostStreaming(hostLog);
-if (fromLog) {
-  console.log("host log streaming:", fromLog.raw);
-  best.hostPushFps = Math.max(best.hostPushFps, fromLog.pushFps);
-  best.hostShedPct = Math.min(best.hostShedPct, fromLog.shedPct);
+const windows = parseHostStreamingWindows(hostLog, 8, probeMarker);
+const steady = windows.filter((w) => w.pushFps >= 60);
+const scoreWindows =
+  steady.length >= 3 ? steady.slice(-3) : steady.length ? steady : windows.slice(-3);
+if (scoreWindows.length) {
+  for (const w of scoreWindows) console.log("host log streaming:", w.raw);
+  // Floor/ceiling across post-probe windows — no stale pre-probe cherry-pick.
+  best.hostPushFps = Math.min(...scoreWindows.map((w) => w.pushFps));
+  best.hostShedPct = Math.max(...scoreWindows.map((w) => w.shedPct));
 }
 
 console.log("Ricardo scrape:", JSON.stringify(best, null, 2));
 
 const failures = [];
+if (hostLog && !scoreWindows.length) {
+  failures.push(
+    "no host streaming windows after probe start (host log stale or dead)"
+  );
+}
+if (best.presentMode !== "webcodecs") {
+  failures.push(`presentMode=${best.presentMode} (need webcodecs for honest S_p50)`);
+}
 if (best.hostPushFps < RICARDO.minPushFps) {
   failures.push(`push ${best.hostPushFps.toFixed(1)} < ${RICARDO.minPushFps}`);
 }
@@ -267,6 +328,11 @@ if (best.encodeKbps < RICARDO.minEncodeKbps) {
 if (best.paintFps < RICARDO.minPaintFps) {
   failures.push(`paint ${best.paintFps.toFixed(1)} < ${RICARDO.minPaintFps}`);
 }
+if (!best.watermarkActive || best.sampleCount < 16) {
+  failures.push(
+    `input_wm samples=${best.sampleCount} active=${best.watermarkActive} (need ≥16)`
+  );
+}
 if (best.surplusP50Ms == null) {
   failures.push("S_p50 missing (need WebCodecs + pad input_wm samples)");
 } else if (best.surplusP50Ms > RICARDO.maxSurplusP50Ms) {
@@ -277,11 +343,11 @@ if (best.surplusP50Ms == null) {
 
 if (failures.length) {
   console.error("FAIL Ricardo hard gate:", failures.join("; "));
-  console.error("console tail:\n", consoleLines.slice(-40).join("\n"));
+  console.error("console tail:\n", consoleLines.slice(-50).join("\n"));
   process.exit(1);
 }
 
 console.log(
-  `LIVE Ricardo PASS — push=${best.hostPushFps.toFixed(1)} shed=${best.hostShedPct}% encode=${best.encodeKbps} paint=${best.paintFps.toFixed(1)} S_p50=${best.surplusP50Ms.toFixed(1)}ms (Φ=${best.photonP50Ms?.toFixed?.(1) ?? "?"} RTT=${best.rttMs}) present=${best.presentMode}`
+  `LIVE Ricardo PASS — push≥${best.hostPushFps.toFixed(1)} shed≤${best.hostShedPct}% encode=${best.encodeKbps} paint=${best.paintFps.toFixed(1)} S_p50=${best.surplusP50Ms.toFixed(1)}ms (Φ=${best.photonP50Ms?.toFixed?.(1) ?? "?"} RTT=${best.rttMs}) present=${best.presentMode} samples=${best.sampleCount}`
 );
 process.exit(0);

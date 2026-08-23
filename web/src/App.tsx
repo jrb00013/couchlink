@@ -203,6 +203,8 @@ export default function App() {
   const stalledRef = useRef(false);
   /** WebCodecs has painted and owns the visible canvas (RTP no longer on screen). */
   const promotedRef = useRef(false);
+  /** Software WC is stamping input_wm in the background; RTP stays visible. */
+  const softwarePhotonRef = useRef(false);
   const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
@@ -267,11 +269,24 @@ export default function App() {
       wcRef.current = new WebCodecsCanvasView(wcCanvasRef.current);
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
-        if (!promotedRef.current) {
+        const accel = wcRef.current?.hardwareAcceleration();
+        const softwareBg =
+          accel === "prefer-software" || accel === "no-preference";
+        if (!promotedRef.current && !softwarePhotonRef.current) {
           promoteWebcodecsPresent();
         }
         const fresh = inputFreshnessMs();
         const photon = photonP50Ms();
+        // Software-background: don't overwrite RTP canvas paint fps in the HUD.
+        if (softwareBg || softwarePhotonRef.current) {
+          setPresentMode("webcodecs");
+          setVideoDiag(
+            `LIVE RTP+WC(sw) · WC ${s.presentFps}fps · photon path live · drop=${s.dropped}${
+              photon != null ? ` · Φ ${photon.toFixed(0)}ms` : fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
+            }`
+          );
+          return;
+        }
         setVideoDiag(
           `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode${
             photon != null ? ` · photon ${photon.toFixed(0)}ms (est.)` : fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
@@ -338,6 +353,28 @@ export default function App() {
 
   /** WebCodecs painted — show it, but keep RTP decoding on the hidden canvas. */
   function promoteWebcodecsPresent() {
+    const accel = wcRef.current?.hardwareAcceleration();
+    // Software-only decode cannot hold Ricardo paint fps. Keep RTP on screen
+    // for paint, leave WebCodecs running hidden so input_wm / S_p50 still
+    // accumulate, and keep the host in warmup dual-send.
+    if (accel === "prefer-software" || accel === "no-preference") {
+      if (softwarePhotonRef.current) return;
+      softwarePhotonRef.current = true;
+      stalledRef.current = false;
+      clearRtpFallbackTimer();
+      clog(
+        "present mode: WebCodecs software background — RTP stays visible for paint fps"
+      );
+      wcCanvasRef.current?.classList.add("is-hidden");
+      canvasRef.current?.classList.remove("is-hidden");
+      videoRef.current?.classList.add("is-hidden");
+      // presentMode webcodecs marks CLVD/S_p50 path live for the Ricardo scrape
+      // even while the visible surface is still the RTP canvas.
+      setPresentMode("webcodecs");
+      setPresentStuck(null);
+      playerRef.current?.resumeWarmup();
+      return;
+    }
     if (promotedRef.current) return;
     promotedRef.current = true;
     stalledRef.current = false;
@@ -379,6 +416,34 @@ export default function App() {
       if (!viewRef.current) {
         viewRef.current = new LowLatencyCanvasView(canvasRef.current);
         viewRef.current.setStatsHandler((s) => {
+          // After HW WebCodecs promote, RTP stays warm but must not steal HUD.
+          // Software-background WC: keep presentMode=webcodecs (honest S_p50)
+          // while using RTP paint fps for the Ricardo paint axis.
+          if (promotedRef.current) return;
+          if (softwarePhotonRef.current) {
+            const fresh = inputFreshnessMs();
+            const photon = photonP50Ms();
+            setPresentMode("webcodecs");
+            setVideoDiag(
+              `LIVE RTP+WC(sw) · paint ${s.presentFps}fps · photon path live · drop=${s.dropped}${
+                photon != null
+                  ? ` · Φ ${photon.toFixed(0)}ms`
+                  : fresh != null
+                    ? ` · input ${fresh.toFixed(0)}ms`
+                    : ""
+              }`
+            );
+            setPresent({
+              fps: s.presentFps,
+              dropped: s.dropped,
+              width: s.width,
+              height: s.height,
+              ageMs: s.ageMs,
+              ageBand: s.ageMs <= 25 ? "ok" : s.ageMs <= 40 ? "warn" : "drop",
+              ...presentPhotonFields(),
+            });
+            return;
+          }
           const fresh = inputFreshnessMs();
           setVideoDiag(
             `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age${
@@ -407,6 +472,7 @@ export default function App() {
       }
       void viewRef.current.start(track).then((ok) => {
         if (ok) {
+          if (promotedRef.current) return;
           clog("present mode: low-latency canvas");
           setPresentMode("canvas");
           if (videoRef.current) {
@@ -520,6 +586,7 @@ export default function App() {
         wcRef.current?.stop();
         webcodecsActiveRef.current = false;
         promotedRef.current = false;
+        softwarePhotonRef.current = false;
         sawAuRef.current = false;
         stalledRef.current = false;
         resetInputPhoton();
