@@ -30,6 +30,9 @@ export type KbmOptions = {
   binds?: KbmBinds;
 };
 
+/** Fired on key/button/mouse-look change — send pad immediately, don't wait for poll. */
+export type KbmActivityHandler = () => void;
+
 export class KeyboardMouseInput {
   private keys = new Set<string>();
   private mouseButtons = 0;
@@ -42,6 +45,8 @@ export class KeyboardMouseInput {
   private lockTarget: HTMLElement | null;
   private active = false;
   private binds: KbmBinds;
+  /** Wired by CouchlinkPlayer for sub-poll input (beats 2ms quantisation). */
+  onActivity: KbmActivityHandler | null = null;
 
   constructor(opts: KbmOptions = {}) {
     this.sensitivity = opts.mouseSensitivity ?? 0.5;
@@ -195,6 +200,10 @@ export class KeyboardMouseInput {
     return this.keys.has(code);
   }
 
+  private bumpActivity() {
+    this.onActivity?.();
+  }
+
   private onKeyDown = (e: KeyboardEvent) => {
     if ((e.target as HTMLElement)?.tagName === "INPUT") return;
     if (e.code === "Escape") {
@@ -203,18 +212,22 @@ export class KeyboardMouseInput {
     }
     if (e.code === "Tab" || e.code === "Space") e.preventDefault();
     this.keys.add(e.code);
+    this.bumpActivity();
   };
 
   private onKeyUp = (e: KeyboardEvent) => {
     this.keys.delete(e.code);
+    this.bumpActivity();
   };
 
   private onMouseDown = (e: MouseEvent) => {
     this.mouseButtons |= 1 << e.button;
+    this.bumpActivity();
   };
 
   private onMouseUp = (e: MouseEvent) => {
     this.mouseButtons &= ~(1 << e.button);
+    this.bumpActivity();
   };
 
   private onMouseMove = (e: MouseEvent) => {
@@ -223,6 +236,7 @@ export class KeyboardMouseInput {
     this.mouseDy += e.movementY / 100;
     this.lookX = Math.max(-1, Math.min(1, this.lookX + e.movementX / 40));
     this.lookY = Math.max(-1, Math.min(1, this.lookY + e.movementY / 40));
+    this.bumpActivity();
   };
 
   private onContextMenu = (e: Event) => {
@@ -233,6 +247,7 @@ export class KeyboardMouseInput {
   private onBlur = () => {
     this.keys.clear();
     this.mouseButtons = 0;
+    this.bumpActivity();
   };
 
   private onVisibilityChange = () => {
