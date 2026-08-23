@@ -180,7 +180,11 @@ psw -Command "
   }
 " >/dev/null
 
-echo "==> Windows capture launched (source=$source_mode — choose a window in the picker if it appears)"
+if [[ "$source_mode" == "window" && -n "$window_title" ]]; then
+  echo "==> Windows capture launched (source=window, title~='$window_title')"
+else
+  echo "==> Windows capture launched (source=$source_mode — choose a window in the picker if it appears)"
+fi
 # Confirm the capture process actually came up. schtasks /Run can succeed while
 # the task's PowerShell exits immediately (bad args, missing exe), and the host
 # then sits without video — or, before the non-blocking connect fix, blocked

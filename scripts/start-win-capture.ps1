@@ -68,7 +68,7 @@ if ($Source -eq "window") {
         & $Bin @argList
         $code = $LASTEXITCODE
         if ($null -eq $code -or $code -eq 0) { exit 0 }
-        Write-Host "Windows capture: no window matching '$Window' yet (exit $code) — retrying in 2s"
+        Write-Host "Windows capture: no window matching '$Window' yet (exit $code) - retrying in 2s"
         Start-Sleep -Seconds 2
     }
 } else {
