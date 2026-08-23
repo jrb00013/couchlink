@@ -15,9 +15,9 @@ use couchlink_proto::VideoAccessUnit;
 /// `crates/host/src/emulator_pad.rs` `MAX_REMOTE_SLOTS = 3`.
 pub const N_FRIENDS: u32 = 3;
 
-/// WebCodecs present path writes RTP *and* CLVD (`path_flags` `_ => (true, true)`).
-/// `crates/host/src/webrtc_peer.rs` lines 134–138.
-pub const PATHS_WEBCODECS: u32 = 2;
+/// WebCodecs healthy present path writes CLVD only (`path_flags` → DC).
+/// Warmup/unknown still dual-send. Uplink model for the healthy case is 1 path.
+pub const PATHS_WEBCODECS: u32 = 1;
 
 /// Live governor window. `main.rs` `rate_window.elapsed() >= Duration::from_secs(5)`.
 pub const GOV_WINDOW_S: f64 = 5.0;
@@ -57,8 +57,13 @@ pub const P720: EncodeTarget = EncodeTarget {
 pub fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
     let mut kbps = baseline.bitrate_kbps;
+    const FLOOR_KBPS: u32 = 1_250;
     for _ in 0..3 {
-        kbps = (kbps / 2).max(1);
+        let next = (kbps / 2).max(FLOOR_KBPS);
+        if next >= kbps {
+            break;
+        }
+        kbps = next;
         let extra = EncodeTarget {
             fps: baseline.fps,
             bitrate_kbps: kbps,
@@ -245,7 +250,7 @@ mod tests {
         let naive_share = 24.0 / f64::from(N_FRIENDS * PATHS_WEBCODECS);
         assert!(
             naive_share < f64::from(LIVE_TRICKLE.fps),
-            "sanity: 24/6 = 4 < 15"
+            "sanity: 24/3 = 8 < 15"
         );
         // Live fact (plan, 2026-08-22): three WAN viewers held 15 fps @ 2500 kbps.
         // Therefore capacity is not "encoder-fps / N / paths". The 24 fps bench
@@ -257,10 +262,10 @@ mod tests {
     }
 
     #[test]
-    fn three_friend_dual_send_uplink_is_six_times_encoder() {
-        assert_eq!(host_uplink_kbps(2_500, N_FRIENDS, PATHS_WEBCODECS), 15_000);
-        assert_eq!(host_uplink_kbps(5_000, N_FRIENDS, PATHS_WEBCODECS), 30_000);
-        assert_eq!(host_uplink_kbps(10_000, N_FRIENDS, PATHS_WEBCODECS), 60_000);
+    fn three_friend_clvd_only_uplink_is_three_times_encoder() {
+        assert_eq!(host_uplink_kbps(2_500, N_FRIENDS, PATHS_WEBCODECS), 7_500);
+        assert_eq!(host_uplink_kbps(5_000, N_FRIENDS, PATHS_WEBCODECS), 15_000);
+        assert_eq!(host_uplink_kbps(10_000, N_FRIENDS, PATHS_WEBCODECS), 30_000);
     }
 
     #[test]
@@ -288,7 +293,7 @@ mod tests {
         almost(t15 / t30, 2.0, 1e-9);
         assert_eq!(
             host_uplink_kbps(2_500, N_FRIENDS, PATHS_WEBCODECS),
-            host_uplink_kbps(2_500, 3, 2)
+            host_uplink_kbps(2_500, 3, 1)
         );
         let bits15 = bits_per_frame(2_500, 15);
         let bits30 = bits_per_frame(2_500, 30);
@@ -357,8 +362,8 @@ mod tests {
         let dc_only = host_uplink_kbps(enc, N_FRIENDS, 1);
         let both = host_uplink_kbps(enc, N_FRIENDS, PATHS_WEBCODECS);
         assert_eq!(dc_only, 7_500);
-        assert_eq!(both, 15_000);
-        assert_eq!(both, dc_only * 2);
+        assert_eq!(both, 7_500);
+        assert_eq!(both, dc_only);
     }
 
     // ── FEC / header conversions (measured via proto encoder) ─────────
@@ -373,15 +378,14 @@ mod tests {
         }
         assert_eq!(from_trickle[0].bitrate_kbps, 2_500);
         assert!(
-            from_trickle.iter().any(|r| r.bitrate_kbps == 312)
-                || from_trickle.iter().any(|r| r.bitrate_kbps == 625),
-            "bitrate still halves: {from_trickle:?}"
+            from_trickle.iter().any(|r| r.bitrate_kbps == 1_250),
+            "bitrate floors at 1250: {from_trickle:?}"
         );
         let from_p720 = rungs_from(&P720);
         for r in &from_p720 {
             assert_eq!(r.fps, 60);
         }
-        assert_eq!(from_p720[3].bitrate_kbps, 1_250);
+        assert_eq!(from_p720.last().unwrap().bitrate_kbps, 1_250);
     }
 
     #[test]
@@ -417,8 +421,8 @@ mod tests {
     }
 
     #[test]
-    fn fec_does_not_change_the_sixfold_uplink_order() {
-        // Order-of-magnitude: FEC parity on IDRs is not the 2× dual-send term.
+    fn fec_does_not_change_the_clvd_uplink_order() {
+        // Order-of-magnitude: FEC parity on IDRs is not another full path.
         let idr_on = clvd_wire_bytes(68_000, true) as f64;
         let idr_off = clvd_wire_bytes(68_000, false) as f64;
         let fec_tax = (idr_on / idr_off) - 1.0;
@@ -426,7 +430,7 @@ mod tests {
             fec_tax > 0.0 && fec_tax < 0.30,
             "FEC tax {fec_tax} should be tens of percent on a 68k IDR, not 2×"
         );
-        assert!(PATHS_WEBCODECS == 2);
+        assert_eq!(PATHS_WEBCODECS, 1);
     }
 
     // ── Felt-lag composition (conjecture bounded by measurements) ─────
@@ -443,12 +447,14 @@ mod tests {
     }
 
     #[test]
-    fn plan_b_idr_only_uplink_under_full_dual() {
-        let dual = host_uplink_kbps(2_500, N_FRIENDS, PATHS_WEBCODECS);
+    fn plan_b_clvd_only_uplink_under_historical_dual() {
+        let clvd = host_uplink_kbps(2_500, N_FRIENDS, PATHS_WEBCODECS);
+        let dual = host_uplink_kbps(2_500, N_FRIENDS, 2);
         let idr_only = host_uplink_idr_only_kbps(2_500, N_FRIENDS, 60_000, 1.0);
+        assert_eq!(clvd, 7_500);
         assert_eq!(dual, 15_000);
         assert_eq!(idr_only, 8_940);
-        assert!(idr_only < dual);
+        assert!(clvd < dual);
         assert_eq!(rungs_from(&P720)[2].bitrate_kbps, 2_500);
         assert_eq!(rungs_from(&P720)[2].fps, 60);
     }

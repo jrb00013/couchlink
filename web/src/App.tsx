@@ -202,10 +202,17 @@ export default function App() {
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
         setVideoDiag(
-          `webcodecs: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped} dec=${s.decodeMs.toFixed(1)}ms`
+          `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode · drop=${s.dropped}`
         );
         setPresentMode("webcodecs");
-        setPresent({ fps: s.presentFps, dropped: s.dropped, width: s.width, height: s.height });
+        setPresent({
+          fps: s.presentFps,
+          dropped: s.dropped,
+          width: s.width,
+          height: s.height,
+          ageMs: s.ageMs,
+          ageBand: s.ageBand,
+        });
       });
       wcRef.current.setKeyframeHandler(() => {
         playerRef.current?.requestVideoKeyframe();
@@ -214,6 +221,9 @@ export default function App() {
       // painted — until then RTP stays on screen as the safety net.
       wcRef.current.setFirstPaintHandler(() => {
         promoteWebcodecsPresent();
+      });
+      wcRef.current.setPaintedHandler((a) => {
+        playerRef.current?.echoPaintedAge(a);
       });
       wcRef.current.setStallHandler(() => {
         promotedRef.current = false;
@@ -413,11 +423,11 @@ export default function App() {
       }
       setCtxHint(secureContextHint());
     },
-    onVideoAccessUnit: (au) => {
+    onVideoAccessUnit: (au, recvMs) => {
       if (!webcodecsActiveRef.current) {
         if (!ensureWebCodecs()) return;
       }
-      wcRef.current?.push(au);
+      wcRef.current?.push(au, recvMs);
     },
     onStreamInfo: (info) => {
       setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);

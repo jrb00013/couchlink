@@ -10,6 +10,9 @@ export type PresentSummary = {
   dropped: number;
   width: number;
   height: number;
+  /** Receive → present age of last painted frame (WebCodecs path). */
+  ageMs?: number;
+  ageBand?: string;
 };
 
 export type BottleneckCheck = {
@@ -420,7 +423,14 @@ export default function DebugDrawer({
             <Row label="Send rate" value={t && t.padHz > 0 ? `${t.padHz}Hz` : "—"} />
             <Row label="Present mode" value={presentMode} />
             {present && (
-              <Row label="Paint" value={`${present.fps}fps · ${present.width}×${present.height} ${present.dropped > 0 ? `· ${present.dropped} dropped` : ""}`} />
+              <Row
+                label="Paint"
+                value={`${present.fps}fps · ${present.width}×${present.height}${
+                  present.ageMs != null
+                    ? ` · ${present.ageMs.toFixed(1)}ms age${present.ageBand ? ` (${present.ageBand})` : ""}`
+                    : ""
+                }${present.dropped > 0 ? ` · ${present.dropped} dropped` : ""}`}
+              />
             )}
             <Row label="Stream info" value={streamInfo} />
           </Group>

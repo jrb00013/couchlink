@@ -51,8 +51,15 @@ pub struct LinkGov {
 fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
     let mut kbps = baseline.bitrate_kbps;
+    // Never step below 1250 kbps at 60 — 625 was unwatchable (2–7 push fps)
+    // and the governor had no climb room once IDR storms inflated sheds.
+    const FLOOR_KBPS: u32 = 1_250;
     for _ in 0..3 {
-        kbps = (kbps / 2).max(1);
+        let next = (kbps / 2).max(FLOOR_KBPS);
+        if next >= kbps {
+            break;
+        }
+        kbps = next;
         let extra = EncodeTarget {
             fps: baseline.fps,
             bitrate_kbps: kbps,

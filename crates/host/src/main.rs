@@ -24,29 +24,26 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-/// Wall-clock gap between keyframes. Frame-count intervals stretch to many seconds
-/// once the encoder throttles on a static screen, stranding late joiners on black.
-const IDR_INTERVAL: Duration = Duration::from_secs(2);
+/// Wall-clock gap between keyframes. Was 2s; with 3 WAN friends each IDR is
+/// a multi-fragment SCTP burst. Slightly longer GOP cuts IDR tax without
+/// changing the fps-hold ladder.
+const IDR_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Longest a single frame push may hold the loop that also drains capture.
 ///
-/// Three frame times at 60fps. Past that the peer is not keeping up and the
-/// frame is already too old to be worth showing.
-const PUSH_BUDGET: Duration = Duration::from_millis(20);
+/// Three frame times at 60fps (~50ms). 20ms was one frame and triggered a
+/// budget→IDR death spiral on 3-friend WAN: every miss forced a keyframe,
+/// IDRs blew the next budget, the governor walked to 625 kbps, paint died.
+const PUSH_BUDGET: Duration = Duration::from_millis(50);
 
 /// Longest a *keyframe* push may hold the loop.
 ///
-/// A keyframe is the only thing that lets a viewer who joined mid-GOP start
-/// painting — the browser's WebCodecs path literally refuses to configure its
-/// decoder until an IDR arrives. On a fresh SCTP DataChannel the send is in
-/// slow-start, so the very first keyframe is also the most likely to blow the
-/// normal 50ms budget. Drop it and the viewer waits for the next scheduled
-/// IDR (up to `IDR_INTERVAL` away) — and if the channel is still ramping that
-/// one goes too, the browser's fallback timer fires, and the session settles
-/// on RTP with its jitter buffer for its entire duration. Keyframes are rare
-/// (at most one per `IDR_INTERVAL`), so a generous budget costs nothing in
-/// steady state while making the join reliable.
-const KEYFRAME_PUSH_BUDGET: Duration = Duration::from_secs(1);
+/// Was 1s — that made `join_all` wall-clock ≈ 1s whenever any peer's IDR
+/// timed out, pinning the whole session to ~1 fps (logs: alternating
+/// 50 fps windows and `keyframe push exceeded budget` every second).
+/// Join still needs more headroom than a P-frame; 120ms is two P-budgets,
+/// not a second of capture starvation. Failed IDRs wait for `IDR_INTERVAL`.
+const KEYFRAME_PUSH_BUDGET: Duration = Duration::from_millis(120);
 
 /// Push one frame, but never let it park the caller.
 ///
@@ -84,9 +81,15 @@ async fn push_bounded(
         Ok(Ok(shed)) => Ok(shed),
         Ok(Err(e)) => Err(e),
         Err(_) => {
-            // Dropped H.264 leaves the decoder referencing frames it never got.
-            host.request_keyframe();
-            warn!("frame push exceeded budget — dropped, asked for a keyframe");
+            // Never request another IDR from a failed IDR push — that was the
+            // 1 Hz pin: timeout → force_idr → timeout, forever. P-frame misses
+            // also must not IDR-storm (see earlier fix). Periodic IDR_INTERVAL
+            // and explicit join/PLI still re-anchor.
+            if keyframe {
+                warn!("keyframe push exceeded budget — dropped (next IDR on interval, no storm)");
+            } else {
+                warn!("frame push exceeded budget — dropped (no IDR storm)");
+            }
             Ok(true)
         }
     }
@@ -213,9 +216,9 @@ fn spawn_pad_feedback(
 
 /// Push one frame to every currently-connected slot, concurrently.
 ///
-/// Sequential awaits would be wrong: `push_bounded`'s own budget is up to 20ms
+/// Sequential awaits would be wrong: `push_bounded`'s own budget is up to 50ms
 /// per peer (1s for keyframes), and the cadence tick can be as tight as 2ms on
-/// the pre-encoded path — four sequential 20ms awaits would stall the whole
+/// the pre-encoded path — sequential awaits would stall the whole
 /// capture loop. Returns `(received_by_any, dropped_total)`: the caller counts
 /// a produced frame once (when at least one viewer took it) and feeds the link
 /// governor the *sum* of every slot's sheds — one shared governor commands the

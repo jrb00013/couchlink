@@ -13,7 +13,7 @@ import { clog, cerror, cwarn } from "./log";
 import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
 import { canUseWebCodecs } from "./webCodecsCanvas";
-import { echoAgeOnce } from "./ageEcho";
+import { echoAgeOnce, type AgeEcho } from "./ageEcho";
 
 export type ConnectionState =
   | "disconnected"
@@ -29,8 +29,9 @@ export type PresentPath = "webcodecs" | "rtp" | "warmup";
 export interface PlayerCallbacks {
   onState: (s: ConnectionState, detail?: string) => void;
   onVideo: (stream: MediaStream) => void;
-  /** Annex-B access units from the unordered `video` DataChannel. */
-  onVideoAccessUnit?: (au: VideoAccessUnit) => void;
+  /** Annex-B access units from the unordered `video` DataChannel.
+   * `recvMs` is performance.now() at fragment assemble — use for age budget. */
+  onVideoAccessUnit?: (au: VideoAccessUnit, recvMs: number) => void;
   /** Fired when the preferred present path is known. */
   onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: (info: {
@@ -827,24 +828,28 @@ export class CouchlinkPlayer {
       if (!frag) return;
       const au = this.clvdAsm.push(frag);
       if (!au) return;
-      const recvMs = performance.now();
-      this.cb.onVideoAccessUnit?.(au);
-      const pad = this.padDc;
-      if (pad?.readyState === "open") {
-        echoAgeOnce(
-          { seq: au.seq, stampUs: au.stampUs, recvMs, paintMs: performance.now() },
-          (json) => {
-            try {
-              pad.send(json);
-            } catch {
-              /* pad closing */
-            }
-          }
-        );
-      }
+      // Age is measured at paint, not receive — see echoPaintedAge().
+      this.cb.onVideoAccessUnit?.(au, performance.now());
     };
     ch.onclose = () => clog("video datachannel closed");
     ch.onerror = (e) => cerror("video datachannel error", e);
+  }
+
+  /**
+   * Echo receive→paint age on the pad DataChannel once per AU seq.
+   * Call from the presentation path after the frame is actually drawn —
+   * not when the access unit arrives (that under-reported age as ~0).
+   */
+  echoPaintedAge(e: AgeEcho) {
+    const pad = this.padDc;
+    if (!pad || pad.readyState !== "open") return;
+    echoAgeOnce(e, (json) => {
+      try {
+        pad.send(json);
+      } catch {
+        /* pad closing */
+      }
+    });
   }
 
   /** Tell the host we need an IDR (any message on the video DC). */
@@ -881,7 +886,7 @@ export class CouchlinkPlayer {
     if (!this.webcodecsPath) return;
     this.notifyPresentPath(
       "webcodecs",
-      "CLVD DataChannel + WebCodecs present — RTP IDR-only rescue"
+      "CLVD DataChannel + WebCodecs present — RTP off (stall → warmup rescue)"
     );
   }
 
