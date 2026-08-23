@@ -21,6 +21,15 @@ export type PresentStats = {
   dropped: number;
   width: number;
   height: number;
+  /** Read → paint on this device (RTP has no host stamp). */
+  ageMs: number;
+};
+
+/** Fired when a frame is painted — for age_echo (stamp_us 0 on RTP path). */
+export type CanvasPaintedAge = {
+  seq: number;
+  recvMs: number;
+  paintMs: number;
 };
 
 /**
@@ -35,12 +44,19 @@ export class LowLatencyCanvasView {
   private windowStart = 0;
   private lastW = 0;
   private lastH = 0;
+  private lastAgeMs = 0;
+  private paintSeq = 0;
   private onStats: ((s: PresentStats) => void) | null = null;
+  private onPainted: ((a: CanvasPaintedAge) => void) | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {}
 
   setStatsHandler(cb: ((s: PresentStats) => void) | null) {
     this.onStats = cb;
+  }
+
+  setPaintedHandler(cb: ((a: CanvasPaintedAge) => void) | null) {
+    this.onPainted = cb;
   }
 
   async start(track: MediaStreamTrack): Promise<boolean> {
@@ -88,6 +104,8 @@ export class LowLatencyCanvasView {
       this.abort = abort;
       this.painted = 0;
       this.dropped = 0;
+      this.lastAgeMs = 0;
+      this.paintSeq = 0;
       this.windowStart = performance.now();
 
       const pump = async () => {
@@ -97,7 +115,8 @@ export class LowLatencyCanvasView {
             if (done || !value) break;
             // Paint immediately — waiting for rAF would add up to one display frame.
             const frame: VideoFrame = value;
-            this.paint(frame);
+            const recvMs = performance.now();
+            this.paint(frame, recvMs);
             frame.close();
           }
         } catch (e) {
@@ -122,7 +141,7 @@ export class LowLatencyCanvasView {
     }
   }
 
-  private paint(frame: VideoFrame) {
+  private paint(frame: VideoFrame, recvMs: number) {
     const ctx = this.ctx;
     if (!ctx) return;
     const w = frame.displayWidth || frame.codedWidth;
@@ -135,8 +154,17 @@ export class LowLatencyCanvasView {
     }
     ctx.drawImage(frame, 0, 0);
     this.painted += 1;
+    const paintMs = performance.now();
+    const ageMs = Math.max(0, paintMs - recvMs);
+    this.lastAgeMs = ageMs;
+    this.paintSeq = (this.paintSeq + 1) >>> 0;
+    // Sample ~4 Hz so pad DC is not flooded (host skips stamp_us=0 for glass age,
+    // but records recv→paint as present-path age).
+    if (this.paintSeq % 15 === 1) {
+      this.onPainted?.({ seq: this.paintSeq, recvMs, paintMs });
+    }
 
-    const now = performance.now();
+    const now = paintMs;
     if (now - this.windowStart >= 1000) {
       const elapsed = (now - this.windowStart) / 1000;
       this.onStats?.({
@@ -145,6 +173,7 @@ export class LowLatencyCanvasView {
         dropped: this.dropped,
         width: this.lastW,
         height: this.lastH,
+        ageMs: this.lastAgeMs,
       });
       this.painted = 0;
       this.dropped = 0;

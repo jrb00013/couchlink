@@ -897,10 +897,14 @@ async fn main() -> Result<()> {
                                         );
                                     }
                                     let received = capturer.take_received();
+                                    let (wait_ms, copy_ms) = capturer.take_handoff_ms();
                                     eprintln!(
                                         "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
                                          | received {received} from win-capture, pushed {window_frames} \
+                                         | handoff wait={wait_ms:.2}ms copy={copy_ms:.2}ms \
                                          | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",
+                                        (stage_capture / window_frames.max(1) as u32).as_secs_f64()
+                                            * 1000.0,
                                         if dropped_frames == 0 {
                                             "link keeping up".to_string()
                                         } else {
@@ -909,8 +913,6 @@ async fn main() -> Result<()> {
                                                 preset.bitrate_kbps as f64 / 1000.0
                                             )
                                         },
-                                        (stage_capture / window_frames.max(1) as u32).as_secs_f64()
-                                            * 1000.0
                                     );
                                     let _ = signal_out.send(host_stats_message(
                                         fps,

@@ -135,6 +135,15 @@ impl FrameCapture {
             Self::HyperV(c) => c.take_received(),
         }
     }
+
+    /// Hyper-V handoff split: (wait_ms, copy_ms) since last take. Zeros elsewhere.
+    pub fn take_handoff_ms(&mut self) -> (f64, f64) {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.take_handoff_ms(),
+            _ => (0.0, 0.0),
+        }
+    }
 }
 
 fn info_log(msg: &str) {

@@ -88,6 +88,10 @@ pub struct HyperVBridge {
     /// and replacing it with a Hidden desktop capture is exactly why the
     /// picker "never appeared".
     ever_connected: bool,
+    /// Accumulated bridge wait (socket read / latest_frame) for diagnostics.
+    wait_ns: u64,
+    /// Accumulated buffer take/copy for diagnostics.
+    copy_ns: u64,
 }
 
 impl HyperVBridge {
@@ -135,6 +139,8 @@ impl HyperVBridge {
             last_frame_at: Instant::now(),
             last_connect_attempt: None,
             ever_connected,
+            wait_ns: 0,
+            copy_ns: 0,
         })
     }
 
@@ -206,6 +212,13 @@ impl HyperVBridge {
         std::mem::take(&mut self.frames_received)
     }
 
+    /// (wait_ms, copy_ms) averages cleared for the next window.
+    pub fn take_handoff_ms(&mut self) -> (f64, f64) {
+        let w = std::mem::take(&mut self.wait_ns) as f64 / 1_000_000.0;
+        let c = std::mem::take(&mut self.copy_ns) as f64 / 1_000_000.0;
+        (w, c)
+    }
+
     fn latest_frame(&mut self) -> Result<bool> {
         if self.read_frame(IDLE_POLL)?.is_none() {
             return Ok(false);
@@ -261,10 +274,17 @@ impl HyperVBridge {
             }
             return Ok(self.stale_frame());
         }
-        match self.latest_frame() {
+        match {
+            let t_wait = Instant::now();
+            let got = self.latest_frame();
+            self.wait_ns += t_wait.elapsed().as_nanos() as u64;
+            got
+        } {
             Ok(true) => {
                 self.last_frame_at = Instant::now();
+                let t_copy = Instant::now();
                 let frame = std::mem::take(&mut self.buf);
+                self.copy_ns += t_copy.elapsed().as_nanos() as u64;
                 if self.format == FrameFormat::H264 {
                     return Ok(Some(Captured::H264 {
                         nal: frame,

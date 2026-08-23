@@ -10,9 +10,11 @@ export type PresentSummary = {
   dropped: number;
   width: number;
   height: number;
-  /** Receive → present age of last painted frame (WebCodecs path). */
+  /** Receive → present age of last painted frame (WebCodecs or canvas). */
   ageMs?: number;
   ageBand?: string;
+  /** Ms since last pad send at paint (client-local lower bound). */
+  inputFreshnessMs?: number;
 };
 
 export type BottleneckCheck = {
@@ -428,6 +430,10 @@ export default function DebugDrawer({
                 value={`${present.fps}fps · ${present.width}×${present.height}${
                   present.ageMs != null
                     ? ` · ${present.ageMs.toFixed(1)}ms age${present.ageBand ? ` (${present.ageBand})` : ""}`
+                    : ""
+                }${
+                  present.inputFreshnessMs != null
+                    ? ` · input ${present.inputFreshnessMs.toFixed(0)}ms`
                     : ""
                 }${present.dropped > 0 ? ` · ${present.dropped} dropped` : ""}`}
               />

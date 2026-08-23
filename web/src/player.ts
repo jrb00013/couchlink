@@ -14,6 +14,7 @@ import { jitterWindow } from "./latencyStats";
 import { send, type SignalMessage } from "./proto";
 import { canUseWebCodecs } from "./webCodecsCanvas";
 import { echoAgeOnce, type AgeEcho } from "./ageEcho";
+import { notePadSent } from "./inputPhoton";
 
 export type ConnectionState =
   | "disconnected"
@@ -922,6 +923,7 @@ export class CouchlinkPlayer {
         this.seq = (this.seq + 1) >>> 0;
         const state = touch.sample(this.seq);
         this.padDc.send(encodeClpd(state));
+        notePadSent();
         this.padSent += 1;
         // "generic" selects the emulator-side virtual pad *backend*
         // (backend_for()'s catch-all, XInput), not the wire format — CLPD
@@ -957,6 +959,7 @@ export class CouchlinkPlayer {
       this.seq = (this.seq + 1) >>> 0;
       const kbmState = kbm.sample(this.seq);
       this.padDc.send(encodeClpd(kbmState));
+      notePadSent();
       this.padSent += 1;
       // See the touch branch above for why this is "generic" and not
       // "dualsense": no real controller identity to report, and the
@@ -1002,6 +1005,7 @@ export class CouchlinkPlayer {
     this.seq = (this.seq + 1) >>> 0;
     const state: PadState = fromBrowserGamepad(gp, this.seq);
     this.padDc.send(encodeClpd(state));
+    notePadSent();
     this.padSent += 1;
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {

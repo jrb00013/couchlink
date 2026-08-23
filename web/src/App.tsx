@@ -8,6 +8,7 @@ import {
   canUseWebCodecs,
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
+import { inputFreshnessMs } from "./inputPhoton";
 import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
 import type { ControllerKind } from "./controllerKind";
 import { seatForRemoteSlot } from "./seat";
@@ -184,14 +185,19 @@ export default function App() {
       rtpFallbackTimer.current = null;
       if (!webcodecsActiveRef.current) return;
       if (wcRef.current?.hasPainted()) return;
-      cwarn("WebCodecs produced no frames — falling back to RTP canvas");
-      webcodecsActiveRef.current = false;
+      cwarn("WebCodecs produced no frames — falling back to RTP canvas (will retry on next AU)");
+      // Do not preferRtpPresent() permanently and do not stop() the decoder —
+      // stall path uses warmup; a later AU can still promote WebCodecs.
       promotedRef.current = false;
-      playerRef.current?.preferRtpPresent();
-      wcRef.current?.stop();
+      playerRef.current?.resumeWarmup();
       wcCanvasRef.current?.classList.add("is-hidden");
       canvasRef.current?.classList.remove("is-hidden");
-      setVideoDiag("webcodecs: no frames — RTP fallback");
+      setVideoDiag("webcodecs: no frames yet — RTP safety net (warmup)");
+      clog("webcodecs not promoted yet", {
+        reason: "fallback_timer_2.5s_no_paint",
+        hasDecoder: typeof VideoDecoder === "function",
+        secure: window.isSecureContext,
+      });
     }, 2500);
   }
 
@@ -201,8 +207,14 @@ export default function App() {
       wcRef.current = new WebCodecsCanvasView(wcCanvasRef.current);
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
+        if (!promotedRef.current) {
+          promoteWebcodecsPresent();
+        }
+        const fresh = inputFreshnessMs();
         setVideoDiag(
-          `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode · drop=${s.dropped}`
+          `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode${
+            fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
+          } · drop=${s.dropped}`
         );
         setPresentMode("webcodecs");
         setPresent({
@@ -212,6 +224,7 @@ export default function App() {
           height: s.height,
           ageMs: s.ageMs,
           ageBand: s.ageBand,
+          inputFreshnessMs: fresh ?? undefined,
         });
       });
       wcRef.current.setKeyframeHandler(() => {
@@ -228,12 +241,13 @@ export default function App() {
       wcRef.current.setStallHandler(() => {
         promotedRef.current = false;
         playerRef.current?.resumeWarmup();
+        // Keep WebCodecs running — re-promote on next paint via first-paint /
+        // stats path. Stopping here used to leave friends stuck on canvas.
         wcCanvasRef.current?.classList.add("is-hidden");
-        // RTP never stopped decoding — just show the canvas that was
-        // already painting under the WebCodecs layer.
         canvasRef.current?.classList.remove("is-hidden");
         videoRef.current?.classList.remove("is-hidden");
-        setVideoDiag("webcodecs stalled — showing live RTP");
+        setVideoDiag("webcodecs stalled — showing live RTP (decoder kept warm)");
+        clog("webcodecs stall → warmup; decoder still running for re-promote");
       });
     }
     // Don't tear down a live decoder on every callback.
@@ -255,7 +269,7 @@ export default function App() {
     videoRef.current?.classList.add("is-hidden");
     wcCanvasRef.current?.classList.remove("is-hidden");
     setPresentMode("webcodecs");
-    clog("present mode: WebCodecs + CLVD (RTP stays live, hidden)");
+    clog("present mode: WebCodecs + CLVD (RTP off on host after present_path)");
     playerRef.current?.promoteWebcodecs();
   }
 
@@ -285,11 +299,30 @@ export default function App() {
       if (!viewRef.current) {
         viewRef.current = new LowLatencyCanvasView(canvasRef.current);
         viewRef.current.setStatsHandler((s) => {
+          const fresh = inputFreshnessMs();
           setVideoDiag(
-            `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped}`
+            `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age${
+              fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
+            } drop=${s.dropped}`
           );
           setPresentMode("canvas");
-          setPresent({ fps: s.presentFps, dropped: s.dropped, width: s.width, height: s.height });
+          setPresent({
+            fps: s.presentFps,
+            dropped: s.dropped,
+            width: s.width,
+            height: s.height,
+            ageMs: s.ageMs,
+            ageBand: s.ageMs <= 25 ? "ok" : s.ageMs <= 40 ? "warn" : "drop",
+            inputFreshnessMs: fresh ?? undefined,
+          });
+        });
+        viewRef.current.setPaintedHandler((a) => {
+          playerRef.current?.echoPaintedAge({
+            seq: a.seq,
+            stampUs: 0,
+            recvMs: a.recvMs,
+            paintMs: a.paintMs,
+          });
         });
       }
       void viewRef.current.start(track).then((ok) => {

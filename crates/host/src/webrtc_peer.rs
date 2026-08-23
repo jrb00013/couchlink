@@ -136,6 +136,10 @@ pub struct WebRtcHost {
     /// dropped fragment used to freeze the viewer for the rest of the GOP.
     /// `COUCHLINK_FEC=0` disables it.
     fec_enabled: bool,
+    /// Slow-peer isolation: after sustained sheds, skip deltas until recovered.
+    trickle: Arc<AtomicBool>,
+    shed_streak: Arc<AtomicU32>,
+    ok_streak: Arc<AtomicU32>,
 }
 
 /// `present_path` has not been reported yet — send both paths.
@@ -460,9 +464,44 @@ impl WebRtcHost {
                     std::env::var("COUCHLINK_FEC").as_deref(),
                     Ok("0") | Ok("false")
                 ),
+                trickle: Arc::new(AtomicBool::new(false)),
+                shed_streak: Arc::new(AtomicU32::new(0)),
+                ok_streak: Arc::new(AtomicU32::new(0)),
             },
             pad_rx,
         ))
+    }
+
+    /// Sustained sheds before this peer skips non-keyframes (slow-peer isolation).
+    const TRICKLE_ENTER_SHEDS: u32 = 8;
+    /// Clean deliveries while trickling before full rate resumes.
+    const TRICKLE_EXIT_OKS: u32 = 30;
+
+    fn note_shed(&self) {
+        self.ok_streak.store(0, Ordering::Relaxed);
+        let s = self.shed_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        if s >= Self::TRICKLE_ENTER_SHEDS
+            && !self.trickle.swap(true, Ordering::Relaxed)
+        {
+            warn!("peer entering trickle mode — skipping deltas until recovered");
+        }
+    }
+
+    fn note_delivered(&self) {
+        self.shed_streak.store(0, Ordering::Relaxed);
+        if !self.trickle.load(Ordering::Relaxed) {
+            return;
+        }
+        let o = self.ok_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        if o >= Self::TRICKLE_EXIT_OKS {
+            self.trickle.store(false, Ordering::Relaxed);
+            self.ok_streak.store(0, Ordering::Relaxed);
+            info!("peer left trickle mode");
+        }
+    }
+
+    pub fn in_trickle(&self) -> bool {
+        self.trickle.load(Ordering::Relaxed)
     }
 
     /// Send haptic / lightbar / adaptive-trigger feedback to the player's DualSense.
@@ -559,6 +598,13 @@ impl WebRtcHost {
         let (send_rtp, send_dc) = path_flags(path);
         let mut delivered = false;
 
+        // Slow-peer isolation: after sustained sheds, skip deltas so this peer
+        // cannot pin join_all wall-clock for healthy friends (max-peer wait).
+        if !keyframe && self.trickle.load(Ordering::Relaxed) {
+            self.note_shed();
+            return Ok(true);
+        }
+
         // RTP first when sent at all. It is the only path every browser can
         // decode: Safari has no WebCodecs here, so it falls back to the media
         // track and nothing else. Sending the DataChannel first meant a slow
@@ -637,6 +683,11 @@ impl WebRtcHost {
             }
             // Channel not open / congested keyframe → skip silently; IDR_INTERVAL retries.
         }
+        if delivered {
+            self.note_delivered();
+        } else {
+            self.note_shed();
+        }
         Ok(!delivered)
     }
 }
@@ -673,7 +724,15 @@ async fn setup_pad_channel(
             if msg.is_string {
                 if let Ok(text) = std::str::from_utf8(&msg.data) {
                     if let Some(echo) = parse_age_echo_json(text) {
-                        crate::age::record_global(crate::age::echo_age_ms(echo.stamp_us));
+                        if echo.stamp_us != 0 {
+                            crate::age::record_global(crate::age::echo_age_ms(echo.stamp_us));
+                        } else {
+                            // RTP/canvas: no host stamp — record recv→paint present age.
+                            let local = echo.paint_ms - echo.recv_ms;
+                            if local.is_finite() && local > 0.0 {
+                                crate::age::record_global(local);
+                            }
+                        }
                         return;
                     }
                     let _ = serde_json::from_str::<PadFeedback>(text);
@@ -826,13 +885,20 @@ mod controller_host_tests {
     }
 
     #[test]
+    fn trickle_thresholds() {
+        assert!(!should_enter_trickle(0));
+        assert!(!should_enter_trickle(7));
+        assert!(should_enter_trickle(8));
+        assert!(!should_exit_trickle(29));
+        assert!(should_exit_trickle(30));
+    }
+
+    #[test]
     fn should_send_rtp_off_on_webcodecs_full_on_safari_and_unknown() {
         assert!(!should_send_rtp(true, PATH_WEBCODECS, false));
         assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
         assert!(should_send_rtp(false, PATH_RTP, false));
         assert!(should_send_rtp(false, PATH_UNKNOWN, false));
-        // full_dual still needs path_flags RTP bit — webcodecs stays DC-only
-        // unless COUCHLINK_RTP_FULL flips path_flags (tested via env separately).
         assert!(!should_send_rtp(false, PATH_WEBCODECS, true));
     }
 
@@ -895,10 +961,16 @@ mod controller_host_tests {
 
     #[test]
     fn parse_present_path_treats_garbage_as_unknown_not_a_guess() {
-        // A typo or a future unrecognised value must fall back to "send both",
-        // not silently pick a side — the one failure mode this exists to
-        // prevent is a viewer going black because we guessed wrong.
         assert_eq!(parse_present_path("not-a-real-path"), PATH_UNKNOWN);
         assert_eq!(parse_present_path(""), PATH_UNKNOWN);
     }
+}
+
+/// Pure thresholds for slow-peer isolation (unit-tested without a peer).
+pub fn should_enter_trickle(shed_streak: u32) -> bool {
+    shed_streak >= 8
+}
+
+pub fn should_exit_trickle(ok_streak: u32) -> bool {
+    ok_streak >= 30
 }
