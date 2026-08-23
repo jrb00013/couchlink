@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
-    use couchlink_proto::pad_frame::{buttons, PAD_FRAME_LEN};
+    use couchlink_proto::pad_frame::{buttons, PAD_FRAME_LEN_V2};
     use couchlink_proto::PadFrame;
 
     use crate::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, PRODUCT_NAME, SONY_VID};
@@ -364,10 +364,11 @@ mod tests {
 
     #[test]
     fn clpd_encode_matches_proto_length() {
+        // Wire encode is always CLPD v2 (client_ts_ms for input_wm / S_p50).
         let f = PadFrame::neutral();
         let mut buf = BytesMut::new();
         f.encode(&mut buf);
-        assert_eq!(buf.len(), PAD_FRAME_LEN);
-        assert_eq!(encode_clpd(&f).len(), PAD_FRAME_LEN);
+        assert_eq!(buf.len(), PAD_FRAME_LEN_V2);
+        assert_eq!(encode_clpd(&f).len(), PAD_FRAME_LEN_V2);
     }
 }
