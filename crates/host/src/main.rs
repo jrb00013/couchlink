@@ -1,4 +1,5 @@
 mod age;
+mod amazing_latency_ab;
 mod input_photon_budget;
 mod capture;
 mod config;
@@ -899,11 +900,18 @@ async fn main() -> Result<()> {
                                         );
                                     }
                                     let received = capturer.take_received();
-                                    let (wait_ms, copy_ms) = capturer.take_handoff_ms();
+                                    let (wait_ms, copy_ms, wait_p95_ms) = capturer.take_handoff_ms();
+                                    let omega = crate::input_photon_budget::handoff_wait_periods(
+                                        wait_ms,
+                                        commanded_target.fps,
+                                    );
+                                    let shm_label =
+                                        crate::input_photon_budget::shm_decision_label(wait_p95_ms);
                                     eprintln!(
                                         "[couchlink-host] streaming {fps:.1} fps ({frames_out} frames total, GPU-encoded on Windows) \
                                          | received {received} from win-capture, pushed {window_frames} \
-                                         | handoff wait={wait_ms:.2}ms copy={copy_ms:.2}ms \
+                                         | handoff wait={wait_ms:.2}ms copy={copy_ms:.2}ms wait_p95={wait_p95_ms:.2}ms omega={omega:.3} \
+                                         | {shm_label} \
                                          | per frame: relay {:.1}ms | dropped {dropped_frames}/{sent} ({drop_pct}%) — {}",
                                         (stage_capture / window_frames.max(1) as u32).as_secs_f64()
                                             * 1000.0,
@@ -926,6 +934,10 @@ async fn main() -> Result<()> {
                                         stage_encode,
                                         stage_push,
                                         &commanded_target,
+                                        received,
+                                        wait_ms,
+                                        copy_ms,
+                                        wait_p95_ms,
                                     ));
                                     rate_window = std::time::Instant::now();
                                     rate_mark = frames_out;
@@ -1100,6 +1112,9 @@ async fn main() -> Result<()> {
                                 (stage_push / per).as_secs_f64() * 1000.0,
                                 dominant_stage(&stages),
                             );
+                            let frames_received = capturer.take_received();
+                            let (handoff_wait_ms, handoff_copy_ms, handoff_wait_p95_ms) =
+                                capturer.take_handoff_ms();
                             let _ = signal_out.send(host_stats_message(
                                 fps,
                                 window_frames,
@@ -1115,6 +1130,10 @@ async fn main() -> Result<()> {
                                     fps: preset.fps,
                                     bitrate_kbps: preset.bitrate_kbps,
                                 },
+                                frames_received,
+                                handoff_wait_ms,
+                                handoff_copy_ms,
+                                handoff_wait_p95_ms,
                             ));
                             stage_capture = Duration::ZERO;
                             stage_scale = Duration::ZERO;
@@ -1176,6 +1195,10 @@ fn host_stats_message(
     encode: Duration,
     push: Duration,
     target: &couchlink_capture_bridge::EncodeTarget,
+    frames_received: u64,
+    handoff_wait_ms: f64,
+    handoff_copy_ms: f64,
+    handoff_wait_p95_ms: f64,
 ) -> SignalMessage {
     let per = frames_out.max(1) as u32;
     let avg = |d: Duration| (d / per).as_secs_f64() * 1000.0;
@@ -1201,5 +1224,10 @@ fn host_stats_message(
         target_bitrate_kbps: target.bitrate_kbps,
         age_p50_ms: crate::age::global_percentiles().0,
         age_p95_ms: crate::age::global_percentiles().1,
+        frames_received,
+        handoff_wait_ms,
+        handoff_copy_ms,
+        handoff_wait_p95_ms,
+        shm_gate_trips: crate::input_photon_budget::shm_gate_trips(handoff_wait_p95_ms),
     }
 }

@@ -82,6 +82,23 @@ pub fn wow_surplus_ok(surplus_p50_ms: f64) -> bool {
     surplus_p50_ms <= WOW_SURPLUS_MS
 }
 
+/// Whether live handoff measurements recommend implementing SHM.
+///
+/// Only trips on material wait p95 — do not build SHM before this returns true
+/// on a live Ricardo-class night (failed guess: SHM before measuring \(w\)).
+pub fn recommend_shm(wait_p95_ms: f64) -> bool {
+    shm_gate_trips(wait_p95_ms)
+}
+
+/// Format a one-line SHM decision for host logs / PR proof.
+pub fn shm_decision_label(wait_p95_ms: f64) -> &'static str {
+    if recommend_shm(wait_p95_ms) {
+        "SHM_GATE_TRIP — implement shm ring (COUCHLINK_CAPTURE_IPC=shm)"
+    } else {
+        "SHM_SKIP — wait p95 not material; keep hyperv/tcp"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +160,14 @@ mod tests {
         assert!(wow_surplus_ok(45.0));
         assert!(wow_surplus_ok(44.9));
         assert!(!wow_surplus_ok(45.1));
+    }
+
+    #[test]
+    fn recommend_shm_tracks_gate() {
+        assert!(!recommend_shm(0.4));
+        assert!(!recommend_shm(1.0));
+        assert!(recommend_shm(1.01));
+        assert!(shm_decision_label(0.4).starts_with("SHM_SKIP"));
+        assert!(shm_decision_label(2.0).starts_with("SHM_GATE_TRIP"));
     }
 }

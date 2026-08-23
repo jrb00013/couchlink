@@ -60,6 +60,11 @@ export interface PlayerCallbacks {
     target_bitrate_kbps: number;
     age_p50_ms?: number;
     age_p95_ms?: number;
+    frames_received?: number;
+    handoff_wait_ms?: number;
+    handoff_copy_ms?: number;
+    handoff_wait_p95_ms?: number;
+    shm_gate_trips?: boolean;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
   /** This browser's own assigned slot (1-based), so it can label itself

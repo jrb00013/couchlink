@@ -72,6 +72,11 @@ export type SignalMessage =
       target_bitrate_kbps: number;
       age_p50_ms?: number;
       age_p95_ms?: number;
+      frames_received?: number;
+      handoff_wait_ms?: number;
+      handoff_copy_ms?: number;
+      handoff_wait_p95_ms?: number;
+      shm_gate_trips?: boolean;
     };
 
 export function send(ws: WebSocket, msg: SignalMessage) {

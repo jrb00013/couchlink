@@ -175,6 +175,21 @@ pub enum SignalMessage {
         age_p50_ms: f64,
         #[serde(default)]
         age_p95_ms: f64,
+        /// Frames received from win-capture / Hyper-V bridge in the last window.
+        #[serde(default)]
+        frames_received: u64,
+        /// Hyper-V handoff wait (ms) averaged over the window. Zero on TCP/local.
+        #[serde(default)]
+        handoff_wait_ms: f64,
+        /// Hyper-V handoff copy (ms) averaged over the window.
+        #[serde(default)]
+        handoff_copy_ms: f64,
+        /// Hyper-V handoff wait p95 (ms) — SHM gate input.
+        #[serde(default)]
+        handoff_wait_p95_ms: f64,
+        /// True when `shm_gate_trips(handoff_wait_p95_ms)`.
+        #[serde(default)]
+        shm_gate_trips: bool,
     },
 }
 

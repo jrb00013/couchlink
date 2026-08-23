@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
+  getInputPhotonSnapshot,
   inputFreshnessMs,
   notePadSent,
   notePhotonPaint,
@@ -43,5 +44,16 @@ describe("inputPhoton", () => {
     notePadSent(100, 5);
     expect(notePhotonPaint(200, 99)).toBeNull();
     expect(photonP50Ms()).toBeNull();
+  });
+
+  it("snapshot bundles ring state for the debug drawer", () => {
+    notePadSent(100, 5);
+    notePhotonPaint(190, 5);
+    const snap = getInputPhotonSnapshot(48);
+    expect(snap.lastPhotonMs).toBe(90);
+    expect(snap.photonP50Ms).toBe(90);
+    expect(snap.surplusP50Ms).toBe(42);
+    expect(snap.watermarkActive).toBe(true);
+    expect(snap.sampleCount).toBe(1);
   });
 });

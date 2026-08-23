@@ -5,6 +5,10 @@
  * a client-local lower bound only.
  */
 
+import { surplusMs } from "./latencyBudget";
+
+export { surplusMs } from "./latencyBudget";
+
 let lastPadSentAt = 0;
 
 type PadSend = { seq: number; perfSent: number };
@@ -12,9 +16,17 @@ const ring: PadSend[] = [];
 const MAX_RING = 256;
 const photonSamples: number[] = [];
 
-export function surplusMs(phiMs: number, rttMs: number): number {
-  return phiMs - rttMs;
-}
+export type InputPhotonSnapshot = {
+  /** Last single-frame photon sample (ms). */
+  lastPhotonMs: number | null;
+  photonP50Ms: number | null;
+  surplusP50Ms: number | null;
+  sampleCount: number;
+  ringSize: number;
+  inputFreshnessMs: number | null;
+  /** True once CLVD input_wm samples have landed. */
+  watermarkActive: boolean;
+};
 
 export function notePadSent(atMs = performance.now(), seq?: number): void {
   lastPadSentAt = atMs;
@@ -64,4 +76,23 @@ export function surplusP50Ms(rttMs: number): number | null {
   const p50 = photonP50Ms();
   if (p50 == null || !Number.isFinite(rttMs)) return null;
   return surplusMs(p50, rttMs);
+}
+
+export function lastPhotonMs(): number | null {
+  if (photonSamples.length === 0) return null;
+  return photonSamples[photonSamples.length - 1] ?? null;
+}
+
+/** Full local input→photon snapshot for the debug Latency tab. */
+export function getInputPhotonSnapshot(rttMs: number): InputPhotonSnapshot {
+  const p50 = photonP50Ms();
+  return {
+    lastPhotonMs: lastPhotonMs(),
+    photonP50Ms: p50,
+    surplusP50Ms: surplusP50Ms(rttMs),
+    sampleCount: photonSamples.length,
+    ringSize: ring.length,
+    inputFreshnessMs: inputFreshnessMs(),
+    watermarkActive: photonSamples.length > 0,
+  };
 }

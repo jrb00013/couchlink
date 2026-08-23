@@ -136,13 +136,55 @@ impl FrameCapture {
         }
     }
 
-    /// Hyper-V handoff split: (wait_ms, copy_ms) since last take. Zeros elsewhere.
-    pub fn take_handoff_ms(&mut self) -> (f64, f64) {
+    /// Hyper-V handoff: `(wait_avg_ms, copy_avg_ms, wait_p95_ms)`. Zeros elsewhere.
+    pub fn take_handoff_ms(&mut self) -> (f64, f64, f64) {
         match self {
             #[cfg(target_os = "linux")]
             Self::HyperV(c) => c.take_handoff_ms(),
-            _ => (0.0, 0.0),
+            _ => (0.0, 0.0, 0.0),
         }
+    }
+}
+
+/// Which capture IPC transport was requested (`COUCHLINK_CAPTURE_IPC`).
+///
+/// SHM is parseable so the gate can be A/B'd, but the body is not implemented
+/// until live `wait_p95` trips `shm_gate_trips` — requesting `shm` falls back
+/// to Hyper-V with a warning (see `resolve_capture_ipc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureIpc {
+    HyperV,
+    Tcp,
+    Shm,
+}
+
+/// Parse `COUCHLINK_CAPTURE_IPC` / explicit ipc name. Case-insensitive.
+pub fn parse_capture_ipc(s: &str) -> Result<CaptureIpc, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "shm" => Ok(CaptureIpc::Shm),
+        "hyperv" => Ok(CaptureIpc::HyperV),
+        "tcp" => Ok(CaptureIpc::Tcp),
+        other => Err(format!(
+            "unknown capture ipc {other:?} — expected shm|hyperv|tcp"
+        )),
+    }
+}
+
+/// Resolve requested IPC. SHM is not built yet — fall back to Hyper-V until
+/// live measurements trip the gate (MATH-4 / AMAZE-5).
+pub fn resolve_capture_ipc(requested: CaptureIpc) -> CaptureIpc {
+    match requested {
+        CaptureIpc::Shm => CaptureIpc::HyperV,
+        other => other,
+    }
+}
+
+/// Log-friendly name.
+pub fn capture_ipc_label(ipc: CaptureIpc) -> &'static str {
+    match ipc {
+        CaptureIpc::HyperV => "hyperv",
+        CaptureIpc::Tcp => "tcp",
+        CaptureIpc::Shm => "shm",
     }
 }
 
@@ -355,5 +397,21 @@ mod tests {
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("bash"));
         let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();
         assert_eq!(args, vec![std::ffi::OsString::from("/tmp/e.sh")]);
+    }
+
+    #[test]
+    fn parse_capture_ipc_accepts_shm_hyperv_tcp() {
+        assert_eq!(parse_capture_ipc("shm"), Ok(CaptureIpc::Shm));
+        assert_eq!(parse_capture_ipc("hyperv"), Ok(CaptureIpc::HyperV));
+        assert_eq!(parse_capture_ipc("TCP"), Ok(CaptureIpc::Tcp));
+        assert!(parse_capture_ipc("nope").is_err());
+    }
+
+    #[test]
+    fn resolve_capture_ipc_falls_back_shm_until_gate() {
+        // SHM body not implemented — requesting it must not crash; Hyper-V stays live.
+        assert_eq!(resolve_capture_ipc(CaptureIpc::Shm), CaptureIpc::HyperV);
+        assert_eq!(resolve_capture_ipc(CaptureIpc::HyperV), CaptureIpc::HyperV);
+        assert_eq!(resolve_capture_ipc(CaptureIpc::Tcp), CaptureIpc::Tcp);
     }
 }

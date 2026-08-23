@@ -9,13 +9,14 @@ import {
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
 import {
+  getInputPhotonSnapshot,
   inputFreshnessMs,
   notePhotonPaint,
   photonP50Ms,
   resetInputPhoton,
   surplusP50Ms,
 } from "./inputPhoton";
-import { classifyPresentStuck } from "./presentPromote";
+import { classifyPresentStuck, type PresentStuckReason } from "./presentPromote";
 import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
 import type { ControllerKind } from "./controllerKind";
 import { seatForRemoteSlot } from "./seat";
@@ -116,7 +117,13 @@ export default function App() {
     target_bitrate_kbps: number;
     age_p50_ms?: number;
     age_p95_ms?: number;
+    frames_received?: number;
+    handoff_wait_ms?: number;
+    handoff_copy_ms?: number;
+    handoff_wait_p95_ms?: number;
+    shm_gate_trips?: boolean;
   } | null>(null);
+  const [presentStuck, setPresentStuck] = useState<PresentStuckReason | null>(null);
   /** Session occupancy snapshot — "N/4 players connected" (host owns P1). */
   const [playersStatus, setPlayersStatus] = useState<{
     occupied: number;
@@ -229,6 +236,7 @@ export default function App() {
         hasDecoder: typeof VideoDecoder === "function",
         secure: window.isSecureContext,
       });
+      setPresentStuck(reason);
     }, 2500);
   }
 
@@ -256,6 +264,8 @@ export default function App() {
           height: s.height,
           ageMs: s.ageMs,
           ageBand: s.ageBand,
+          decodeMs: s.decodeMs,
+          diagnosis: s.diagnosis,
           ...presentPhotonFields(),
         });
       });
@@ -294,6 +304,7 @@ export default function App() {
           hasDecoder: typeof VideoDecoder === "function",
           secure: window.isSecureContext,
         });
+        setPresentStuck(reason);
       });
     }
     // Don't tear down a live decoder on every callback.
@@ -316,6 +327,7 @@ export default function App() {
     videoRef.current?.classList.add("is-hidden");
     wcCanvasRef.current?.classList.remove("is-hidden");
     setPresentMode("webcodecs");
+    setPresentStuck(null);
     clog("present mode: WebCodecs + CLVD (RTP off on host after present_path)");
     playerRef.current?.promoteWebcodecs();
   }
@@ -976,6 +988,8 @@ export default function App() {
         present={present}
         streamInfo={streamMeta}
         presentMode={presentMode}
+        inputPhoton={getInputPhotonSnapshot(rttRef.current)}
+        presentStuck={presentStuck}
         playerPads={playerPads}
         mySlot={mySlot}
         myPadName={telemetry?.padName ?? null}
