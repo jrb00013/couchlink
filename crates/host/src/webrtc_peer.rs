@@ -480,9 +480,7 @@ impl WebRtcHost {
     fn note_shed(&self) {
         self.ok_streak.store(0, Ordering::Relaxed);
         let s = self.shed_streak.fetch_add(1, Ordering::Relaxed) + 1;
-        if s >= Self::TRICKLE_ENTER_SHEDS
-            && !self.trickle.swap(true, Ordering::Relaxed)
-        {
+        if should_enter_trickle(s) && !self.trickle.swap(true, Ordering::Relaxed) {
             warn!("peer entering trickle mode — skipping deltas until recovered");
         }
     }
@@ -493,7 +491,7 @@ impl WebRtcHost {
             return;
         }
         let o = self.ok_streak.fetch_add(1, Ordering::Relaxed) + 1;
-        if o >= Self::TRICKLE_EXIT_OKS {
+        if should_exit_trickle(o) {
             self.trickle.store(false, Ordering::Relaxed);
             self.ok_streak.store(0, Ordering::Relaxed);
             info!("peer left trickle mode");
