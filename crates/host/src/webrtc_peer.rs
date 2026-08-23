@@ -108,6 +108,21 @@ pub fn take_expedite() -> bool {
     EXPEDITE.swap(false, Ordering::Relaxed)
 }
 
+fn note_input_wm(atom: &AtomicU32, seq: u32) {
+    loop {
+        let cur = atom.load(Ordering::Relaxed);
+        if seq <= cur {
+            return;
+        }
+        if atom
+            .compare_exchange_weak(cur, seq, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
 pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
     pub video: Arc<TrackLocalStaticSample>,
@@ -140,6 +155,8 @@ pub struct WebRtcHost {
     trickle: Arc<AtomicBool>,
     shed_streak: Arc<AtomicU32>,
     ok_streak: Arc<AtomicU32>,
+    /// Last pad seq applied — stamped into CLVD as input_wm for client photon metric.
+    last_input_wm: Arc<AtomicU32>,
 }
 
 /// `present_path` has not been reported yet — send both paths.
@@ -384,6 +401,8 @@ impl WebRtcHost {
         let (pad_tx, pad_rx) = mpsc::unbounded_channel::<PadFrame>();
         let pad_tx_dc = pad_tx.clone();
         let pad_device_dc = Arc::clone(&pad_device);
+        let last_input_wm = Arc::new(AtomicU32::new(0));
+        let last_input_wm_pad = Arc::clone(&last_input_wm);
 
         let pc2 = Arc::clone(&pc);
         let signal_ice = signal_out.clone();
@@ -425,7 +444,13 @@ impl WebRtcHost {
                 }),
             )
             .await?;
-        setup_pad_channel(Arc::clone(&pad_dc), pad_tx_dc, pad_device_dc).await;
+        setup_pad_channel(
+            Arc::clone(&pad_dc),
+            pad_tx_dc,
+            pad_device_dc,
+            last_input_wm_pad,
+        )
+        .await;
 
         // Video: unordered, but allow a short retransmit window so fragmented
         // IDRs (often >64 KiB) are not permanently lost on a single drop.
@@ -467,6 +492,7 @@ impl WebRtcHost {
                 trickle: Arc::new(AtomicBool::new(false)),
                 shed_streak: Arc::new(AtomicU32::new(0)),
                 ok_streak: Arc::new(AtomicU32::new(0)),
+                last_input_wm,
             },
             pad_rx,
         ))
@@ -652,6 +678,7 @@ impl WebRtcHost {
                     keyframe,
                     annex_b,
                     stamp_us: crate::age::now_us(),
+                    input_wm: self.last_input_wm.load(Ordering::Relaxed),
                 };
                 let fragments = if self.fec_enabled {
                     au.encode_fragments_with_fec()
@@ -709,6 +736,7 @@ async fn setup_pad_channel(
     dc: Arc<RTCDataChannel>,
     pad_tx: mpsc::UnboundedSender<PadFrame>,
     pad_device: Arc<Mutex<VirtualPad>>,
+    last_input_wm: Arc<AtomicU32>,
 ) {
     dc.on_open(Box::new(move || {
         info!("pad datachannel open");
@@ -718,6 +746,7 @@ async fn setup_pad_channel(
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
         let pad_tx = pad_tx.clone();
         let pad_device = Arc::clone(&pad_device);
+        let last_input_wm = Arc::clone(&last_input_wm);
         Box::pin(async move {
             if msg.is_string {
                 if let Ok(text) = std::str::from_utf8(&msg.data) {
@@ -740,6 +769,7 @@ async fn setup_pad_channel(
             match PadFrame::decode(&msg.data) {
                 Ok(frame) => {
                     note_pad_arrived();
+                    note_input_wm(&last_input_wm, frame.seq);
                     let _ = pad_tx.send(frame);
                     let mut guard = pad_device.lock().await;
                     if let Err(e) = guard.apply(&frame) {

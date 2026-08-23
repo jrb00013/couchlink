@@ -392,6 +392,7 @@ mod tests {
                     keyframe: true,
                     annex_b: vec![0u8; idr_bytes],
                     stamp_us: 0,
+                    input_wm: 0,
                 };
                 let frags = au.encode_fragments();
                 idr_frags += frags.len();
@@ -407,6 +408,7 @@ mod tests {
                     keyframe: false,
                     annex_b: vec![0u8; delta_bytes],
                     stamp_us: 0,
+                    input_wm: 0,
                 };
                 let frags = au.encode_fragments();
                 delta_frags += frags.len();

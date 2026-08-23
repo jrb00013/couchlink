@@ -148,6 +148,9 @@ export class CouchlinkPlayer {
   private sessionRetries = 0;
   private pending: { sid: string; pin: string } | null = null;
   private seq = 0;
+  /** Soft-hold previous pad for one missed digital poll. */
+  private lastPadHold: PadState | null = null;
+  private lastPadHoldAt = 0;
   private padSent = 0;
   private padWindowStart = 0;
   private padName = "none";
@@ -905,7 +908,31 @@ export class CouchlinkPlayer {
   private startPadLoop() {
     this.padWindowStart = performance.now();
     this.padSent = 0;
+    this.lastPadHold = null;
+    this.lastPadHoldAt = 0;
     this.padTimer = window.setInterval(() => this.pollAndSendPad(), PAD_POLL_MS);
+  }
+
+  /** Keep digital buttons one poll if Gamepad API glitched empty. */
+  private holdDigitalOneTick(state: PadState, now: number): PadState {
+    const TICK_MS = 5;
+    const prev = this.lastPadHold;
+    if (!prev || now - this.lastPadHoldAt > TICK_MS) return state;
+    if (state.buttons === 0 && prev.buttons !== 0) {
+      return { ...state, buttons: prev.buttons };
+    }
+    return state;
+  }
+
+  private emitPad(state: PadState) {
+    if (this.padDc?.readyState !== "open") return;
+    const now = performance.now();
+    const held = this.holdDigitalOneTick(state, now);
+    this.lastPadHold = held;
+    this.lastPadHoldAt = now;
+    this.padDc.send(encodeClpd({ ...held, clientTsMs: now >>> 0 }));
+    notePadSent(now, held.seq);
+    this.padSent += 1;
   }
 
   private pollAndSendPad() {
@@ -922,9 +949,7 @@ export class CouchlinkPlayer {
       if (touch) {
         this.seq = (this.seq + 1) >>> 0;
         const state = touch.sample(this.seq);
-        this.padDc.send(encodeClpd(state));
-        notePadSent();
-        this.padSent += 1;
+        this.emitPad(state);
         // "generic" selects the emulator-side virtual pad *backend*
         // (backend_for()'s catch-all, XInput), not the wire format — CLPD
         // frames are the same shape regardless of source. Touch has no real
@@ -958,9 +983,7 @@ export class CouchlinkPlayer {
       if (!kbm) return;
       this.seq = (this.seq + 1) >>> 0;
       const kbmState = kbm.sample(this.seq);
-      this.padDc.send(encodeClpd(kbmState));
-      notePadSent();
-      this.padSent += 1;
+      this.emitPad(kbmState);
       // See the touch branch above for why this is "generic" and not
       // "dualsense": no real controller identity to report, and the
       // backend that maps to (XInput) is what actually gets recognized as
@@ -1004,9 +1027,7 @@ export class CouchlinkPlayer {
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
     const state: PadState = fromBrowserGamepad(gp, this.seq);
-    this.padDc.send(encodeClpd(state));
-    notePadSent();
-    this.padSent += 1;
+    this.emitPad(state);
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {
       this.lastPadHz = this.padSent;

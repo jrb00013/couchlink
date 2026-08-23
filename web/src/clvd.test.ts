@@ -161,4 +161,27 @@ describe("decodeClvdFragment", () => {
     const au = new ClvdAssembler().push(frag);
     expect(au?.stampUs).toBe(0);
   });
+
+  it("decodes v4 input_wm on the wire", () => {
+    const payload = new Uint8Array([4, 5, 6]);
+    const buf = new ArrayBuffer(30 + payload.byteLength);
+    const u8 = new Uint8Array(buf);
+    const view = new DataView(buf);
+    for (let i = 0; i < 4; i++) u8[i] = VIDEO_MAGIC.charCodeAt(i);
+    u8[4] = 4;
+    u8[5] = 0;
+    view.setUint16(6, 1280, true);
+    view.setUint16(8, 720, true);
+    view.setUint32(10, 9, true);
+    view.setUint16(14, 0, true);
+    view.setUint16(16, 1, true);
+    view.setBigUint64(18, 99n, true);
+    view.setUint32(26, 42, true);
+    u8.set(payload, 30);
+    const frag = decodeClvdFragment(buf)!;
+    expect(frag.inputWm).toBe(42);
+    expect(frag.stampUs).toBe(99);
+    const au = new ClvdAssembler().push(frag);
+    expect(au?.inputWm).toBe(42);
+  });
 });

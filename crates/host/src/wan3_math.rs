@@ -8,7 +8,7 @@
 //! This module is the instrument. It does not stamp CLVD or expedite frames.
 
 use couchlink_capture_bridge::EncodeTarget;
-use couchlink_proto::video_frame::{VIDEO_HEADER_LEN, VIDEO_MAX_FRAGMENT_PAYLOAD};
+use couchlink_proto::video_frame::{VIDEO_HEADER_LEN_V4, VIDEO_MAX_FRAGMENT_PAYLOAD};
 use couchlink_proto::VideoAccessUnit;
 
 /// Remote seats the host will fan the same encode out to.
@@ -142,7 +142,8 @@ pub fn clvd_wire_bytes(annex_b_len: usize, fec: bool) -> usize {
         height: 720,
         keyframe: annex_b_len >= 20_000,
         annex_b: vec![0u8; annex_b_len],
-        stamp_us: 0,
+        stamp_us: 1,
+        input_wm: 0,
     };
     let frags = if fec {
         au.encode_fragments_with_fec()
@@ -389,29 +390,29 @@ mod tests {
     }
 
     #[test]
-    fn clvd_header_is_v3_and_fec_parity_only_when_multi_fragment() {
-        assert_eq!(VIDEO_HEADER_LEN, 26);
+    fn clvd_header_is_v4_and_fec_parity_only_when_multi_fragment() {
+        assert_eq!(VIDEO_HEADER_LEN_V4, 30);
         assert_eq!(VIDEO_MAX_FRAGMENT_PAYLOAD, 14_000);
         // 9_000 B delta: one data frag, FEC skipped (n_data == 1).
         let d_off = clvd_wire_bytes(9_000, false);
         let d_on = clvd_wire_bytes(9_000, true);
-        assert_eq!(d_off, 9_000 + VIDEO_HEADER_LEN);
+        assert_eq!(d_off, 9_000 + VIDEO_HEADER_LEN_V4);
         assert_eq!(d_on, d_off, "single-fragment FEC must not double the send");
         // 68_000 B IDR: 5 data chunks (4*14000+12000). FEC adds 1 parity.
         let k_off = clvd_wire_bytes(68_000, false);
         let k_on = clvd_wire_bytes(68_000, true);
-        assert_eq!(k_off, 68_000 + 5 * VIDEO_HEADER_LEN);
+        assert_eq!(k_off, 68_000 + 5 * VIDEO_HEADER_LEN_V4);
         assert!(k_on > k_off, "multi-fragment IDR must carry parity");
         let parity = k_on - k_off;
-        // parity payload = 2 + 14000 + 18 header
-        assert_eq!(parity, VIDEO_HEADER_LEN + 2 + VIDEO_MAX_FRAGMENT_PAYLOAD);
+        // parity payload = 2 + 14000 + v4 header
+        assert_eq!(parity, VIDEO_HEADER_LEN_V4 + 2 + VIDEO_MAX_FRAGMENT_PAYLOAD);
         // Mid-size AU (20 kB, 2 data frags): fixed +14020 is ~70% of the data wire.
         let mid_off = clvd_wire_bytes(20_000, false);
         let mid_on = clvd_wire_bytes(20_000, true);
-        assert_eq!(mid_off, 20_000 + 2 * VIDEO_HEADER_LEN);
+        assert_eq!(mid_off, 20_000 + 2 * VIDEO_HEADER_LEN_V4);
         assert_eq!(
             mid_on,
-            mid_off + VIDEO_HEADER_LEN + 2 + VIDEO_MAX_FRAGMENT_PAYLOAD
+            mid_off + VIDEO_HEADER_LEN_V4 + 2 + VIDEO_MAX_FRAGMENT_PAYLOAD
         );
         let mid_tax = (mid_on as f64 / mid_off as f64) - 1.0;
         assert!(

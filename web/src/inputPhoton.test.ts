@@ -2,7 +2,11 @@ import { describe, expect, it, beforeEach } from "vitest";
 import {
   inputFreshnessMs,
   notePadSent,
+  notePhotonPaint,
+  photonP50Ms,
   resetInputPhoton,
+  surplusMs,
+  surplusP50Ms,
 } from "./inputPhoton";
 
 describe("inputPhoton", () => {
@@ -20,5 +24,24 @@ describe("inputPhoton", () => {
   it("never goes negative", () => {
     notePadSent(100);
     expect(inputFreshnessMs(50)).toBe(0);
+  });
+
+  it("computes photon from input watermark seq", () => {
+    notePadSent(100, 5);
+    expect(notePhotonPaint(190, 5)).toBe(90);
+    expect(photonP50Ms()).toBe(90);
+  });
+
+  it("surplus subtracts RTT from photon p50", () => {
+    notePadSent(100, 5);
+    notePhotonPaint(190, 5);
+    expect(surplusMs(90, 48)).toBe(42);
+    expect(surplusP50Ms(48)).toBe(42);
+  });
+
+  it("ignores paint when watermark seq not in ring", () => {
+    notePadSent(100, 5);
+    expect(notePhotonPaint(200, 99)).toBeNull();
+    expect(photonP50Ms()).toBeNull();
   });
 });

@@ -8,7 +8,13 @@ import {
   canUseWebCodecs,
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
-import { inputFreshnessMs } from "./inputPhoton";
+import {
+  inputFreshnessMs,
+  notePhotonPaint,
+  photonP50Ms,
+  resetInputPhoton,
+  surplusP50Ms,
+} from "./inputPhoton";
 import { classifyPresentStuck } from "./presentPromote";
 import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
 import type { ControllerKind } from "./controllerKind";
@@ -93,6 +99,7 @@ export default function App() {
   const [presentMode, setPresentMode] = useState<"webcodecs" | "canvas" | "video" | "—">("—");
   const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
   const [telemetry, setTelemetry] = useState<PlayerTelemetry | null>(null);
+  const rttRef = useRef(0);
   const [hostStats, setHostStats] = useState<{
     fps: number;
     frames_out: number;
@@ -126,6 +133,17 @@ export default function App() {
   /** This browser's own player slot, assigned by the session on registration. */
   const [mySlot, setMySlot] = useState<number | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
+
+  function presentPhotonFields() {
+    const rtt = rttRef.current;
+    const photon = photonP50Ms();
+    const surplus = surplusP50Ms(rtt);
+    return {
+      inputFreshnessMs: inputFreshnessMs() ?? undefined,
+      photonP50Ms: photon ?? undefined,
+      surplusP50Ms: surplus ?? undefined,
+    };
+  }
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
   const [keybindsOpen, setKeybindsOpen] = useState(false);
@@ -224,9 +242,10 @@ export default function App() {
           promoteWebcodecsPresent();
         }
         const fresh = inputFreshnessMs();
+        const photon = photonP50Ms();
         setVideoDiag(
           `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode${
-            fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
+            photon != null ? ` · photon ${photon.toFixed(0)}ms (est.)` : fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
           } · drop=${s.dropped}`
         );
         setPresentMode("webcodecs");
@@ -237,7 +256,7 @@ export default function App() {
           height: s.height,
           ageMs: s.ageMs,
           ageBand: s.ageBand,
-          inputFreshnessMs: fresh ?? undefined,
+          ...presentPhotonFields(),
         });
       });
       wcRef.current.setKeyframeHandler(() => {
@@ -249,6 +268,7 @@ export default function App() {
         promoteWebcodecsPresent();
       });
       wcRef.current.setPaintedHandler((a) => {
+        notePhotonPaint(a.paintMs, a.inputWm);
         playerRef.current?.echoPaintedAge(a);
       });
       wcRef.current.setStallHandler(() => {
@@ -340,7 +360,7 @@ export default function App() {
             height: s.height,
             ageMs: s.ageMs,
             ageBand: s.ageMs <= 25 ? "ok" : s.ageMs <= 40 ? "warn" : "drop",
-            inputFreshnessMs: fresh ?? undefined,
+            ...presentPhotonFields(),
           });
         });
         viewRef.current.setPaintedHandler((a) => {
@@ -469,6 +489,7 @@ export default function App() {
         promotedRef.current = false;
         sawAuRef.current = false;
         stalledRef.current = false;
+        resetInputPhoton();
         setPresent(null);
       }
     },
@@ -503,7 +524,10 @@ export default function App() {
     onPadStats: (hz, name) => {
       setPadMeta(`${hz} Hz · ${name}`);
     },
-    onTelemetry: (t) => setTelemetry(t),
+    onTelemetry: (t) => {
+      rttRef.current = t.path?.rttMs ?? 0;
+      setTelemetry(t);
+    },
     onHostStats: (s) => setHostStats(s),
     onRegistered: (slot) => setMySlot(slot),
     onPlayersStatus: (occupied, max) => setPlayersStatus({ occupied, max }),

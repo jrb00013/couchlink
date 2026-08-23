@@ -76,6 +76,7 @@ export type WebCodecsStats = {
 export type PaintedAge = {
   seq: number;
   stampUs: number;
+  inputWm: number;
   recvMs: number;
   paintMs: number;
 };
@@ -83,6 +84,7 @@ export type PaintedAge = {
 type FrameMeta = {
   seq: number;
   stampUs: number;
+  inputWm: number;
   recvMs: number;
 };
 
@@ -316,6 +318,7 @@ export class WebCodecsCanvasView {
       this.onPainted?.({
         seq: meta.seq,
         stampUs: meta.stampUs,
+        inputWm: meta.inputWm,
         recvMs: meta.recvMs,
         paintMs,
       });
@@ -396,7 +399,12 @@ export class WebCodecsCanvasView {
       }
 
       const ts = chunkTimestampUs(au.seq);
-      this.metaByTs.set(ts, { seq: au.seq, stampUs: au.stampUs, recvMs });
+      this.metaByTs.set(ts, {
+        seq: au.seq,
+        stampUs: au.stampUs,
+        inputWm: au.inputWm,
+        recvMs,
+      });
 
       const t0 = performance.now();
       const chunk = new EncodedVideoChunk({

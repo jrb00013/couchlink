@@ -4,9 +4,11 @@ export const VIDEO_CHANNEL = "video";
 export const VIDEO_MAGIC = "CLVD";
 export const VIDEO_VERSION = 3;
 export const VIDEO_VERSION_V2 = 2;
+export const VIDEO_VERSION_V4 = 4;
 export const FLAG_KEYFRAME = 1 << 0;
 export const VIDEO_HEADER_LEN_V2 = 18;
 export const VIDEO_HEADER_LEN = 26;
+export const VIDEO_HEADER_LEN_V4 = 30;
 
 export type VideoAccessUnit = {
   seq: number;
@@ -15,6 +17,7 @@ export type VideoAccessUnit = {
   keyframe: boolean;
   annexB: Uint8Array;
   stampUs: number;
+  inputWm: number;
 };
 
 export type VideoFragment = {
@@ -25,6 +28,7 @@ export type VideoFragment = {
   fragIdx: number;
   fragCount: number;
   stampUs: number;
+  inputWm: number;
   payload: Uint8Array;
 };
 
@@ -32,6 +36,12 @@ export type VideoFragment = {
 const FEC_LEN_PREFIX = 2;
 /** Must match `VIDEO_MAX_FRAGMENT_PAYLOAD` in crates/proto/src/video_frame.rs. */
 export const VIDEO_MAX_FRAGMENT_PAYLOAD = 14_000;
+
+function headerLen(ver: number): number {
+  if (ver === VIDEO_VERSION_V4) return VIDEO_HEADER_LEN_V4;
+  if (ver === VIDEO_VERSION) return VIDEO_HEADER_LEN;
+  return VIDEO_HEADER_LEN_V2;
+}
 
 export function decodeClvdFragment(
   buf: ArrayBuffer | ArrayBufferView
@@ -44,9 +54,11 @@ export function decodeClvdFragment(
   const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
   if (magic !== VIDEO_MAGIC) return null;
   const ver = u8[4];
-  if (ver !== VIDEO_VERSION && ver !== VIDEO_VERSION_V2) return null;
-  const headerLen = ver === VIDEO_VERSION ? VIDEO_HEADER_LEN : VIDEO_HEADER_LEN_V2;
-  if (u8.byteLength < headerLen) return null;
+  if (ver !== VIDEO_VERSION && ver !== VIDEO_VERSION_V2 && ver !== VIDEO_VERSION_V4) {
+    return null;
+  }
+  const hlen = headerLen(ver);
+  if (u8.byteLength < hlen) return null;
   const flags = u8[5];
   const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   const width = view.getUint16(6, true);
@@ -54,9 +66,14 @@ export function decodeClvdFragment(
   const seq = view.getUint32(10, true);
   const fragIdx = view.getUint16(14, true);
   const fragCount = view.getUint16(16, true);
-  const stampUs = ver === VIDEO_VERSION ? Number(view.getBigUint64(18, true)) : 0;
-  // fragIdx === fragCount is legal — it marks the FEC parity fragment, one
-  // slot past the last data index. Only fragIdx > fragCount is malformed.
+  let stampUs = 0;
+  let inputWm = 0;
+  if (ver === VIDEO_VERSION_V4) {
+    stampUs = Number(view.getBigUint64(18, true));
+    inputWm = view.getUint32(26, true);
+  } else if (ver === VIDEO_VERSION) {
+    stampUs = Number(view.getBigUint64(18, true));
+  }
   if (fragCount === 0 || fragIdx > fragCount) return null;
   return {
     seq,
@@ -66,19 +83,11 @@ export function decodeClvdFragment(
     fragIdx,
     fragCount,
     stampUs,
-    payload: u8.subarray(headerLen),
+    inputWm,
+    payload: u8.subarray(hlen),
   };
 }
 
-/**
- * Reconstruct the fragment at `missing` from the rest plus parity.
- *
- * Mirrors `recover_fragment` in crates/proto/src/video_frame.rs — keep them
- * in lockstep, the wire format is shared. XOR-ing every present fragment
- * (zero-padded to VIDEO_MAX_FRAGMENT_PAYLOAD) against the parity XOR leaves
- * exactly the missing fragment, padded the same way; only the last fragment
- * in an access unit can be short, so its length travels in the parity payload.
- */
 function recoverFragment(
   parts: (Uint8Array | null)[],
   missing: number,
@@ -101,15 +110,6 @@ function recoverFragment(
   return acc.subarray(0, wantLen);
 }
 
-/**
- * Reassemble unordered CLVD fragments into a full access unit.
- *
- * Recovers one missing data fragment via XOR parity when the host sent one
- * (see `encode_fragments_with_fec` in crates/proto/src/video_frame.rs) — a
- * dropped fragment on this unordered, unreliable channel otherwise costs a
- * full keyframe round trip. Two or more losses in one access unit still need
- * that keyframe; this only removes it as the response to a single loss.
- */
 export class ClvdAssembler {
   private seq: number | null = null;
   private width = 0;
@@ -117,6 +117,7 @@ export class ClvdAssembler {
   private keyframe = false;
   private fragCount = 0;
   private stampUs = 0;
+  private inputWm = 0;
   private parts: (Uint8Array | null)[] = [];
   private parity: Uint8Array | null = null;
 
@@ -128,6 +129,7 @@ export class ClvdAssembler {
       this.keyframe = frag.keyframe;
       this.fragCount = frag.fragCount;
       this.stampUs = frag.stampUs;
+      this.inputWm = frag.inputWm;
       this.parts = Array.from({ length: frag.fragCount }, () => null);
       this.parity = null;
     }
@@ -167,6 +169,7 @@ export class ClvdAssembler {
       keyframe: this.keyframe,
       annexB,
       stampUs: this.stampUs,
+      inputWm: this.inputWm,
     };
     this.seq = null;
     this.parts = [];

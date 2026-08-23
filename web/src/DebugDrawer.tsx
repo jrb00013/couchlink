@@ -15,6 +15,10 @@ export type PresentSummary = {
   ageBand?: string;
   /** Ms since last pad send at paint (client-local lower bound). */
   inputFreshnessMs?: number;
+  /** Input→photon p50 (est.) — needs CLVD input_wm. */
+  photonP50Ms?: number;
+  /** Surplus p50 = photon − RTT (est.). */
+  surplusP50Ms?: number;
 };
 
 export type BottleneckCheck = {
@@ -432,8 +436,14 @@ export default function DebugDrawer({
                     ? ` · ${present.ageMs.toFixed(1)}ms age${present.ageBand ? ` (${present.ageBand})` : ""}`
                     : ""
                 }${
-                  present.inputFreshnessMs != null
-                    ? ` · input ${present.inputFreshnessMs.toFixed(0)}ms`
+                  present.photonP50Ms != null
+                    ? ` · photon ${present.photonP50Ms.toFixed(0)}ms (est.)`
+                    : present.inputFreshnessMs != null
+                      ? ` · input ${present.inputFreshnessMs.toFixed(0)}ms`
+                      : ""
+                }${
+                  present.surplusP50Ms != null
+                    ? ` · S ${present.surplusP50Ms.toFixed(0)}ms`
                     : ""
                 }${present.dropped > 0 ? ` · ${present.dropped} dropped` : ""}`}
               />
