@@ -26,6 +26,8 @@ use couchlink_capture_bridge::EncodeTarget;
 /// the governor climbed to 5000 kbps, immediately shed 7–19%, stepped back
 /// to 2500, and the yo-yo dropped IDRs that freeze WebCodecs.
 const DOWN_TRIGGER_PCT: u32 = 8;
+/// Consecutive bad windows before stepping down — kills 5s yo-yo (5↔2.5 Mbps).
+const DOWN_AFTER_WINDOWS: u32 = 2;
 /// Clean windows required before climbing. Two 5s windows was ~10s at the
 /// floor then a failed climb — forever. Eight windows is ~40s of real
 /// headroom before we spend the extra bitrate.
@@ -40,6 +42,8 @@ pub struct LinkGov {
     current: EncodeTarget,
     /// Consecutive clean windows (no triggering sheds).
     clean_windows: u32,
+    /// Bad windows in a row — hysteresis so one 9% blip does not floor bitrate.
+    bad_windows: u32,
 }
 
 /// The rung ladder for 3-friend WAN: **hold host fps**, step bitrate only.
@@ -81,6 +85,7 @@ impl LinkGov {
         Self {
             current: baseline,
             clean_windows: 0,
+            bad_windows: 0,
             baseline,
         }
     }
@@ -96,14 +101,19 @@ impl LinkGov {
 
         if drop_pct > DOWN_TRIGGER_PCT {
             self.clean_windows = 0;
-            // Step down one rung toward trickle, never below it.
-            let step = index_of(&rungs, self.current)
-                .map(|i| rungs[(i + 1).min(rungs.len() - 1)])
-                .unwrap_or(self.current);
-            if step != self.current {
-                self.current = step;
+            self.bad_windows += 1;
+            if self.bad_windows >= DOWN_AFTER_WINDOWS {
+                self.bad_windows = 0;
+                // Step down one rung toward the floor, never below it.
+                let step = index_of(&rungs, self.current)
+                    .map(|i| rungs[(i + 1).min(rungs.len() - 1)])
+                    .unwrap_or(self.current);
+                if step != self.current {
+                    self.current = step;
+                }
             }
         } else {
+            self.bad_windows = 0;
             self.clean_windows += 1;
             if self.clean_windows >= UP_AFTER_CLEAN_WINDOWS {
                 self.clean_windows = 0;
@@ -153,7 +163,7 @@ mod tests {
     fn persistent_shed_steps_down_to_trickle() {
         let mut gov = LinkGov::new(P720);
         let mut seen = vec![];
-        // Saturate: every window sheds. The ladder should descend to the floor.
+        // Saturate: every window sheds. Hysteresis: two bad windows per rung step.
         for _ in 0..20 {
             let t = gov.on_window(40, 100);
             if seen.last() != Some(&t) {
@@ -198,6 +208,7 @@ mod tests {
     fn two_clean_windows_do_not_climb() {
         let mut gov = LinkGov::new(P720);
         gov.on_window(40, 100);
+        gov.on_window(40, 100); // hysteresis: second bad window steps down
         let down = gov.current();
         assert_ne!(down, P720);
         gov.on_window(0, 60);
@@ -214,8 +225,9 @@ mod tests {
         let mut gov = LinkGov::new(P720);
         let after_blip = gov.on_window(10, 100); // 10% shed > 8% trigger
         assert_eq!(after_blip, freeze(gov.current()));
-        // One bad window alone is below the ladder floor — may still step; just
-        // assert we then recover and never go below trickle.
+        // One bad window alone must not step — hysteresis needs two in a row.
+        let still = gov.on_window(0, 60);
+        assert_eq!(still, after_blip);
         assert!(after_blip.fps >= 1);
         let rungs = rungs_from(&P720);
         assert!(index_of(&rungs, after_blip).is_some());
