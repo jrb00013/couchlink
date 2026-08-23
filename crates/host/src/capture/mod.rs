@@ -261,13 +261,24 @@ fn respawn_command(root: &std::path::Path, script: &std::path::Path, configured:
 /// closing — there is no game window left to steal focus *from*, and silently
 /// falling back to desktop capture replaced "the game I picked" with "the
 /// whole desktop" without telling anyone why. So an explicitly pinned source
-/// passes through untouched, and anything else respawns as `picker`: the host
-/// sees the selector again, picks the new window, and the stream resumes on it.
-fn respawn_capture_source(configured: Option<String>) -> String {
+/// passes through untouched. When `COUCHLINK_CAPTURE_WINDOW` is set, respawn
+/// retries that title (no picker). Otherwise unpinned sessions reopen the picker.
+pub(crate) fn respawn_capture_source(configured: Option<String>) -> String {
+    respawn_capture_source_inner(configured, window_capture_pinned())
+}
+
+fn respawn_capture_source_inner(configured: Option<String>, pinned_window: bool) -> String {
     match configured {
         Some(s) if !s.is_empty() => s,
+        _ if pinned_window => "window".to_string(),
         _ => "picker".to_string(),
     }
+}
+
+fn window_capture_pinned() -> bool {
+    std::env::var("COUCHLINK_CAPTURE_WINDOW")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
 }
 
 pub fn is_wsl() -> bool {
@@ -328,20 +339,32 @@ mod tests {
     /// closing the selected window pops the capture selector back up instead
     /// of silently falling back to desktop capture.
     #[test]
+    fn pinned_window_title_respawns_window_not_picker() {
+        assert_eq!(
+            respawn_capture_source_inner(None, true),
+            "window"
+        );
+    }
+
+    #[test]
     fn unpinned_respawn_reopens_the_picker() {
-        assert_eq!(respawn_capture_source(None), "picker");
+        assert_eq!(respawn_capture_source_inner(None, false), "picker");
     }
 
     #[test]
     fn empty_capture_source_counts_as_unpinned() {
-        assert_eq!(respawn_capture_source(Some(String::new())), "picker");
+        assert_eq!(respawn_capture_source_inner(Some(String::new()), false), "picker");
     }
 
     #[test]
     fn explicit_picker_stays_picker() {
-        assert_eq!(respawn_capture_source(Some("picker".into())), "picker");
+        assert_eq!(respawn_capture_source_inner(Some("picker".into()), false), "picker");
     }
 
+    /// The whole point of the feature: a session that started from the picker
+    /// (no pinned source — the default) must respawn with the picker again, so
+    /// closing the selected window pops the capture selector back up instead
+    /// of silently falling back to desktop capture.
     /// Someone who pinned `COUCHLINK_CAPTURE_SOURCE=desktop` (or window mode)
     /// asked for that source explicitly — an unattended respawn must not turn
     /// it into a dialog.
@@ -358,13 +381,13 @@ mod tests {
             .map(|v| v.to_string_lossy().into_owned())
     }
 
-    /// The command the host actually spawns must carry the decided source, so
-    /// `ensure-win-capture.sh`'s `source_mode="${COUCHLINK_CAPTURE_SOURCE:-picker}"`
-    /// resolves to picker and its picker branch (Normal-style Start-Process, the
-    /// only launch path that surfaces GraphicsCapturePicker) is what runs.
     #[test]
-    fn respawn_command_carries_picker_when_unpinned() {
-        let cmd = respawn_command(std::path::Path::new("/tmp"), std::path::Path::new("/tmp/e.sh"), None);
+    fn respawn_command_carries_explicit_picker_source() {
+        let cmd = respawn_command(
+            std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp/e.sh"),
+            Some("picker".into()),
+        );
         assert_eq!(
             env_of(&cmd, "COUCHLINK_CAPTURE_SOURCE").as_deref(),
             Some("picker")
