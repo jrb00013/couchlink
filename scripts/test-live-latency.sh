@@ -17,3 +17,4 @@ cd "$ROOT/web"
 npm test -- --run presentAge keyboardMouse webCodecsCanvas lowLatencyCanvas inputPhoton 2>&1
 
 echo "==> live-latency regression: OK"
+echo "    host $(cargo test -p couchlink-host latency_live_sim 2>&1 | rg -c '^test .* \.\.\. ok$' || echo 0) sim tests"
