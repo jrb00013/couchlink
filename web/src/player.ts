@@ -200,7 +200,9 @@ export class CouchlinkPlayer {
 
   /** Attach or detach a keyboard/mouse input source. Call with null to disable. */
   setKbm(kbm: KeyboardMouseInput | null) {
+    if (this.kbm) this.kbm.onActivity = null;
     this.kbm = kbm;
+    if (kbm) kbm.onActivity = () => this.flushKbmPadImmediate();
   }
 
   /** Attach or detach the mobile touch controller. Call with null to disable. */
@@ -939,6 +941,14 @@ export class CouchlinkPlayer {
     this.padDc.send(encodeClpd({ ...held, clientTsMs: now >>> 0 }));
     notePadSent(now, held.seq);
     this.padSent += 1;
+  }
+
+  /** Event-driven kbm send — zero poll wait on button edges (Ricardo-class Φ). */
+  private flushKbmPadImmediate() {
+    const kbm = this.kbm;
+    if (!kbm?.hasInput()) return;
+    this.seq = (this.seq + 1) >>> 0;
+    this.emitPad(kbm.sample(this.seq));
   }
 
   private pollAndSendPad() {
