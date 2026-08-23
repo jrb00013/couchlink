@@ -498,17 +498,16 @@ impl WebRtcHost {
         ))
     }
 
-    /// Sustained sheds before this peer skips non-keyframes (slow-peer isolation).
+    /// Sustained real congestion sheds before this peer enters cautious mode.
     const TRICKLE_ENTER_SHEDS: u32 = 8;
-    /// Clean *keyframe* deliveries while trickling before full rate resumes.
-    /// Deltas are skipped on purpose and must not reset this streak (see PushFate).
-    const TRICKLE_EXIT_OKS: u32 = 8;
+    /// Clean deliveries while cautious before full rate resumes (any frame type).
+    const TRICKLE_EXIT_OKS: u32 = 4;
 
     fn note_shed(&self) {
         self.ok_streak.store(0, Ordering::Relaxed);
         let s = self.shed_streak.fetch_add(1, Ordering::Relaxed) + 1;
         if should_enter_trickle(s) && !self.trickle.swap(true, Ordering::Relaxed) {
-            warn!("peer entering trickle mode — skipping deltas until recovered");
+            warn!("peer entering trickle mode — throttling congested deltas until queue drains");
         }
     }
 
@@ -620,13 +619,11 @@ impl WebRtcHost {
         let path = self.present_path.load(Ordering::Relaxed);
         let (send_rtp, send_dc) = path_flags(path);
         let mut delivered = false;
+        let mut trickle_skip = false;
 
-        // Slow-peer isolation: skip deltas so this peer cannot pin join_all for
-        // healthy friends. Do NOT note_shed — that reset ok_streak and made
-        // trickle a permanent trap (exit needed 30 clean oks that never came).
-        if !keyframe && self.trickle.load(Ordering::Relaxed) {
-            return Ok(PushFate::TrickleSkip);
-        }
+        // Trickle is congestion-gated, not delta-starve: H.264 cannot skip P-frames
+        // mid-GOP without IDR recovery (Sunshine/Moonlight + FrameHandoff pattern).
+        // Old path skipped every delta while trickling → IDR-only → ~1fps paint.
 
         // RTP first when sent at all. It is the only path every browser can
         // decode: Safari has no WebCodecs here, so it falls back to the media
@@ -704,12 +701,17 @@ impl WebRtcHost {
                 }
             } else if dc_open && congested && !keyframe {
                 self.request_keyframe_coalesced();
+                if self.trickle.load(Ordering::Relaxed) {
+                    trickle_skip = true;
+                }
             }
             // Channel not open / congested keyframe → skip silently; IDR_INTERVAL retries.
         }
         if delivered {
             self.note_delivered();
             Ok(PushFate::Delivered)
+        } else if trickle_skip {
+            Ok(PushFate::TrickleSkip)
         } else {
             self.note_shed();
             Ok(PushFate::Shed)
@@ -933,12 +935,23 @@ mod controller_host_tests {
     }
 
     #[test]
+    fn congestion_trickle_skip_is_not_governor_shed() {
+        use crate::webrtc_peer::{governor_shed_counts, PushFate};
+        let (_, shed) = governor_shed_counts(&[
+            PushFate::Delivered,
+            PushFate::TrickleSkip,
+            PushFate::TrickleSkip,
+        ]);
+        assert_eq!(shed, 0);
+    }
+
+    #[test]
     fn trickle_thresholds() {
         assert!(!should_enter_trickle(0));
         assert!(!should_enter_trickle(7));
         assert!(should_enter_trickle(8));
-        assert!(!should_exit_trickle(7));
-        assert!(should_exit_trickle(8));
+        assert!(!should_exit_trickle(3));
+        assert!(should_exit_trickle(4));
     }
 
     #[test]
@@ -1034,5 +1047,5 @@ pub fn should_enter_trickle(shed_streak: u32) -> bool {
 }
 
 pub fn should_exit_trickle(ok_streak: u32) -> bool {
-    ok_streak >= 8
+    ok_streak >= 4
 }
