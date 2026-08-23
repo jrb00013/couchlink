@@ -95,6 +95,15 @@ impl FrameCapture {
         }
     }
 
+    pub fn write_expedite(&mut self) {
+        match self {
+            Self::Windows(c) => c.write_expedite(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.write_expedite(),
+            Self::Local(_) => {}
+        }
+    }
+
     /// Command the Windows encoder to match the stream target. No-op on the local
     /// path, where the host's own encoder already uses the preset directly.
     pub fn set_target(&mut self, target: EncodeTarget) {
@@ -155,37 +164,58 @@ pub(crate) fn respawn_windows_capture() {
         return;
     }
     tracing::warn!("win-capture link has been down too long — relaunching it");
-    if let Err(e) = std::process::Command::new("bash")
-        .arg(&script)
-        .current_dir(&root)
-        // `ensure-win-capture.sh` defaults to the interactive picker, which
-        // `run.sh` launches with `WindowStyle Normal` specifically so it can
-        // steal focus and be clicked (see AllowSetForegroundWindow in
-        // win_capture.rs). That is correct for the user-driven first launch,
-        // but this is an unattended mid-session respawn — re-popping a
-        // foreground picker dialog here yanks focus off the game (and the
-        // remote player's controller input with it, since XInput delivery
-        // depends on whichever window currently has it) for no reason: there
-        // is nothing to click, nobody watching for it, and it just steals
-        // focus until it times out or falls back on its own. Force a
-        // non-interactive capture source instead, unless the caller already
-        // pinned a specific one.
+    let mut cmd = respawn_command(
+        std::path::Path::new(&root),
+        &script,
+        std::env::var("COUCHLINK_CAPTURE_SOURCE").ok(),
+    );
+    if let Err(e) = cmd.spawn() {
+        tracing::warn!("could not relaunch win-capture: {e}");
+    }
+}
+
+/// Build (but do not spawn) the unattended win-capture relaunch. Split from
+/// `respawn_windows_capture` so tests can assert on the environment without
+/// actually launching PowerShell.
+///
+/// The capture source is *not* downgraded here: when the picked window closes,
+/// windows-capture halts the session (`on_closed` → WM_QUIT → the process
+/// exits), and this respawn is what brings capture back — with the picker, so
+/// the selector pops back up and the host picks the next window instead of the
+/// stream silently returning as whole-desktop capture. A source pinned via
+/// `COUCHLINK_CAPTURE_SOURCE` (desktop / window / …) is still honoured exactly.
+fn respawn_command(root: &std::path::Path, script: &std::path::Path, configured: Option<String>) -> std::process::Command {
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(script)
+        .current_dir(root)
         .env(
             "COUCHLINK_CAPTURE_SOURCE",
-            std::env::var("COUCHLINK_CAPTURE_SOURCE")
-                .ok()
-                .filter(|s| s != "picker" && !s.is_empty())
-                .unwrap_or_else(|| "desktop".to_string()),
+            respawn_capture_source(configured),
         )
         // Respawn is unattended — don't cargo-build on every 20s retry.
         // That was opening a blue PowerShell even when the exe was already there.
         .env("COUCHLINK_SKIP_WIN_CAPTURE_BUILD", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        tracing::warn!("could not relaunch win-capture: {e}");
+        .stderr(std::process::Stdio::null());
+    cmd
+}
+
+/// Which capture source a respawned win-capture should use.
+///
+/// `ensure-win-capture.sh` defaults to the interactive picker; an old version
+/// of this path overrode that to `desktop`, reasoning that re-popping a
+/// foreground picker mid-session steals focus for no reason. But the reason
+/// *is* the point now: the outage this fires on is usually the picked window
+/// closing — there is no game window left to steal focus *from*, and silently
+/// falling back to desktop capture replaced "the game I picked" with "the
+/// whole desktop" without telling anyone why. So an explicitly pinned source
+/// passes through untouched, and anything else respawns as `picker`: the host
+/// sees the selector again, picks the new window, and the stream resumes on it.
+fn respawn_capture_source(configured: Option<String>) -> String {
+    match configured {
+        Some(s) if !s.is_empty() => s,
+        _ => "picker".to_string(),
     }
 }
 
@@ -236,4 +266,85 @@ pub fn wsl_windows_host_ip() -> Result<String> {
         }
     }
     bail!("could not determine Windows host IP — set COUCHLINK_WINDOWS_CAPTURE=host:9876")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of the feature: a session that started from the picker
+    /// (no pinned source — the default) must respawn with the picker again, so
+    /// closing the selected window pops the capture selector back up instead
+    /// of silently falling back to desktop capture.
+    #[test]
+    fn unpinned_respawn_reopens_the_picker() {
+        assert_eq!(respawn_capture_source(None), "picker");
+    }
+
+    #[test]
+    fn empty_capture_source_counts_as_unpinned() {
+        assert_eq!(respawn_capture_source(Some(String::new())), "picker");
+    }
+
+    #[test]
+    fn explicit_picker_stays_picker() {
+        assert_eq!(respawn_capture_source(Some("picker".into())), "picker");
+    }
+
+    /// Someone who pinned `COUCHLINK_CAPTURE_SOURCE=desktop` (or window mode)
+    /// asked for that source explicitly — an unattended respawn must not turn
+    /// it into a dialog.
+    #[test]
+    fn pinned_noninteractive_sources_are_honoured() {
+        assert_eq!(respawn_capture_source(Some("desktop".into())), "desktop");
+        assert_eq!(respawn_capture_source(Some("window".into())), "window");
+    }
+
+    fn env_of(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+    }
+
+    /// The command the host actually spawns must carry the decided source, so
+    /// `ensure-win-capture.sh`'s `source_mode="${COUCHLINK_CAPTURE_SOURCE:-picker}"`
+    /// resolves to picker and its picker branch (Normal-style Start-Process, the
+    /// only launch path that surfaces GraphicsCapturePicker) is what runs.
+    #[test]
+    fn respawn_command_carries_picker_when_unpinned() {
+        let cmd = respawn_command(std::path::Path::new("/tmp"), std::path::Path::new("/tmp/e.sh"), None);
+        assert_eq!(
+            env_of(&cmd, "COUCHLINK_CAPTURE_SOURCE").as_deref(),
+            Some("picker")
+        );
+    }
+
+    #[test]
+    fn respawn_command_honours_a_pinned_source() {
+        let cmd = respawn_command(
+            std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp/e.sh"),
+            Some("desktop".into()),
+        );
+        assert_eq!(
+            env_of(&cmd, "COUCHLINK_CAPTURE_SOURCE").as_deref(),
+            Some("desktop")
+        );
+    }
+
+    /// Respawns fire from the frame loop every RESPAWN_RETRY_INTERVAL — they
+    /// must run the relaunch script directly (no rebuild step in between) and
+    /// never inherit this process's stdio.
+    #[test]
+    fn respawn_command_skips_build_and_is_fully_detached() {
+        let cmd = respawn_command(std::path::Path::new("/tmp"), std::path::Path::new("/tmp/e.sh"), None);
+        assert_eq!(
+            env_of(&cmd, "COUCHLINK_SKIP_WIN_CAPTURE_BUILD").as_deref(),
+            Some("1")
+        );
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("bash"));
+        let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();
+        assert_eq!(args, vec![std::ffi::OsString::from("/tmp/e.sh")]);
+    }
 }

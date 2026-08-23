@@ -29,9 +29,10 @@
 use anyhow::{bail, Context, Result};
 use couchlink_capture_bridge::{
     read_frame_body_sync, write_set_target, EncodeTarget, FrameFormat, FrameInfo, FRAME_MAGIC,
-    REQUEST_IDR,
+    EXPEDITE, REQUEST_IDR,
 };
 use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd};
 use std::time::{Duration, Instant};
 use vsock::{VsockStream, VMADDR_CID_HOST};
 
@@ -40,6 +41,12 @@ use super::Captured;
 const IDLE_POLL: Duration = Duration::from_millis(2);
 const DRAIN_POLL: Duration = Duration::from_millis(1);
 const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Budget for one non-blocking Hyper-V connect attempt. Must stay well under
+/// the host's PeerJoined handling latency — a blocking `vsock_connect` here is
+/// exactly what left every friend on "Waiting for host offer" while win-capture
+/// was still launching (or never launched).
+const CONNECT_BUDGET: Duration = Duration::from_millis(250);
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// See `bridge::RESPAWN_AFTER` / `docs/INCIDENT-2026-08-19-terminals-died.md`.
 const RESPAWN_AFTER: Duration = Duration::from_secs(5);
 const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
@@ -71,36 +78,49 @@ pub struct HyperVBridge {
     disconnected_at: Option<Instant>,
     last_respawn: Option<Instant>,
     last_frame_at: Instant,
+    /// Floor between non-blocking connect attempts so the host select loop
+    /// is not spent inside `poll(250ms)` on every idle tick while win-capture
+    /// is still coming up.
+    last_connect_attempt: Option<Instant>,
+    /// Once we have ever held a live stream, mid-session `maybe_respawn` may
+    /// relaunch win-capture as `desktop` (no picker). Before that, a startup
+    /// outage usually means the user is still in the capture picker — killing
+    /// and replacing it with a Hidden desktop capture is exactly why the
+    /// picker "never appeared".
+    ever_connected: bool,
 }
 
 impl HyperVBridge {
-    /// Connect out to win-capture's Hyper-V socket listener on `port`.
-    /// Blocks (retrying) until win-capture is up, matching `WindowsBridge::listen`'s
-    /// "wait for the Windows side" behaviour so callers don't need two code paths.
+    /// Open a Hyper-V capture handle for `port` without blocking on win-capture.
+    ///
+    /// A missing/slow win-capture used to spin forever in `vsock_connect` on the
+    /// host's only async thread — signaling stayed registered, but `PeerJoined`
+    /// was never drained, so every friend hung on "Waiting for host offer".
+    /// Try once with a short budget; if win-capture is not up yet, return
+    /// disconnected and let `capture()` / `maybe_respawn` attach later.
     pub fn connect(port: u32) -> Result<Self> {
         tracing::info!(
             "connecting to couchlink-win-capture over Hyper-V socket (port {port})…"
         );
-        let stream = loop {
-            match VsockStream::connect_with_cid_port(VMADDR_CID_HOST, port) {
-                Ok(s) => break s,
-                Err(e) => {
-                    tracing::debug!("hyperv connect: {e} — retrying (is win-capture running?)");
-                    std::thread::sleep(Duration::from_millis(500));
-                }
+        let (stream, disconnected_at) = match timed_connect(port, CONNECT_BUDGET) {
+            Some(s) => {
+                tracing::info!("Hyper-V capture socket connected");
+                (Some(s), None)
+            }
+            None => {
+                tracing::warn!(
+                    "win-capture not reachable on Hyper-V port {port} yet — \
+                     registering with signaling anyway; capture will attach when ready"
+                );
+                (None, Some(Instant::now()))
             }
         };
-        configure(&stream)?;
-        tracing::info!("Hyper-V capture socket connected");
-        // Do not wait for the first frame here. `read_one` loops until a
-        // frame arrives; if win-capture is still bound to a dead host
-        // connection it never does, and this call sits on the host's only
-        // async thread — PeerJoined queues, no offer is sent, every friend
-        // hangs on "Waiting for host offer". Frames are drained from the
+        // Do not wait for the first frame here. Frames are drained from the
         // select loop via `capture()` once we return.
+        let ever_connected = stream.is_some();
         Ok(Self {
             port,
-            stream: Some(stream),
+            stream,
             width: 0,
             height: 0,
             buf: Vec::new(),
@@ -110,9 +130,11 @@ impl HyperVBridge {
             keyframe: false,
             target: None,
             frames_received: 0,
-            disconnected_at: None,
+            disconnected_at,
             last_respawn: None,
             last_frame_at: Instant::now(),
+            last_connect_attempt: None,
+            ever_connected,
         })
     }
 
@@ -126,22 +148,24 @@ impl HyperVBridge {
     }
 
     fn try_reconnect(&mut self) -> bool {
-        match VsockStream::connect_with_cid_port(VMADDR_CID_HOST, self.port) {
-            Ok(mut stream) => {
-                if configure(&stream).is_err() {
-                    return false;
-                }
-                tracing::info!("Hyper-V capture socket reconnected");
-                if let Some(target) = self.target {
-                    if let Err(e) = write_set_target(&mut stream, target) {
-                        tracing::warn!("could not re-command encode target after reconnect: {e}");
-                    }
-                }
-                self.stream = Some(stream);
-                true
+        if let Some(t) = self.last_connect_attempt {
+            if t.elapsed() < CONNECT_RETRY_INTERVAL {
+                return false;
             }
-            Err(_) => false,
         }
+        self.last_connect_attempt = Some(Instant::now());
+        let Some(mut stream) = timed_connect(self.port, CONNECT_BUDGET) else {
+            return false;
+        };
+        tracing::info!("Hyper-V capture socket reconnected");
+        if let Some(target) = self.target {
+            if let Err(e) = write_set_target(&mut stream, target) {
+                tracing::warn!("could not re-command encode target after reconnect: {e}");
+            }
+        }
+        self.stream = Some(stream);
+        self.ever_connected = true;
+        true
     }
 
     fn read_frame(&mut self, poll: Duration) -> Result<Option<FrameInfo>> {
@@ -201,6 +225,15 @@ impl HyperVBridge {
             if let Err(e) = stream.write_all(&[REQUEST_IDR]) {
                 tracing::warn!("could not request IDR over Hyper-V socket: {e}");
             }
+        }
+    }
+
+    pub fn write_expedite(&mut self) {
+        if self.format != FrameFormat::H264 {
+            return;
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            let _ = stream.write_all(&[EXPEDITE]);
         }
     }
 
@@ -278,6 +311,10 @@ impl HyperVBridge {
     /// See `bridge::WindowsBridge::maybe_respawn` /
     /// `docs/INCIDENT-2026-08-19-terminals-died.md`.
     fn maybe_respawn(&mut self) {
+        if !self.ever_connected {
+            // Picker / first-launch still in progress — do not taskkill it.
+            return;
+        }
         let Some(since) = self.disconnected_at else {
             return;
         };
@@ -292,6 +329,51 @@ impl HyperVBridge {
         self.last_respawn = Some(Instant::now());
         super::respawn_windows_capture();
     }
+}
+
+/// Non-blocking AF_VSOCK connect with a wall-clock budget.
+///
+/// The vsock crate's `connect_with_cid_port` is a blocking `connect(2)`. On
+/// WSL2 that call parks in `vsock_connect` for a long time when nothing is
+/// listening — long enough to freeze PeerJoined handling. We open the socket
+/// ourselves with `SOCK_NONBLOCK`, `poll` for completion, and hand the fd to
+/// `VsockStream` only on success.
+fn timed_connect(port: u32, budget: Duration) -> Option<VsockStream> {
+    use nix::errno::Errno;
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    use nix::sys::socket::sockopt::SocketError;
+    use nix::sys::socket::{
+        connect, getsockopt, socket, AddressFamily, SockFlag, SockType, VsockAddr,
+    };
+
+    let sock = socket(
+        AddressFamily::Vsock,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+        None,
+    )
+    .ok()?;
+    let addr = VsockAddr::new(VMADDR_CID_HOST, port);
+    match connect(sock.as_raw_fd(), &addr) {
+        Ok(()) => {}
+        Err(Errno::EINPROGRESS) => {
+            let mut fds = [PollFd::new(sock.as_fd(), PollFlags::POLLOUT)];
+            let timeout = PollTimeout::try_from(budget).unwrap_or(PollTimeout::ZERO);
+            match poll(&mut fds, timeout) {
+                Ok(0) | Err(_) => return None,
+                Ok(_) => {
+                    let err = getsockopt(&sock, SocketError).ok()?;
+                    if err != 0 {
+                        return None;
+                    }
+                }
+            }
+        }
+        Err(_) => return None,
+    }
+    let stream = unsafe { VsockStream::from_raw_fd(sock.into_raw_fd()) };
+    configure(&stream).ok()?;
+    Some(stream)
 }
 
 fn configure(stream: &VsockStream) -> Result<()> {

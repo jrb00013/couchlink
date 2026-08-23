@@ -4,7 +4,7 @@
 use anyhow::{bail, Context, Result};
 use couchlink_capture_bridge::{
     read_frame_body_sync, write_set_target, EncodeTarget, FrameFormat, FrameInfo, FRAME_MAGIC,
-    REQUEST_IDR,
+    EXPEDITE, REQUEST_IDR,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -83,26 +83,53 @@ pub struct WindowsBridge {
     /// When the last frame (of any kind, including a stale-frame no-op) was
     /// actually pulled off the socket. Drives `FRAME_STALE_AFTER`.
     last_frame_at: Instant,
+    /// See `HyperVBridge::ever_connected` — same startup/picker race.
+    ever_connected: bool,
 }
 
 impl WindowsBridge {
     /// Listen for the Windows capture client (default `0.0.0.0:9876`).
+    ///
+    /// Does **not** block forever on `accept`. A missing win-capture used to
+    /// park the host's only async thread here, so `PeerJoined` was never
+    /// drained and every friend hung on "Waiting for host offer". Bind,
+    /// wait briefly, then return disconnected — `capture()` / `maybe_respawn`
+    /// attach the client when it shows up.
     pub fn listen(bind: &str) -> Result<Self> {
         let listener = TcpListener::bind(bind)
             .with_context(|| format!("bind Windows capture listener on {bind}"))?;
-        tracing::info!("waiting for couchlink-win-capture to connect (Windows → {bind})…");
-        // Generous accept wait — ensure-win-capture may still be building the exe.
-        listener.set_nonblocking(false).context("blocking accept")?;
-        let (stream, peer) = listener
-            .accept()
-            .context("accept Windows capture client (is couchlink-win-capture running?)")?;
-        tracing::info!("Windows capture client connected from {peer}");
-        configure(&stream)?;
-        // From here on, reconnects must never block the host's frame loop.
-        listener.set_nonblocking(true).context("nonblocking accept")?;
-        let mut bridge = Self {
+        tracing::info!("waiting briefly for couchlink-win-capture (Windows → {bind})…");
+        listener
+            .set_nonblocking(true)
+            .context("nonblocking accept")?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut stream = None;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((s, peer)) => {
+                    tracing::info!("Windows capture client connected from {peer}");
+                    configure(&s)?;
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    return Err(e).context("accept Windows capture client");
+                }
+            }
+        }
+        if stream.is_none() {
+            tracing::warn!(
+                "win-capture not connected yet — host will register and attach capture when ready"
+            );
+        }
+        let disconnected_at = stream.is_none().then(Instant::now);
+        let ever_connected = stream.is_some();
+        Ok(Self {
             listener,
-            stream: Some(stream),
+            stream,
             width: 0,
             height: 0,
             buf: Vec::new(),
@@ -112,12 +139,11 @@ impl WindowsBridge {
             keyframe: false,
             target: None,
             frames_received: 0,
-            disconnected_at: None,
+            disconnected_at,
             last_respawn: None,
             last_frame_at: Instant::now(),
-        };
-        bridge.read_one()?;
-        Ok(bridge)
+            ever_connected,
+        })
     }
 
     /// Tell the Windows encoder to match this target. Safe before a format is seen:
@@ -165,6 +191,7 @@ impl WindowsBridge {
                     }
                 }
                 self.stream = Some(stream);
+                self.ever_connected = true;
                 true
             }
             Err(_) => false,
@@ -275,6 +302,15 @@ impl WindowsBridge {
         }
     }
 
+    pub fn write_expedite(&mut self) {
+        if self.format != FrameFormat::H264 {
+            return;
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            let _ = stream.write_all(&[EXPEDITE]);
+        }
+    }
+
     pub fn format(&self) -> FrameFormat {
         self.format
     }
@@ -362,6 +398,9 @@ impl WindowsBridge {
     /// dead win-capture waits forever for a reconnect that nothing triggers —
     /// this is the self-heal that closes that gap.
     fn maybe_respawn(&mut self) {
+        if !self.ever_connected {
+            return;
+        }
         let Some(since) = self.disconnected_at else {
             return;
         };

@@ -103,12 +103,27 @@ if [[ "$ROLE" == "host" && "$PLATFORM" == "macos" ]]; then
 fi
 
 [[ -f .env.couchlink ]] || cp .env.example .env.couchlink
+# Preserve capture overrides from the parent shell across .env.couchlink — otherwise
+# a pinned COUCHLINK_CAPTURE_WINDOW=PCSX2 silently forces window mode and the
+# picker never appears (and win-capture waits forever for a closed emulator).
+_HAS_CAPTURE_SOURCE=0
+_HAS_CAPTURE_WINDOW=0
+[[ -v COUCHLINK_CAPTURE_SOURCE ]] && _HAS_CAPTURE_SOURCE=1
+[[ -v COUCHLINK_CAPTURE_WINDOW ]] && _HAS_CAPTURE_WINDOW=1
+_KEEP_CAPTURE_SOURCE="${COUCHLINK_CAPTURE_SOURCE:-}"
+_KEEP_CAPTURE_WINDOW="${COUCHLINK_CAPTURE_WINDOW:-}"
 # shellcheck disable=SC1091
 # set -a: .env.couchlink assigns without `export`, and these settings have to
 # reach child scripts (ensure-win-capture.sh reads COUCHLINK_PRESET itself).
 set -a
 source .env.couchlink
 set +a
+if [[ "$_HAS_CAPTURE_SOURCE" == "1" ]]; then
+  export COUCHLINK_CAPTURE_SOURCE="$_KEEP_CAPTURE_SOURCE"
+fi
+if [[ "$_HAS_CAPTURE_WINDOW" == "1" ]]; then
+  export COUCHLINK_CAPTURE_WINDOW="$_KEEP_CAPTURE_WINDOW"
+fi
 
 # Drop a persisted ICE address this machine no longer holds.
 #
@@ -399,7 +414,17 @@ trap cleanup EXIT INT TERM
 if [[ "$ROLE" == "host" ]]; then
   ./scripts/start-signaling.sh &
   PIDS+=($!)
-  sleep 1
+  # Wait until signaling actually accepts TCP — a fixed sleep races the host's
+  # first dial (connection refused) and leaves friends on "Waiting for host"
+  # until a later retry catches up. Prefer ready over hopeful.
+  _sig_port="${COUCHLINK_BIND:-0.0.0.0:8443}"
+  _sig_port="${_sig_port##*:}"
+  for _ in $(seq 1 50); do
+    if timeout 0.2 bash -c "echo >/dev/tcp/127.0.0.1/${_sig_port}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
   # Mesh on native Linux/macOS: skip TURN. WSL mesh: keep TURN (UDP via portproxy).
   if [[ "$MODE" == "online" ]]; then
     if [[ "$COUCHLINK_USING_MESH" != "1" || "${COUCHLINK_MESH_NEED_TURN:-0}" == "1" ]]; then

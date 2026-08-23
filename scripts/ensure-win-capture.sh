@@ -149,24 +149,58 @@ fi
 # command line is then constant-length regardless of how many capture args
 # there are.
 task_name="couchlink-win-capture"
+# Picker must be visible/clickable. schtasks /IT + Hidden PowerShell often never
+# surfaces GraphicsCapturePicker; launching the exe (or its Normal-style wrapper)
+# with Start-Process does. Keep the Scheduled Task for desktop/window so mid-
+# session respawn still survives a terminal crash.
+_ps_style="Hidden"
+[[ "$source_mode" == "picker" ]] && _ps_style="Normal"
 psw -Command "
-  \$argList = @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
+  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
-  \$quoted = (\$argList | ForEach-Object { '\"' + \$_ + '\"' }) -join ' '
+  \$quoted = (\$argList | ForEach-Object { if (\$_ -match '\s') { '\"' + \$_ + '\"' } else { \$_ } }) -join ' '
   \$localDir = Join-Path \$env:LOCALAPPDATA 'couchlink\bin'
   New-Item -ItemType Directory -Force -Path \$localDir | Out-Null
   \$launcher = Join-Path \$localDir 'run-capture.ps1'
-  Set-Content -Path \$launcher -Value \"powershell.exe -NoProfile -WindowStyle Hidden \$quoted\" -Encoding UTF8
-  schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
-  \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
-    /TR \"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \$launcher\" 2>&1
-  if (\$LASTEXITCODE -ne 0) {
-    Write-Host \"schtasks create failed, falling back to Start-Process (win-capture will NOT survive a terminal crash): \$created\"
-    Start-Process -WindowStyle Hidden powershell.exe -ArgumentList \$argList
+  \$utf8 = New-Object System.Text.UTF8Encoding \$false
+  [System.IO.File]::WriteAllText(\$launcher, \"powershell.exe -NoProfile -WindowStyle $_ps_style -ExecutionPolicy Bypass \$quoted\", \$utf8)
+  if ('$source_mode' -eq 'picker') {
+    # Interactive first launch: show the picker on the desktop now.
+    Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$argList
   } else {
-    schtasks.exe /Run /TN '$task_name' | Out-Null
+    schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
+    \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
+      /TR \"powershell.exe -NoProfile -WindowStyle $_ps_style -ExecutionPolicy Bypass -File \$launcher\" 2>&1
+    if (\$LASTEXITCODE -ne 0) {
+      Write-Host \"schtasks create failed, falling back to Start-Process: \$created\"
+      Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$argList
+    } else {
+      schtasks.exe /Run /TN '$task_name' | Out-Null
+    }
   }
 " >/dev/null
 
-echo "==> Windows capture launched (choose a window in the picker if it appears)"
+echo "==> Windows capture launched (source=$source_mode — choose a window in the picker if it appears)"
+# Confirm the capture process actually came up. schtasks /Run can succeed while
+# the task's PowerShell exits immediately (bad args, missing exe), and the host
+# then sits without video — or, before the non-blocking connect fix, blocked
+# forever waiting for a socket that never appears.
+if command -v tasklist.exe >/dev/null 2>&1; then
+  for _ in $(seq 1 25); do
+    if tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
+      | grep -qi couchlink-win-capture; then
+      exit 0
+    fi
+    # Window-mode launcher is the PowerShell retry loop until the title exists;
+    # that still counts as "capture is starting" for the picker/desktop case we
+    # care about here.
+    if tasklist.exe /FI "IMAGENAME eq powershell.exe" 2>/dev/null \
+      | grep -qi powershell; then
+      # Can't tell which powershell — keep waiting briefly for the exe.
+      :
+    fi
+    sleep 0.2
+  done
+  echo "warning: couchlink-win-capture.exe not visible yet — host will keep trying (picker may still appear)" >&2
+fi
 exit 0

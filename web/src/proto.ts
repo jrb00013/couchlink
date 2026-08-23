@@ -70,6 +70,8 @@ export type SignalMessage =
       target_height: number;
       target_fps: number;
       target_bitrate_kbps: number;
+      age_p50_ms?: number;
+      age_p95_ms?: number;
     };
 
 export function send(ws: WebSocket, msg: SignalMessage) {

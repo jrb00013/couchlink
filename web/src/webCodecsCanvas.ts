@@ -1,7 +1,8 @@
-//! WebCodecs H.264 decode → desynchronized canvas (DataChannel path).
+//! WebCodecs H.264 decode → latest-frame-wins canvas (DataChannel path).
 //!
-//! Bypasses WebRTC media / jitter buffer entirely. Requires a secure context
-//! (https, localhost, or 127.0.0.1).
+//! Presentation is real-time, not ordered media: never wait for an older frame
+//! just because it belongs to the sequence. Decoder output parks one pending
+//! VideoFrame; requestAnimationFrame paints only the newest.
 
 import { clog, cwarn } from "./log";
 import type { VideoAccessUnit } from "./clvd";
@@ -12,6 +13,13 @@ import {
   codecStringFromSps,
   extractParamSets,
 } from "./h264Avc";
+import {
+  ageBand,
+  AGE_DROP_MS,
+  shouldReplacePending,
+  shouldSkipDecode,
+  type AgeBand,
+} from "./presentAge";
 
 export function canUseWebCodecs(): boolean {
   return (
@@ -59,11 +67,33 @@ export type WebCodecsStats = {
   width: number;
   height: number;
   decodeMs: number;
+  /** Receive → present age of the last painted frame (ms). */
+  ageMs: number;
+  ageBand: AgeBand;
 };
+
+/** Fired when a frame is actually painted — for host age_echo. */
+export type PaintedAge = {
+  seq: number;
+  stampUs: number;
+  recvMs: number;
+  paintMs: number;
+};
+
+type FrameMeta = {
+  seq: number;
+  stampUs: number;
+  recvMs: number;
+};
+
+/** Microsecond-scale chunk timestamp from AU seq (matches EncodedVideoChunk). */
+function chunkTimestampUs(seq: number): number {
+  return seq * 16_666;
+}
 
 /**
  * Decodes H.264 access units (Annex-B on the wire → AVCC for WebCodecs)
- * and paints immediately to canvas.
+ * and presents the newest decoded frame on rAF (latest-frame-wins).
  */
 export class WebCodecsCanvasView {
   private decoder: VideoDecoder | null = null;
@@ -77,10 +107,13 @@ export class WebCodecsCanvasView {
   private windowStart = 0;
   private lastW = 0;
   private lastH = 0;
+  private lastAgeMs = 0;
+  private lastAgeBand: AgeBand = "ok";
   private onStats: ((s: WebCodecsStats) => void) | null = null;
   private onNeedKeyframe: (() => void) | null = null;
   private onFirstPaint: (() => void) | null = null;
   private onStall: (() => void) | null = null;
+  private onPainted: ((a: PaintedAge) => void) | null = null;
   private lastPli = 0;
   private lastPaintAt = 0;
   private stallTimer: number | null = null;
@@ -89,6 +122,15 @@ export class WebCodecsCanvasView {
   private description: Uint8Array | null = null;
   private codec = "avc1.4D0028";
   private running = false;
+
+  /** Newest decoded frame waiting for the compositor — older ones are closed. */
+  private pending: VideoFrame | null = null;
+  private pendingMeta: FrameMeta | null = null;
+  private pendingTs: number | null = null;
+  private raf = 0;
+
+  /** AU metadata keyed by EncodedVideoChunk timestamp. */
+  private metaByTs = new Map<number, FrameMeta>();
 
   constructor(private canvas: HTMLCanvasElement) {}
 
@@ -108,6 +150,11 @@ export class WebCodecsCanvasView {
   /** Fired when we had picture and then went dark — show the live RTP canvas. */
   setStallHandler(cb: (() => void) | null) {
     this.onStall = cb;
+  }
+
+  /** Fired on each paint with timestamps for host age_echo. */
+  setPaintedHandler(cb: ((a: PaintedAge) => void) | null) {
+    this.onPainted = cb;
   }
 
   /** True once at least one frame has been painted. */
@@ -144,7 +191,11 @@ export class WebCodecsCanvasView {
     this.paintedTotal = 0;
     this.dropped = 0;
     this.decodeMsAccum = 0;
+    this.lastAgeMs = 0;
+    this.lastAgeBand = "ok";
     this.windowStart = performance.now();
+    this.clearPending();
+    this.metaByTs.clear();
 
     if (!this.createDecoder()) {
       this.stop();
@@ -154,7 +205,7 @@ export class WebCodecsCanvasView {
     this.lastPaintAt = 0;
     if (this.stallTimer !== null) window.clearInterval(this.stallTimer);
     this.stallTimer = window.setInterval(() => this.checkStall(), 500);
-    clog("webcodecs canvas ready", {
+    clog("webcodecs canvas ready (latest-frame-wins)", {
       secureContext: window.isSecureContext,
       desynchronized:
         (
@@ -170,8 +221,7 @@ export class WebCodecsCanvasView {
     try {
       this.decoder = new VideoDecoder({
         output: (frame) => {
-          this.paint(frame);
-          frame.close();
+          this.parkDecoded(frame);
         },
         error: (e) => {
           cwarn("VideoDecoder error", String(e));
@@ -190,6 +240,8 @@ export class WebCodecsCanvasView {
   private resetForKeyframe() {
     this.waitingKeyframe = true;
     this.configured = false;
+    this.clearPending();
+    this.metaByTs.clear();
     try {
       this.decoder?.close();
     } catch {
@@ -200,7 +252,77 @@ export class WebCodecsCanvasView {
     this.requestKeyframe();
   }
 
-  push(au: VideoAccessUnit) {
+  /**
+   * Park the newest decoded frame; close any older pending frame.
+   * Presentation happens on rAF — never drain a queue of old pictures.
+   */
+  private parkDecoded(frame: VideoFrame) {
+    const ts = frame.timestamp;
+    const meta = this.metaByTs.get(ts) ?? null;
+    if (meta) this.metaByTs.delete(ts);
+    // Drop orphaned meta entries so the map cannot grow without bound.
+    if (this.metaByTs.size > 64) {
+      const first = this.metaByTs.keys().next().value;
+      if (first !== undefined) this.metaByTs.delete(first);
+    }
+
+    if (!shouldReplacePending(this.pendingTs, ts)) {
+      frame.close();
+      this.dropped += 1;
+      return;
+    }
+
+    if (this.pending) {
+      this.pending.close();
+      this.dropped += 1;
+    }
+    this.pending = frame;
+    this.pendingMeta = meta;
+    this.pendingTs = ts;
+    this.schedulePresent();
+  }
+
+  private schedulePresent() {
+    if (this.raf) return;
+    this.raf = requestAnimationFrame(() => {
+      this.raf = 0;
+      this.presentLatest();
+    });
+  }
+
+  private presentLatest() {
+    const frame = this.pending;
+    if (!frame) return;
+    const meta = this.pendingMeta;
+    this.pending = null;
+    this.pendingMeta = null;
+    this.pendingTs = null;
+
+    const paintMs = performance.now();
+    const recvMs = meta?.recvMs ?? paintMs;
+    const ageMs = Math.max(0, paintMs - recvMs);
+    const band = ageBand(ageMs);
+
+    // Age > DROP: still show the newest (freshness), but count as a drop signal
+    // so the HUD/stats make the overshoot visible. Never wait for an older frame.
+    if (band === "drop" || band === "emergency") {
+      // Keep painting — interactive display prefers a late newest over a blank.
+    }
+
+    this.paint(frame, ageMs, band);
+    frame.close();
+
+    if (meta) {
+      this.onPainted?.({
+        seq: meta.seq,
+        stampUs: meta.stampUs,
+        recvMs: meta.recvMs,
+        paintMs,
+      });
+    }
+  }
+
+  push(au: VideoAccessUnit, recvMs = performance.now()) {
     const dec = this.decoder;
     if (!dec || dec.state === "closed") return;
 
@@ -247,12 +369,22 @@ export class WebCodecsCanvasView {
         });
       }
 
-      if (dec.decodeQueueSize > 2) {
+      if (shouldSkipDecode(dec.decodeQueueSize, keyframe)) {
         // Decoder is backed up locally (slow paint/GPU, not a network issue).
         // Drop the frame to let it catch up, but do NOT set waitingKeyframe —
         // the decoder is still configured and the last keyframe is still valid.
-        // Requesting an IDR here just floods the host with PLIs and makes the
-        // stream degenerate into keyframe-only mode.
+        this.dropped += 1;
+        return;
+      }
+
+      // If we already hold a pending frame older than the drop budget, prefer
+      // not to enqueue more deltas until the presenter drains.
+      if (
+        this.pending &&
+        this.pendingMeta &&
+        !keyframe &&
+        performance.now() - this.pendingMeta.recvMs > AGE_DROP_MS
+      ) {
         this.dropped += 1;
         return;
       }
@@ -263,10 +395,13 @@ export class WebCodecsCanvasView {
         return;
       }
 
+      const ts = chunkTimestampUs(au.seq);
+      this.metaByTs.set(ts, { seq: au.seq, stampUs: au.stampUs, recvMs });
+
       const t0 = performance.now();
       const chunk = new EncodedVideoChunk({
         type: keyframe ? "key" : "delta",
-        timestamp: au.seq * 16_666,
+        timestamp: ts,
         data: avcc,
       });
       dec.decode(chunk);
@@ -285,7 +420,7 @@ export class WebCodecsCanvasView {
     this.onNeedKeyframe?.();
   }
 
-  private paint(frame: VideoFrame) {
+  private paint(frame: VideoFrame, ageMs: number, band: AgeBand) {
     const ctx = this.ctx;
     if (!ctx) return;
     const w = frame.displayWidth || frame.codedWidth;
@@ -300,6 +435,8 @@ export class WebCodecsCanvasView {
     this.painted += 1;
     this.paintedTotal += 1;
     this.lastPaintAt = performance.now();
+    this.lastAgeMs = ageMs;
+    this.lastAgeBand = band;
     if (this.paintedTotal === 1) {
       this.onFirstPaint?.();
     }
@@ -310,14 +447,11 @@ export class WebCodecsCanvasView {
       const n = Math.max(this.painted, 1);
       const presentFps = Math.round(this.painted / elapsed);
       const decodeMs = this.decodeMsAccum / n;
-      // This is the real path for Chrome: WebCodecs + CLVD paints directly,
-      // bypassing the RTP jitter buffer entirely. Every latency number logged
-      // elsewhere tonight came from getStats() on the RTP receiver — a shadow
-      // stream nobody was watching. This is the first one taken from the
-      // pipeline actually on screen.
       clog("webcodecs stats", {
         presentFps,
         decodeMsAvg: Math.round(decodeMs * 10) / 10,
+        ageMs: Math.round(this.lastAgeMs * 10) / 10,
+        ageBand: this.lastAgeBand,
         dropped: this.dropped,
         width: this.lastW,
         height: this.lastH,
@@ -330,12 +464,31 @@ export class WebCodecsCanvasView {
         width: this.lastW,
         height: this.lastH,
         decodeMs,
+        ageMs: this.lastAgeMs,
+        ageBand: this.lastAgeBand,
       });
       this.painted = 0;
       this.dropped = 0;
       this.decodeMsAccum = 0;
       this.windowStart = now;
     }
+  }
+
+  private clearPending() {
+    if (this.raf) {
+      cancelAnimationFrame(this.raf);
+      this.raf = 0;
+    }
+    if (this.pending) {
+      try {
+        this.pending.close();
+      } catch {
+        /* ignore */
+      }
+      this.pending = null;
+    }
+    this.pendingMeta = null;
+    this.pendingTs = null;
   }
 
   private checkStall() {
@@ -353,6 +506,8 @@ export class WebCodecsCanvasView {
       window.clearInterval(this.stallTimer);
       this.stallTimer = null;
     }
+    this.clearPending();
+    this.metaByTs.clear();
     try {
       this.decoder?.close();
     } catch {

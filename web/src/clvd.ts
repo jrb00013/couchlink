@@ -2,9 +2,11 @@
 
 export const VIDEO_CHANNEL = "video";
 export const VIDEO_MAGIC = "CLVD";
-export const VIDEO_VERSION = 2;
+export const VIDEO_VERSION = 3;
+export const VIDEO_VERSION_V2 = 2;
 export const FLAG_KEYFRAME = 1 << 0;
-export const VIDEO_HEADER_LEN = 18;
+export const VIDEO_HEADER_LEN_V2 = 18;
+export const VIDEO_HEADER_LEN = 26;
 
 export type VideoAccessUnit = {
   seq: number;
@@ -12,6 +14,7 @@ export type VideoAccessUnit = {
   height: number;
   keyframe: boolean;
   annexB: Uint8Array;
+  stampUs: number;
 };
 
 export type VideoFragment = {
@@ -21,6 +24,7 @@ export type VideoFragment = {
   keyframe: boolean;
   fragIdx: number;
   fragCount: number;
+  stampUs: number;
   payload: Uint8Array;
 };
 
@@ -36,10 +40,13 @@ export function decodeClvdFragment(
     buf instanceof ArrayBuffer
       ? new Uint8Array(buf)
       : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-  if (u8.byteLength < VIDEO_HEADER_LEN) return null;
+  if (u8.byteLength < VIDEO_HEADER_LEN_V2) return null;
   const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
   if (magic !== VIDEO_MAGIC) return null;
-  if (u8[4] !== VIDEO_VERSION) return null;
+  const ver = u8[4];
+  if (ver !== VIDEO_VERSION && ver !== VIDEO_VERSION_V2) return null;
+  const headerLen = ver === VIDEO_VERSION ? VIDEO_HEADER_LEN : VIDEO_HEADER_LEN_V2;
+  if (u8.byteLength < headerLen) return null;
   const flags = u8[5];
   const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   const width = view.getUint16(6, true);
@@ -47,6 +54,7 @@ export function decodeClvdFragment(
   const seq = view.getUint32(10, true);
   const fragIdx = view.getUint16(14, true);
   const fragCount = view.getUint16(16, true);
+  const stampUs = ver === VIDEO_VERSION ? Number(view.getBigUint64(18, true)) : 0;
   // fragIdx === fragCount is legal — it marks the FEC parity fragment, one
   // slot past the last data index. Only fragIdx > fragCount is malformed.
   if (fragCount === 0 || fragIdx > fragCount) return null;
@@ -57,7 +65,8 @@ export function decodeClvdFragment(
     keyframe: (flags & FLAG_KEYFRAME) !== 0,
     fragIdx,
     fragCount,
-    payload: u8.subarray(VIDEO_HEADER_LEN),
+    stampUs,
+    payload: u8.subarray(headerLen),
   };
 }
 
@@ -107,6 +116,7 @@ export class ClvdAssembler {
   private height = 0;
   private keyframe = false;
   private fragCount = 0;
+  private stampUs = 0;
   private parts: (Uint8Array | null)[] = [];
   private parity: Uint8Array | null = null;
 
@@ -117,6 +127,7 @@ export class ClvdAssembler {
       this.height = frag.height;
       this.keyframe = frag.keyframe;
       this.fragCount = frag.fragCount;
+      this.stampUs = frag.stampUs;
       this.parts = Array.from({ length: frag.fragCount }, () => null);
       this.parity = null;
     }
@@ -155,6 +166,7 @@ export class ClvdAssembler {
       height: this.height,
       keyframe: this.keyframe,
       annexB,
+      stampUs: this.stampUs,
     };
     this.seq = null;
     this.parts = [];

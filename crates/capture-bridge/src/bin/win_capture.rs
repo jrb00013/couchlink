@@ -107,6 +107,7 @@ mod run {
     /// needs something it can decode from scratch). Read by the capture thread,
     /// which owns the encoder.
     static IDR_REQUESTED: AtomicBool = AtomicBool::new(false);
+    static EXPEDITE_ONCE: AtomicBool = AtomicBool::new(false);
 
     /// The encode target the host wants us to match. Written only by the socket
     /// reader when a SET_TARGET command arrives; read by the capture thread on
@@ -255,6 +256,9 @@ mod run {
                             // `latest` meanwhile, so we always submit the freshest
                             // frame rather than an older queued one.
                             let now = Instant::now();
+                            if EXPEDITE_ONCE.swap(false, Ordering::Relaxed) {
+                                next_submit = now;
+                            }
                             if next_submit > now {
                                 std::thread::sleep(next_submit - now);
                             }
@@ -700,6 +704,9 @@ mod run {
                     couchlink_capture_bridge::REQUEST_IDR => {
                         IDR_REQUESTED.store(true, Ordering::Relaxed);
                     }
+                    couchlink_capture_bridge::EXPEDITE => {
+                        EXPEDITE_ONCE.store(true, Ordering::Relaxed);
+                    }
                     couchlink_capture_bridge::SET_TARGET => {
                         let mut body = [0u8; 16];
                         if reader.read_exact(&mut body).is_err() {
@@ -713,7 +720,7 @@ mod run {
                             bitrate_kbps: u32le(12),
                         });
                     }
-                    _ => return, // unknown command = protocol mismatch
+                    _ => {} // unknown one-byte command: do not tear down capture
                 },
             }
         }

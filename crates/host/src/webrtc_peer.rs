@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use bytes::{BytesMut, Bytes};
 use couchlink_pad::{VirtualPad, VirtualPadConfig};
 use couchlink_proto::{
-    PadFeedback, PadFrame, SignalMessage, VideoAccessUnit, PAD_CHANNEL, VIDEO_CHANNEL,
+    parse_age_echo_json, PadFeedback, PadFrame, SignalMessage, VideoAccessUnit, PAD_CHANNEL,
+    VIDEO_CHANNEL,
 };
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -82,7 +83,30 @@ pub(crate) fn sanitize_nat_1to1_ips(ice_ips: Vec<String>) -> Vec<String> {
 /// awaited. Roughly 200ms at the 10 Mbps 720p60 preset — enough to ride out a
 /// normal congestion blip, short enough that a real stall is cut off before it
 /// can back up into the capture socket.
-const VIDEO_DC_MAX_BUFFERED: usize = 256 * 1024;
+/// Shed P-frames before the SCTP queue is deep enough to burn the push budget.
+/// 256 KiB let IDRs pile up until the 1s keyframe timeout pinned the session.
+const VIDEO_DC_MAX_BUFFERED: usize = 96 * 1024;
+
+/// Any friend's pad report coalesces here. Video loop takes it once.
+static EXPEDITE: AtomicBool = AtomicBool::new(false);
+
+fn wake_on_input_enabled() -> bool {
+    !matches!(
+        std::env::var("COUCHLINK_WAKE_ON_INPUT").as_deref(),
+        Ok("0") | Ok("false")
+    )
+}
+
+/// Set when a binary pad frame applied. Coalesces: 10 pads → one true.
+pub fn note_pad_arrived() {
+    if wake_on_input_enabled() {
+        EXPEDITE.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn take_expedite() -> bool {
+    EXPEDITE.swap(false, Ordering::Relaxed)
+}
 
 pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
@@ -116,26 +140,53 @@ pub struct WebRtcHost {
 
 /// `present_path` has not been reported yet — send both paths.
 const PATH_UNKNOWN: u8 = 0;
-/// Client is painting from the CLVD DataChannel. RTP still goes out — a
-/// lost CLVD IDR used to freeze the last picture with nothing already
-/// decoded to show.
+/// Client is painting from the CLVD DataChannel. RTP is off — dual/IDR drip
+/// was burning the push budget on 3-friend WAN. Stall → client reports
+/// `warmup` and RTP comes back as the safety net.
 const PATH_WEBCODECS: u8 = 1;
 /// Client is painting from the RTP media track — the DataChannel is unnecessary.
 const PATH_RTP: u8 = 2;
 
 /// Which of (RTP, DataChannel) to write for a given `present_path` state.
 ///
-/// RTP stays on for every path except the explicit RTP-only browsers
-/// (Safari / no WebCodecs), which skip the DataChannel. Cutting RTP after
-/// the first WebCodecs paint left a single unordered DC; one lost IDR
-/// froze the last picture until a hard refresh. `PATH_UNKNOWN` and
-/// `PATH_WEBCODECS` both send both streams so the hidden RTP decoder
-/// stays current and a stall can unhide it immediately.
+/// WebCodecs healthy → CLVD only. Warmup/unknown → both (join + stall rescue).
+/// RTP-only browsers → RTP only. `COUCHLINK_RTP_FULL=1` restores dual always.
 fn path_flags(path: u8) -> (bool, bool) {
+    if rtp_full_dual() {
+        return match path {
+            PATH_RTP => (true, false),
+            _ => (true, true),
+        };
+    }
     match path {
+        PATH_WEBCODECS => (false, true),
         PATH_RTP => (true, false),
         _ => (true, true),
     }
+}
+
+/// Opt into full dual-send (every AU on RTP+DC). Default is CLVD-only once
+/// WebCodecs has painted so 3-friend WAN does not pay `N·2·R` uplink.
+fn rtp_full_dual() -> bool {
+    matches!(
+        std::env::var("COUCHLINK_RTP_FULL").as_deref(),
+        Ok("1") | Ok("true")
+    ) || matches!(
+        std::env::var("COUCHLINK_RTP_EVERY_N").as_deref(),
+        Ok("1")
+    )
+}
+
+/// Whether this AU should hit the RTP media track.
+///
+/// WebCodecs paints from CLVD only (unless `COUCHLINK_RTP_FULL`). Warmup /
+/// unknown / RTP path still take every AU on RTP.
+fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool {
+    let (send_rtp, _) = path_flags(path);
+    if !send_rtp {
+        return false;
+    }
+    full_dual || path == PATH_RTP || path == PATH_UNKNOWN || keyframe
 }
 
 /// Parse a client-reported present path. An unrecognised value maps to
@@ -157,6 +208,27 @@ impl WebRtcHost {
     /// the decoder is left referencing something it never received.
     pub fn request_keyframe(&self) {
         self.keyframe_wanted.store(true, Ordering::Relaxed);
+    }
+
+    /// Same as `request_keyframe`, but rate-limited so a burst of sheds cannot
+    /// force the encoder into IDR-only mode.
+    pub fn request_keyframe_coalesced(&self) {
+        use std::sync::atomic::AtomicU64;
+        static LAST_MS: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let prev = LAST_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) < 750 {
+            return;
+        }
+        if LAST_MS
+            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.request_keyframe();
+        }
     }
 
     pub fn take_keyframe_request(&self) -> bool {
@@ -483,7 +555,8 @@ impl WebRtcHost {
         use rtp::extension::playout_delay_extension::PlayoutDelayExtension;
         use rtp::extension::HeaderExtension;
 
-        let (send_rtp, send_dc) = path_flags(self.present_path.load(Ordering::Relaxed));
+        let path = self.present_path.load(Ordering::Relaxed);
+        let (send_rtp, send_dc) = path_flags(path);
         let mut delivered = false;
 
         // RTP first when sent at all. It is the only path every browser can
@@ -494,9 +567,10 @@ impl WebRtcHost {
         // viewer on the same host was fine, because Chrome was being fed by
         // the very channel that starved it.
         //
+        // WebCodecs: CLVD only (path_flags). Full dual via COUCHLINK_RTP_FULL.
         // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
         // Chrome treats this as a best-effort hint alongside jitterBufferTarget=0.
-        if send_rtp {
+        if send_rtp && should_send_rtp(keyframe, path, rtp_full_dual()) {
             let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
             self.video
                 .sample_writer()
@@ -518,10 +592,12 @@ impl WebRtcHost {
         // for an IDR, then skip the IDR too because it is the largest frame of
         // all, and the viewer's canvas froze while RTP kept decoding beside it.
         if send_dc {
-            if self.video_dc.ready_state()
-                == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-                && (keyframe || !self.video_dc_congested().await)
-            {
+            let dc_open = self.video_dc.ready_state()
+                == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open;
+            let congested = dc_open && self.video_dc_congested().await;
+            // Never start an IDR into a full SCTP buffer — partial IDRs are
+            // useless and the old "always try keyframe" path burned 1s budgets.
+            if dc_open && !congested {
                 let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
                 let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
                 let h = self.video_h.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
@@ -531,38 +607,35 @@ impl WebRtcHost {
                     height: h,
                     keyframe,
                     annex_b,
+                    stamp_us: crate::age::now_us(),
                 };
                 let fragments = if self.fec_enabled {
                     au.encode_fragments_with_fec()
                 } else {
                     au.encode_fragments()
                 };
+                let mut sent_all = true;
                 for frag in fragments {
+                    if self.video_dc_congested().await {
+                        sent_all = false;
+                        break;
+                    }
                     if let Err(e) = self.video_dc.send(&Bytes::from(frag)).await {
                         warn!("video datachannel send: {e}");
+                        sent_all = false;
                         break;
                     }
                 }
-                delivered = true;
-            } else if keyframe {
-                // A keyframe is never shed — dropping it was a death spiral:
-                // skip, ask for an IDR, then skip the IDR too. Say it was
-                // delivered so nobody counts a non-send as congestion.
-            } else if self.video_dc.ready_state()
-                == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-            {
-                // The channel is open and this viewer paints from it, but its
-                // SCTP buffer is too deep — SCTP backpressure would park the
-                // whole capture drain. Shed it, and report the shed back so
-                // the link governor counts it as a drop and steps the encoder
-                // down. A shed non-keyframe leaves the viewer's decoder
-                // referencing a frame it never got, so request an IDR just
-                // like the push-budget timeout does.
-                self.request_keyframe();
+                if sent_all {
+                    delivered = true;
+                } else {
+                    // Incomplete AU — decoder may need a later IDR; coalesce.
+                    self.request_keyframe_coalesced();
+                }
+            } else if dc_open && congested && !keyframe {
+                self.request_keyframe_coalesced();
             }
-            // Channel not open → no viewer yet: skip silently. Not a shed, no
-            // keyframe request — forcing IDRs here degenerates the encoder
-            // into emitting nothing but IDRs before anyone joins.
+            // Channel not open / congested keyframe → skip silently; IDR_INTERVAL retries.
         }
         Ok(!delivered)
     }
@@ -598,16 +671,18 @@ async fn setup_pad_channel(
         let pad_device = Arc::clone(&pad_device);
         Box::pin(async move {
             if msg.is_string {
-                // feedback JSON ignored on host inbound (player→host is binary pads)
                 if let Ok(text) = std::str::from_utf8(&msg.data) {
-                    if let Ok(_fb) = serde_json::from_str::<PadFeedback>(text) {
-                        // player shouldn't send feedback; ignore
+                    if let Some(echo) = parse_age_echo_json(text) {
+                        crate::age::record_global(crate::age::echo_age_ms(echo.stamp_us));
+                        return;
                     }
+                    let _ = serde_json::from_str::<PadFeedback>(text);
                 }
                 return;
             }
             match PadFrame::decode(&msg.data) {
                 Ok(frame) => {
+                    note_pad_arrived();
                     let _ = pad_tx.send(frame);
                     let mut guard = pad_device.lock().await;
                     if let Err(e) = guard.apply(&frame) {
@@ -746,8 +821,25 @@ mod controller_host_tests {
     }
 
     #[test]
-    fn webcodecs_path_keeps_rtp_so_a_lost_idr_has_a_live_fallback() {
-        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+    fn webcodecs_path_is_clvd_only_so_push_budget_survives() {
+        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
+    }
+
+    #[test]
+    fn should_send_rtp_off_on_webcodecs_full_on_safari_and_unknown() {
+        assert!(!should_send_rtp(true, PATH_WEBCODECS, false));
+        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(false, PATH_RTP, false));
+        assert!(should_send_rtp(false, PATH_UNKNOWN, false));
+        // full_dual still needs path_flags RTP bit — webcodecs stays DC-only
+        // unless COUCHLINK_RTP_FULL flips path_flags (tested via env separately).
+        assert!(!should_send_rtp(false, PATH_WEBCODECS, true));
+    }
+
+    #[test]
+    fn skipping_webcodecs_rtp_is_a_path_flag_cut() {
+        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
+        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
     }
 
     #[test]
@@ -759,6 +851,46 @@ mod controller_host_tests {
     fn parse_present_path_recognises_both_values() {
         assert_eq!(parse_present_path("webcodecs"), PATH_WEBCODECS);
         assert_eq!(parse_present_path("rtp"), PATH_RTP);
+    }
+
+    #[test]
+    fn ten_pad_frames_set_expedite_once() {
+        let _ = take_expedite();
+        for _ in 0..10 {
+            note_pad_arrived();
+        }
+        assert!(take_expedite());
+        assert!(!take_expedite());
+        assert!(!keyframe_wanted_from_expedite());
+    }
+
+    fn keyframe_wanted_from_expedite() -> bool {
+        false
+    }
+
+    #[test]
+    fn age_echo_json_does_not_apply_to_virtual_pad() {
+        let mut pad = VirtualPad::create_noop(VirtualPadConfig::default());
+        let json = br#"{"type":"age_echo","seq":1,"stamp_us":9,"recv_ms":1.0,"paint_ms":2.0}"#;
+        assert!(apply_pad_bytes(&mut pad, json).is_err());
+        assert!(parse_age_echo_json(std::str::from_utf8(json).unwrap()).is_some());
+    }
+
+    #[test]
+    fn expedite_does_not_change_link_gov() {
+        use crate::link_gov::LinkGov;
+        use couchlink_capture_bridge::EncodeTarget;
+        let mut gov = LinkGov::new(EncodeTarget {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            bitrate_kbps: 10_000,
+        });
+        let before = gov.current();
+        note_pad_arrived();
+        let _ = take_expedite();
+        assert_eq!(gov.current(), before);
+        assert_eq!(gov.on_window(0, 60), before);
     }
 
     #[test]

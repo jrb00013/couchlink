@@ -372,8 +372,174 @@ link_pcsx2() {
 PCSX2_STATUS=skipped
 PCSX2_CONFIG_PATH=""
 PCSX2_SECTION=""
+PCSX2_LIVE_APPLY=skipped
 
 link_pcsx2 || true
+
+# ---------------------------------------------------------------------------
+# Piece B — runtime PCSX2 reconfiguration (in-memory Pad* apply)
+#
+# Piece A (ds-vhid preallocate) keeps ViGEm/XInput seats alive. That does NOT
+# update PCSX2's already-loaded SettingsInterface. Upstream exposes no PINE/
+# IPC opcode for this; the only supported entry that mutates live pads is the
+# Controllers "Apply Profile" slot:
+#
+#   onApplyProfileClicked
+#     -> Pad::CopyConfiguration(base, profile_ini, ...)
+#     -> Host::CommitBaseSettingChanges()
+#     -> g_emu_thread->applySettings()
+#     -> VMManager::ApplySettings() / ReloadInputBindings
+#
+# We cannot call those C++ symbols from Couchlink. We *can* Invoke the same
+# Qt button (UIA InvokePattern) so that exact handler runs. Disk PCSX2.ini is
+# persistence only; the live path loads inputprofiles/couchlink.ini via Apply.
+#
+# Default: auto when pcsx2-qt is running. Opt out: COUCHLINK_PCSX2_LIVE_APPLY=0
+# ---------------------------------------------------------------------------
+write_pcsx2_input_profile() {
+  local cfg="$1"
+  local dir profile
+  dir="$(dirname "$cfg")/inputprofiles"
+  mkdir -p "$dir"
+  profile="$dir/couchlink.ini"
+  # Input profiles are Pad-centric; include Multitap + XInput so Apply
+  # Profile enables the same sources the disk ini has.
+  awk '
+    { line = $0; sub(/\r$/, "", line) }
+    line ~ /^\[/ {
+      keep = (line == "[Pad]" || line == "[InputSources]" || line ~ /^\[Pad[1-8]\]$/)
+    }
+    keep { print }
+  ' "$cfg" > "$profile"
+  # Ensure the profile is non-empty and has at least one remote pad.
+  if [[ ! -s "$profile" ]] || ! grep -qE '^\[Pad[3-5]\]' "$profile"; then
+    echo "==> PCSX2 live-apply: refusing empty/incomplete couchlink input profile" >&2
+    return 1
+  fi
+  echo "==> PCSX2 input profile synced: $profile" >&2
+  printf '%s\n' "$profile"
+}
+
+
+# Pin EmuCore/InputProfileName=couchlink on the newest game settings ini so
+# PCSX2's UpdateGameSettingsLayer Load()s inputprofiles/couchlink.ini as the
+# pad overlay (headless Piece B — no Apply Profile UI). Best-effort: skip if
+# no gamesettings yet (game never opened Properties).
+pin_pcsx2_input_profile_name() {
+  local cfg="$1"
+  local gdir newest
+  gdir="$(dirname "$cfg")/../gamessettings"
+  # Portable layout: inis/../gamesettings OR Documents/PCSX2/gamesettings
+  [[ -d "$gdir" ]] || gdir="$(dirname "$cfg")/gamesettings"
+  [[ -d "$gdir" ]] || gdir="$(dirname "$(dirname "$cfg")")/gamesettings"
+  [[ -d "$gdir" ]] || return 0
+  newest="$(find "$gdir" -maxdepth 1 -type f -name '*.ini' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2-)"
+  [[ -n "$newest" && -f "$newest" ]] || return 0
+  if grep -qE '^InputProfileName *= *couchlink' "$newest" 2>/dev/null; then
+    echo "==> PCSX2 game settings already pin InputProfileName=couchlink ($(basename "$newest"))" >&2
+    return 0
+  fi
+  if grep -qE '^\[EmuCore\]' "$newest"; then
+    if grep -qE '^InputProfileName *=' "$newest"; then
+      sed -i 's/^InputProfileName *=.*/InputProfileName = couchlink/' "$newest"
+    else
+      sed -i '/^\[EmuCore\]/a InputProfileName = couchlink' "$newest"
+    fi
+  else
+    printf '\n[EmuCore]\nInputProfileName = couchlink\n' >> "$newest"
+  fi
+  echo "==> PCSX2 pinned InputProfileName=couchlink on $(basename "$newest") (reload game settings / soft restart to Load)" >&2
+}
+
+pcsx2_live_apply_should_run() {
+  # UIA Apply Profile is abandoned as primary (locksmith: use InputProfileName
+  # layer + optional headless reload). Opt-in only: COUCHLINK_PCSX2_LIVE_APPLY=1
+  case "${COUCHLINK_PCSX2_LIVE_APPLY:-0}" in
+    1|true|on|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pcsx2_live_apply_debounced() {
+  local profile="$1"
+  local stamp cooldown prev hash age now
+  stamp="${XDG_RUNTIME_DIR:-/tmp}/couchlink-pcsx2-live-apply.stamp"
+  cooldown="${COUCHLINK_PCSX2_LIVE_APPLY_COOLDOWN_SEC:-30}"
+  hash="$(cksum "$profile" | awk '{print $1 "-" $2}')"
+  now="$(date +%s)"
+  if [[ -f "$stamp" ]]; then
+    prev="$(awk 'NR==1 {print; exit}' "$stamp")"
+    age=$(( now - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) ))
+    if [[ "$prev" == "$hash" && "$age" -ge 0 && "$age" -lt "$cooldown" ]]; then
+      echo "==> PCSX2 live-apply debounced (${age}s < ${cooldown}s, profile unchanged)"
+      return 1
+    fi
+  fi
+  printf '%s\n' "$hash" > "$stamp"
+  return 0
+}
+
+pcsx2_live_apply_if_running() {
+  local cfg="$1"
+  local profile
+  PCSX2_LIVE_APPLY=skipped
+  [[ -n "$cfg" && -f "$cfg" ]] || return 0
+  case "$PCSX2_STATUS" in
+    linked|already) ;;
+    *) return 0 ;;
+  esac
+
+  # Always sync the input profile so Controllers -> Apply Profile (manual or
+  # automated) has the current Pad3/4/5 map ready.
+  profile="$(write_pcsx2_input_profile "$cfg")" || {
+    PCSX2_LIVE_APPLY=failed
+    return 0
+  }
+  pin_pcsx2_input_profile_name "$cfg" || true
+
+  # Honor hard-off before any Windows process probe (avoids a ~multi-second
+  # powershell round-trip when the operator disabled live-apply).
+  if ! pcsx2_live_apply_should_run; then
+    echo "==> PCSX2 live-apply disabled (COUCHLINK_PCSX2_LIVE_APPLY=0)"
+    PCSX2_LIVE_APPLY=disabled
+    return 0
+  fi
+
+  if ! powershell.exe -NoProfile -Command \
+      'if (Get-Process pcsx2-qt -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }' \
+      >/dev/null 2>&1; then
+    echo "==> PCSX2 not running — disk + input profile only (Load() on next launch)"
+    PCSX2_LIVE_APPLY=skipped
+    return 0
+  fi
+
+  if ! pcsx2_live_apply_debounced "$profile"; then
+    PCSX2_LIVE_APPLY=debounced
+    return 0
+  fi
+
+  local ps1 win_ps1
+  ps1="$ROOT/scripts/windows/pcsx2-live-apply-pads.ps1"
+  if [[ ! -f "$ps1" ]]; then
+    echo "==> PCSX2 live-apply script missing: $ps1" >&2
+    PCSX2_LIVE_APPLY=failed
+    return 0
+  fi
+  win_ps1="$(wslpath -w "$ps1")"
+  echo "==> PCSX2 live-apply: Invoke Apply Profile 'couchlink' (Pad::CopyConfiguration path)"
+  if powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_ps1" \
+      -ProfileName couchlink 2>&1; then
+    PCSX2_LIVE_APPLY=applied
+  else
+    echo "==> PCSX2 live-apply failed — Controllers -> Editing Profile: couchlink -> Apply Profile" >&2
+    PCSX2_LIVE_APPLY=failed
+  fi
+}
+
+if [[ -n "$PCSX2_CONFIG_PATH" ]]; then
+  pcsx2_live_apply_if_running "$PCSX2_CONFIG_PATH" || true
+fi
 
 # A single machine-parseable summary line so the host can surface real
 # per-player status (not just "linked"/"skipped") up to the debug UI instead
@@ -396,6 +562,7 @@ echo "RESULT $(jq -nc \
   --arg pcsx2_config "$PCSX2_CONFIG_PATH" \
   --arg pcsx2_section "$PCSX2_SECTION" \
   --arg pcsx2_port "$(pcsx2_port_name "$PCSX2_SECTION")" \
+  --arg pcsx2_live_apply "$PCSX2_LIVE_APPLY" \
   '{player: ($player | tonumber), backend: $backend, handler: $handler, device: $device,
     rpcs3: $rpcs3, rpcs3_config: $rpcs3_config, pcsx2: $pcsx2, pcsx2_config: $pcsx2_config,
-    pcsx2_section: $pcsx2_section, pcsx2_port: $pcsx2_port}')"
+    pcsx2_section: $pcsx2_section, pcsx2_port: $pcsx2_port, pcsx2_live_apply: $pcsx2_live_apply}')"

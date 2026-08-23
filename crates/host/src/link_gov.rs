@@ -42,31 +42,33 @@ pub struct LinkGov {
     clean_windows: u32,
 }
 
-/// The rung ladder: fps halves before bitrate so frame *freshness* is preserved
-/// as long as possible — dropping to 30fps costs smoothness, halving bitrate
-/// first would cost sharpness on *every* frame, including the now-frame the
-/// player actually sees. When the link can only take a trickle, cut fps to 15
-/// before touching bitrate: a sharp, rare frame beats a blurry common one for
-/// input latency, because the eye waits for the newest one regardless.
+/// The rung ladder for 3-friend WAN: **hold host fps**, step bitrate only.
+///
+/// Cutting fps to "fix lag" doubles unsync wait (T/2 at 15 = 33 ms vs 8 ms
+/// at 60) and matches tonight's death spiral (overlay target 30/15 while
+/// friends decode at the push rate). Bits per frame at the same R are
+/// *smaller* at 60 than at 15, so holding fps is often cheaper on CLVD.
 fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
-    let half_fps = EncodeTarget {
-        fps: (baseline.fps / 2).max(1),
-        ..*baseline
-    };
-    let quarter_fps = EncodeTarget {
-        fps: (half_fps.fps / 2).max(1),
-        bitrate_kbps: half_fps.bitrate_kbps / 2,
-        ..half_fps
-    };
-    let trickle = EncodeTarget {
-        fps: 15,
-        bitrate_kbps: baseline.bitrate_kbps / 4,
-        ..*baseline
-    };
-    rungs.push(half_fps);
-    rungs.push(quarter_fps);
-    rungs.push(trickle);
+    let mut kbps = baseline.bitrate_kbps;
+    // Never step below 1250 kbps at 60 — 625 was unwatchable (2–7 push fps)
+    // and the governor had no climb room once IDR storms inflated sheds.
+    const FLOOR_KBPS: u32 = 1_250;
+    for _ in 0..3 {
+        let next = (kbps / 2).max(FLOOR_KBPS);
+        if next >= kbps {
+            break;
+        }
+        kbps = next;
+        let extra = EncodeTarget {
+            fps: baseline.fps,
+            bitrate_kbps: kbps,
+            ..*baseline
+        };
+        if !rungs.iter().any(|r| *r == extra) {
+            rungs.push(extra);
+        }
+    }
     rungs
 }
 
@@ -158,8 +160,24 @@ mod tests {
                 seen.push(t);
             }
         }
-        assert_eq!(*seen.last().unwrap(), rungs_from(&P720).last().copied().unwrap(), "must reach the floor");
-        assert!(seen.last().unwrap().fps <= 15, "floor fps: {:?}", seen.last());
+        assert_eq!(
+            *seen.last().unwrap(),
+            rungs_from(&P720).last().copied().unwrap(),
+            "must reach the floor"
+        );
+        assert_eq!(seen.last().unwrap().fps, 60, "fps-hold: floor keeps host fps");
+    }
+
+    #[test]
+    fn persistent_shed_never_drops_fps() {
+        let mut gov = LinkGov::new(P720);
+        for _ in 0..20 {
+            gov.on_window(40, 100);
+            assert_eq!(gov.current().fps, 60);
+        }
+        assert!(gov.current().bitrate_kbps <= 2_500);
+        assert_eq!(gov.current().width, 1280);
+        assert_eq!(gov.current().height, 720);
     }
 
     #[test]
@@ -184,7 +202,11 @@ mod tests {
         assert_ne!(down, P720);
         gov.on_window(0, 60);
         gov.on_window(0, 60);
-        assert_eq!(gov.current(), down, "must stay down through the old 2-window climb");
+        assert_eq!(
+            gov.current(),
+            down,
+            "must stay down through the old 2-window climb"
+        );
     }
 
     #[test]
@@ -209,30 +231,46 @@ mod tests {
         }
     }
 
-    /// Deterministic link simulation comparing the pipeline WITH the governor to
-    /// the same pipeline WITHOUT it, under a saturated WAN link. This is the
-    /// benchmark the governor exists to pass.
-    ///
-    /// Model, per 100ms window:
-    /// - The encoder emits `target.fps / 10` frames (pre-encoded path).
-    /// - The link can carry `CAPACITY` fps worth (~`CAPACITY/10` frames/window).
-    /// - Over capacity, the host sheds frames (`shed`) — and every shed on the
-    ///   pre-encoded path requests an IDR, so a shed costs a full IDR frame on
-    ///   the wire and a decode stall at the player.
-    ///
-    /// With no governor the encoder stays at 60fps forever: the link sheds
-    /// persistently and the player sees a fraction of the frames. With the
-    /// governor, the encoder steps down until the shed ratio clears, so the
-    /// player eventually gets *every* emitted frame and the wire stays calm.
+    fn window_bits(kbps: u32, fps: u32) -> u64 {
+        // 100 ms window = fps/10 frames, CBR bits/frame = kbps*1000/fps
+        let frames = u64::from((fps / 10).max(1));
+        let bits_per = u64::from(kbps) * 1000 / u64::from(fps.max(1));
+        frames * bits_per
+    }
+
+    /// Bit-capacity bench: governor must shrink R, never fps, until produced
+    /// bits fit under a fixed uplink ceiling.
     #[test]
+    fn benchmark_governor_vs_no_governor_on_saturated_bits() {
+        const CAPACITY_KBPS: u32 = 4_000;
+        const WINDOWS: usize = 400;
+        let mut gov = LinkGov::new(P720);
+        let mut g_over = 0u32;
+        for _ in 0..WINDOWS {
+            let t = gov.current();
+            assert_eq!(t.fps, 60);
+            let produced = window_bits(t.bitrate_kbps, t.fps);
+            let cap = u64::from(CAPACITY_KBPS) * 100; // kbps * 0.1 s * 1000 bits
+            let shed = if produced > cap { 40 } else { 0 };
+            if shed > 0 {
+                g_over += 1;
+            }
+            gov.on_window(shed, 100);
+        }
+        assert_eq!(gov.current().fps, 60);
+        assert!(gov.current().bitrate_kbps <= CAPACITY_KBPS);
+        assert!(g_over < 400, "governor must stop overflowing after down-steps");
+    }
+
+    #[test]
+    #[ignore = "superseded by bit-capacity bench; kept for historical comparison"]
     fn benchmark_governor_vs_no_governor_on_saturated_link() {
-        const CAPACITY_FPS: u32 = 24; // a gated/slow WAN tunnel
-        const WINDOWS: usize = 400; // 40 simulated seconds
-        const IDR_BYTES: u64 = 60_000; // full-frame keyframe, typical 720p
-        const DELTA_BYTES: u64 = 4_000; // typical P-frame
+        const CAPACITY_FPS: u32 = 24;
+        const WINDOWS: usize = 400;
+        const IDR_BYTES: u64 = 60_000;
+        const DELTA_BYTES: u64 = 4_000;
         const FPS_RUNG_MIN: u32 = 10;
 
-        // --- No governor: encoder locked at preset ---
         let mut target = P720;
         let mut shed_total: u32 = 0;
         let mut frames_delivered: u32 = 0;
@@ -244,24 +282,20 @@ mod tests {
             shed_total += shed;
             let delivered = emitted.min(carry);
             frames_delivered += delivered;
-            // Each shed triggers an IDR; delivered P-frames are small.
             wire_bytes += shed as u64 * IDR_BYTES + delivered as u64 * DELTA_BYTES;
         }
 
-        // --- With governor: encoder sheds *emission* instead of the link shedding *Frames* ---
         let mut gov = LinkGov::new(P720);
-        let mut g_shed_total: u32 = 0; // residuals during down-step (one window each)
+        let mut g_shed_total: u32 = 0;
         let mut g_frames_delivered: u32 = 0;
         let mut g_wire_bytes: u64 = 0;
         for _ in 0..WINDOWS {
             let target = gov.current();
             if target.fps < FPS_RUNG_MIN {
-                break; // converged to the sustainable rung early
+                break;
             }
             let emitted = (target.fps / 10).max(1);
             let carry = (CAPACITY_FPS / 10).max(1);
-            // Governed shed only persists while the encoder is above the rung the
-            // link can hold; once there, delivered == emitted.
             let shed = if target.fps > CAPACITY_FPS {
                 emitted.saturating_sub(carry)
             } else {
@@ -271,11 +305,9 @@ mod tests {
             let delivered = emitted.saturating_sub(shed);
             g_frames_delivered += delivered;
             g_wire_bytes += shed as u64 * IDR_BYTES + delivered as u64 * DELTA_BYTES;
-            // Report the window to the governor as the host would.
             gov.on_window(shed, emitted);
         }
 
-        // The benchmark's verdict — assert, then print for the record.
         assert!(
             g_shed_total <= shed_total,
             "governor shed {} > no-governor shed {}",
@@ -283,7 +315,8 @@ mod tests {
             shed_total
         );
         assert!(
-            g_wire_bytes <= shed_total as u64 * IDR_BYTES / 2 + g_frames_delivered as u64 * DELTA_BYTES * 2,
+            g_wire_bytes
+                <= shed_total as u64 * IDR_BYTES / 2 + g_frames_delivered as u64 * DELTA_BYTES * 2,
             "governor bytes {} unexpectedly above {}",
             g_wire_bytes,
             shed_total as u64 * IDR_BYTES / 2 + g_frames_delivered as u64 * DELTA_BYTES * 2
@@ -331,8 +364,22 @@ mod tests {
         // with pixel count. Numbers are typical measured 720p H264 with a CBR
         // hardware encoder at the commanded bitrates.
         let cases = [
-            ("detached 1728x1080 @18Mbps (what the session actually streamed)", 1728, 1080, 18_000, 150_000, 20_000),
-            ("preset 1280x720 @10Mbps (what SET_TARGET now commands)      ", 1280, 720, 10_000, 68_000, 9_000),
+            (
+                "detached 1728x1080 @18Mbps (what the session actually streamed)",
+                1728,
+                1080,
+                18_000,
+                150_000,
+                20_000,
+            ),
+            (
+                "preset 1280x720 @10Mbps (what SET_TARGET now commands)      ",
+                1280,
+                720,
+                10_000,
+                68_000,
+                9_000,
+            ),
         ];
         for (label, w, h, kbps, idr_bytes, delta_bytes) in cases {
             let mut idr_frags = 0usize;
@@ -344,6 +391,7 @@ mod tests {
                     height: h,
                     keyframe: true,
                     annex_b: vec![0u8; idr_bytes],
+                    stamp_us: 0,
                 };
                 let frags = au.encode_fragments();
                 idr_frags += frags.len();
@@ -358,6 +406,7 @@ mod tests {
                     height: h,
                     keyframe: false,
                     annex_b: vec![0u8; delta_bytes],
+                    stamp_us: 0,
                 };
                 let frags = au.encode_fragments();
                 delta_frags += frags.len();

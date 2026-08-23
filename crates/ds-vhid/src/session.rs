@@ -47,11 +47,20 @@ impl OutputHub {
     }
 }
 
-/// Per-slot virtual controllers, created lazily on first connect and kept
-/// for the life of the companion process — never created up front (a
-/// session with 1 friend must not leave 2 idle "connected" controllers
-/// sitting in PCSX2/RPCS3), never re-created on reconnect (that's exactly
-/// the arrival-order bug this module exists to avoid).
+/// Remote player slots the companion can seat. Must match
+/// `couchlink_signaling::players::MAX_PLAYERS` / host `MAX_REMOTE_SLOTS`.
+pub const MAX_REMOTE_SLOTS: u8 = 3;
+
+/// Per-slot virtual controllers for the life of the companion process.
+///
+/// Created up front for slots `1..=MAX_REMOTE_SLOTS` at companion start
+/// ([`SlotRegistry::preallocate`]) so Windows/XInput indices are stable
+/// before anyone joins: friend connect is a state change on an existing
+/// ViGEm target, not a PnP hotplug that PCSX2 may never re-bind.
+///
+/// Never re-created on reconnect — that was the arrival-order bug this
+/// module exists to avoid (a blip must not land a player on a different
+/// seat's target).
 #[derive(Clone, Default)]
 pub struct SlotRegistry {
     inner: Arc<Mutex<HashMap<u8, (DynBackend, OutputHub)>>>,
@@ -60,6 +69,22 @@ pub struct SlotRegistry {
 impl SlotRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Plug in every seat's ViGEm/WinUHid target once, in slot order.
+    ///
+    /// Order matters: XInput indices are assigned by connect order, and
+    /// `link-emulator-pad.sh` assumes slot 1 → XInput-0, slot 2 → XInput-1,
+    /// slot 3 → XInput-2. Creating them here (before any TCP/pipe client)
+    /// freezes that map for the whole companion lifetime.
+    pub fn preallocate(&self, kind: crate::BackendKind) -> Result<()> {
+        for slot in 1..=MAX_REMOTE_SLOTS {
+            let _ = self.get_or_create(slot, kind)?;
+        }
+        info!(
+            "pre-allocated {MAX_REMOTE_SLOTS} virtual controller(s) (backend={kind:?}) — late joins reuse these pads"
+        );
+        Ok(())
     }
 
     /// The slot's existing controller, or a freshly created one on first use.
@@ -191,6 +216,11 @@ mod tests {
         let frame = couchlink_pad::vhid_proto::encode_input(&r);
         let mut cursor = Cursor::new(frame);
         assert!(read_slot_hello(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn max_remote_slots_is_three() {
+        assert_eq!(MAX_REMOTE_SLOTS, 3);
     }
 
     #[test]

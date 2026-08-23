@@ -44,6 +44,14 @@ function preferLegacyVideo(): boolean {
   return new URLSearchParams(location.search).get("legacyVideo") === "1";
 }
 
+function padDisplayName(kind: string, id: string): string {
+  if (id === "keyboard+mouse") return "Keyboard + Mouse";
+  if (id === "touch") return "Touch";
+  if (kind === "dualsense") return "DualSense";
+  if (kind === "xbox") return "Xbox";
+  return "Gamepad";
+}
+
 function secureContextHint(): string | null {
   if (typeof window === "undefined") return null;
   if (window.isSecureContext) return null;
@@ -97,6 +105,8 @@ export default function App() {
     target_height: number;
     target_fps: number;
     target_bitrate_kbps: number;
+    age_p50_ms?: number;
+    age_p95_ms?: number;
   } | null>(null);
   /** Session occupancy snapshot — "N/4 players connected" (host owns P1). */
   const [playersStatus, setPlayersStatus] = useState<{
@@ -192,10 +202,17 @@ export default function App() {
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
         setVideoDiag(
-          `webcodecs: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped} dec=${s.decodeMs.toFixed(1)}ms`
+          `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode · drop=${s.dropped}`
         );
         setPresentMode("webcodecs");
-        setPresent({ fps: s.presentFps, dropped: s.dropped, width: s.width, height: s.height });
+        setPresent({
+          fps: s.presentFps,
+          dropped: s.dropped,
+          width: s.width,
+          height: s.height,
+          ageMs: s.ageMs,
+          ageBand: s.ageBand,
+        });
       });
       wcRef.current.setKeyframeHandler(() => {
         playerRef.current?.requestVideoKeyframe();
@@ -204,6 +221,9 @@ export default function App() {
       // painted — until then RTP stays on screen as the safety net.
       wcRef.current.setFirstPaintHandler(() => {
         promoteWebcodecsPresent();
+      });
+      wcRef.current.setPaintedHandler((a) => {
+        playerRef.current?.echoPaintedAge(a);
       });
       wcRef.current.setStallHandler(() => {
         promotedRef.current = false;
@@ -403,11 +423,11 @@ export default function App() {
       }
       setCtxHint(secureContextHint());
     },
-    onVideoAccessUnit: (au) => {
+    onVideoAccessUnit: (au, recvMs) => {
       if (!webcodecsActiveRef.current) {
         if (!ensureWebCodecs()) return;
       }
-      wcRef.current?.push(au);
+      wcRef.current?.push(au, recvMs);
     },
     onStreamInfo: (info) => {
       setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
@@ -584,6 +604,13 @@ export default function App() {
     id: hostReported?.id || "host",
     label: hostReported?.id === "keyboard+mouse" ? "Keyboard + Mouse" : "Host",
   };
+  /** Fellow seated players (slot 0 is the host, drawn above; our own slot is
+   * drawn live below) — announced via player_pad_info heartbeats, so everyone
+   * sees who else joined and on what device, not just their own pad. */
+  const otherPlayerPads = Object.entries(playerPads)
+    .map(([slot, p]) => ({ slot: Number(slot), ...p }))
+    .filter((p) => p.slot !== 0 && p.slot !== mySlot)
+    .sort((a, b) => a.slot - b.slot);
 
   useEffect(() => {
     setKbmActive(!hasPhysicalPad && !isMobile);
@@ -770,7 +797,11 @@ export default function App() {
         {connected && !isMobile && (
           <section className="pads" aria-live="polite">
             <div className="pads-head">
-              <span className="pads-count">host + you</span>
+              <span className="pads-count">
+                {otherPlayerPads.length > 0
+                  ? `host + you +${otherPlayerPads.length}`
+                  : "host + you"}
+              </span>
               <span className="pads-hint">
                 {hasPhysicalPad
                   ? "host’s pad · your pad"
@@ -804,6 +835,29 @@ export default function App() {
                   slotLabel="you"
                   active
                 />
+              )}
+              {otherPlayerPads.map((p) =>
+                p.id === "keyboard+mouse" ? (
+                  <KeyboardMouseViz
+                    key={`remote-p${p.slot}`}
+                    input={null}
+                    seat={seatForRemoteSlot(p.slot)}
+                    slotLabel="keyboard"
+                  />
+                ) : (
+                  <ControllerViz
+                    key={`remote-p${p.slot}`}
+                    pad={silhouettePad(
+                      (["dualsense", "xbox", "generic"].includes(p.kind)
+                        ? p.kind
+                        : "generic") as ControllerKind,
+                      p.id,
+                      padDisplayName(p.kind, p.id),
+                    )}
+                    seat={seatForRemoteSlot(p.slot)}
+                    slotLabel={padDisplayName(p.kind, p.id)}
+                  />
+                ),
               )}
             </div>
             {!hasPhysicalPad && (
