@@ -7,6 +7,7 @@ mod invite;
 mod latency;
 mod link_gov;
 mod motion;
+mod ricardo_playable_ab;
 mod scale;
 mod signaling_client;
 mod wan3_math;

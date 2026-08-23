@@ -143,19 +143,19 @@ pub struct WebRtcHost {
 }
 
 /// `present_path` has not been reported yet — send both paths.
-const PATH_UNKNOWN: u8 = 0;
+pub(crate) const PATH_UNKNOWN: u8 = 0;
 /// Client is painting from the CLVD DataChannel. RTP is off — dual/IDR drip
 /// was burning the push budget on 3-friend WAN. Stall → client reports
 /// `warmup` and RTP comes back as the safety net.
-const PATH_WEBCODECS: u8 = 1;
+pub(crate) const PATH_WEBCODECS: u8 = 1;
 /// Client is painting from the RTP media track — the DataChannel is unnecessary.
-const PATH_RTP: u8 = 2;
+pub(crate) const PATH_RTP: u8 = 2;
 
 /// Which of (RTP, DataChannel) to write for a given `present_path` state.
 ///
 /// WebCodecs healthy → CLVD only. Warmup/unknown → both (join + stall rescue).
 /// RTP-only browsers → RTP only. `COUCHLINK_RTP_FULL=1` restores dual always.
-fn path_flags(path: u8) -> (bool, bool) {
+pub(crate) fn path_flags(path: u8) -> (bool, bool) {
     if rtp_full_dual() {
         return match path {
             PATH_RTP => (true, false),
@@ -185,7 +185,7 @@ fn rtp_full_dual() -> bool {
 ///
 /// WebCodecs paints from CLVD only (unless `COUCHLINK_RTP_FULL`). Warmup /
 /// unknown / RTP path still take every AU on RTP.
-fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool {
+pub(crate) fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool {
     let (send_rtp, _) = path_flags(path);
     if !send_rtp {
         return false;
