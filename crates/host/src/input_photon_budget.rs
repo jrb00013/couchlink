@@ -1,4 +1,4 @@
-//! Amazing interactive latency math — surplus \(S = \Phi - R\).
+//! Input→photon budget math — surplus \(S = \Phi - R\) over RTT.
 //!
 //! Every constant cites `docs/superpowers/specs/2026-08-23-amazing-interactive-latency-math.md`
 //! or a live observation. Do not invent a number here. Push fps is not the objective.

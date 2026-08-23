@@ -1,5 +1,5 @@
 mod age;
-mod amazing_latency_math;
+mod input_photon_budget;
 mod capture;
 mod config;
 mod emulator_pad;

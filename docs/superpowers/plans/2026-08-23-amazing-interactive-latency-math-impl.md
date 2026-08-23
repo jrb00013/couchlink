@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make **surplus** \(S = \Phi - R\) (input→photon minus RTT) the measurable objective, lock its formulas in `amazing_latency_math` (same discipline as `wan3_math`), then wire watermarking / WebCodecs / handoff gates so live \(S_{p50}\) can move — without reopening the IDR/push death spiral.
+**Goal:** Make **surplus** \(S = \Phi - R\) (input→photon minus RTT) the measurable objective, lock its formulas in `input_photon_budget` (same discipline as `wan3_math`), then wire watermarking / WebCodecs / handoff gates so live \(S_{p50}\) can move — without reopening the IDR/push death spiral.
 
 **Architecture:** Applied-math first: \(\Phi\) on one client clock; objective \(S=\Phi-R\); phase waits \(T/2\); SHM only if handoff wait \(w\) is a material fraction of \(T_v\). Code changes exist to *observe and attack* terms in the budget identity, not to chase push fps.
 
-**Tech Stack:** `crates/host/src/amazing_latency_math.rs`, `couchlink-proto` CLPD/CLVD, `web/src/inputPhoton.ts`, WebCodecs present path, capture handoff counters.
+**Tech Stack:** `crates/host/src/input_photon_budget.rs`, `couchlink-proto` CLPD/CLVD, `web/src/inputPhoton.ts`, WebCodecs present path, capture handoff counters.
 
 **Design:** `docs/superpowers/specs/2026-08-23-amazing-interactive-latency-design.md`  
 **Math:** `docs/superpowers/specs/2026-08-23-amazing-interactive-latency-math.md`  
@@ -27,7 +27,7 @@
 
 | Math / responsibility | File |
 |---|---|
-| Budget identity, bars, phase waits | Create: `crates/host/src/amazing_latency_math.rs` |
+| Budget identity, bars, phase waits | Create: `crates/host/src/input_photon_budget.rs` |
 | Module hook | Modify: host `main.rs` / `lib` cfg include (mirror `wan3_math`) |
 | CLPD v2 `client_ts_ms` | `crates/proto/src/pad_frame.rs`, `web/src/clpd.ts` |
 | CLVD v4 `input_wm` | `crates/proto/src/video_frame.rs`, `web/src/clvd.ts` |
@@ -38,13 +38,13 @@
 
 ---
 
-### Task 0: Lock the mathematics (`amazing_latency_math`)
+### Task 0: Lock the mathematics (`input_photon_budget`)
 
 **Why first:** Same as `wan3_math` — formulas and bars live in one module with hand-worked tests. Wiring without this re-invents fudge numbers in UI strings.
 
 **Files:**
-- Create: `crates/host/src/amazing_latency_math.rs`
-- Modify: wherever `mod wan3_math` is declared — add `mod amazing_latency_math;`
+- Create: `crates/host/src/input_photon_budget.rs`
+- Modify: wherever `mod wan3_math` is declared — add `mod input_photon_budget;`
 
 **Interfaces (produce):**
 
@@ -122,7 +122,7 @@ fn surplus_is_translation_invariant_in_phi_and_r() {
 - [ ] **Step 2: Run — expect FAIL**
 
 ```bash
-cargo test -p couchlink-host amazing_latency_math -- --nocapture
+cargo test -p couchlink-host input_photon_budget -- --nocapture
 ```
 
 - [ ] **Step 3: Implement module**
@@ -132,16 +132,16 @@ Mirror style of `wan3_math.rs` module docs: every constant cites math doc or liv
 - [ ] **Step 4: Run — expect PASS**
 
 ```bash
-cargo test -p couchlink-host amazing_latency_math
+cargo test -p couchlink-host input_photon_budget
 cargo test -p couchlink-host ricardo_playable_ab
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/host/src/amazing_latency_math.rs crates/host/src/main.rs
+git add crates/host/src/input_photon_budget.rs crates/host/src/main.rs
 git commit -m "$(cat <<'EOF'
-feat(host): amazing_latency_math — surplus S=Φ−R and wow bars
+feat(host): input_photon_budget — surplus S=Φ−R and wow bars
 
 Lock Ricardo hand-worked budgets and SHM wait gate before wiring
 watermarks; push_ms is not the objective.
@@ -183,7 +183,7 @@ EOF
 
 ```ts
 export function surplusMs(phiMs: number, rttMs: number): number {
-  return phiMs - rttMs; // mirror amazing_latency_math::surplus_ms
+  return phiMs - rttMs; // mirror input_photon_budget::surplus_ms
 }
 export function notePadSent(perfNow, seq): void;
 export function notePhotonPaint(paintPerf, inputWm): number | null; // Φ sample
@@ -199,7 +199,7 @@ Vitest fixture: send seq=5 at t=100, paint wm=5 at t=190 → \(\Phi=90\); with R
 
 ```bash
 cargo test -p couchlink-proto
-cargo test -p couchlink-host amazing_latency_math ricardo_playable_ab
+cargo test -p couchlink-host input_photon_budget ricardo_playable_ab
 cd web && npx vitest run src/clpd.test.ts src/clvd.test.ts src/inputPhoton.test.ts
 ```
 
@@ -232,7 +232,7 @@ EOF
 
 **Math link:** translation symmetry of \(S\); domain of validity; failed-guess record.
 
-- [ ] **Step 1:** Extend `amazing_latency_math` tests if any bar drifted; keep Ricardo hand-work.
+- [ ] **Step 1:** Extend `input_photon_budget` tests if any bar drifted; keep Ricardo hand-work.
 - [ ] **Step 2:** Optional live check (conjecture): LAN vs WAN — \(S\) should be closer than \(\Phi\) (log both; do not fail CI on conjecture).
 - [ ] **Step 3:** Full suite:
 
@@ -261,7 +261,7 @@ MATH-6 drawer shows Φ and S (est.), not push as hero
 ## Execution order (math-driven)
 
 ```text
-T0 amazing_latency_math     ← formulas / bars / SHM gate (hours)
+T0 input_photon_budget     ← formulas / bars / SHM gate (hours)
 T1 WebCodecs-default        ← cut Td/2 in the budget
 T2 Observe Φ → compute S    ← north-star metric live
 T3 Handoff ω → SHM iff gate ← structural only if measured
