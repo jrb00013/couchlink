@@ -117,4 +117,6 @@ RTP: warmup/stall/Safari only
 
 ## Approval
 
-Approve this design (or adjust the photon bar / SHM priority) before implementation. Companion plan: `docs/superpowers/plans/2026-08-23-amazing-interactive-latency.md`.
+Companion math: `docs/superpowers/specs/2026-08-23-amazing-interactive-latency-math.md`  
+**Execute:** `docs/superpowers/plans/2026-08-23-amazing-interactive-latency-math-impl.md` (math-driven; supersedes file-map-only plan for task order).  
+File-map reference: `docs/superpowers/plans/2026-08-23-amazing-interactive-latency.md`.

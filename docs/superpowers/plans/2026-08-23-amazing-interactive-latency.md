@@ -8,7 +8,9 @@
 
 **Tech Stack:** `couchlink-host`, `couchlink-proto` (CLPD/CLVD), `web/` (player, WebCodecsCanvas, inputPhoton, DebugDrawer), vitest, cargo unit tests, existing `ricardo_playable_ab`.
 
-**Design:** `docs/superpowers/specs/2026-08-23-amazing-interactive-latency-design.md`
+**Design:** `docs/superpowers/specs/2026-08-23-amazing-interactive-latency-design.md`  
+**Math:** `docs/superpowers/specs/2026-08-23-amazing-interactive-latency-math.md`  
+**Execute this instead for task order:** `docs/superpowers/plans/2026-08-23-amazing-interactive-latency-math-impl.md` (applied-math: optimize \(S=\Phi-R\)).
 
 ## Global Constraints
 
