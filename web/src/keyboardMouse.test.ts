@@ -73,6 +73,25 @@ describe("KeyboardMouseInput", () => {
     expect(state.ly).toBe(0);
   });
 
+  it("fires onActivity on keydown for immediate pad send", () => {
+    let hits = 0;
+    kbm.onActivity = () => {
+      hits += 1;
+    };
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyE"));
+    expect(hits).toBe(1);
+  });
+
+  it("fires onActivity on keyup", () => {
+    let hits = 0;
+    kbm.onActivity = () => {
+      hits += 1;
+    };
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyE"));
+    (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyE"));
+    expect(hits).toBe(2);
+  });
+
   it("releases keys on keyup", () => {
     (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyD"));
     (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyD"));
