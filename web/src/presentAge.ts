@@ -47,3 +47,14 @@ export function shouldSkipDecode(
   if (keyframe) return false;
   return decodeQueueSize > maxQueue;
 }
+
+/** When decode backlog forces a delta drop, request IDR (H.264 LFW recovery). */
+export function decodeBacklogPolicy(
+  decodeQueueSize: number,
+  keyframe: boolean
+): "decode" | "skip-request-idr" {
+  if (shouldSkipDecode(decodeQueueSize, keyframe)) {
+    return keyframe ? "decode" : "skip-request-idr";
+  }
+  return "decode";
+}
