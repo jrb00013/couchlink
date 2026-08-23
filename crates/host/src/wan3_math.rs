@@ -459,4 +459,11 @@ mod tests {
         assert_eq!(rungs_from(&P720)[2].bitrate_kbps, 2_500);
         assert_eq!(rungs_from(&P720)[2].fps, 60);
     }
+
+    #[test]
+    fn trickle_skip_must_not_inflate_governor_drop_pct() {
+        use crate::latency_live_sim::simulate_two_peer_shed_counting;
+        assert_eq!(simulate_two_peer_shed_counting(false), 0);
+        assert!(simulate_two_peer_shed_counting(false) < DOWN_TRIGGER_PCT);
+    }
 }
