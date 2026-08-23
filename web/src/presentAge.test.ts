@@ -5,6 +5,7 @@ import {
   AGE_EMERGENCY_MS,
   AGE_TARGET_MS,
   AGE_WARN_MS,
+  decodeBacklogPolicy,
   shouldReplacePending,
   shouldSkipDecode,
 } from "./presentAge";
@@ -40,5 +41,20 @@ describe("shouldSkipDecode", () => {
     expect(shouldSkipDecode(0, false)).toBe(false);
     expect(shouldSkipDecode(3, false)).toBe(false);
     expect(shouldSkipDecode(4, false)).toBe(true);
+  });
+
+  it("maxQueue 3 leaves headroom for ~70fps paint at high push", () => {
+    expect(shouldSkipDecode(2, false)).toBe(false);
+    expect(shouldSkipDecode(3, false)).toBe(false);
+  });
+});
+
+describe("decodeBacklogPolicy", () => {
+  it("requests IDR when dropping a backed-up delta (LFW)", () => {
+    expect(decodeBacklogPolicy(4, false)).toBe("skip-request-idr");
+  });
+
+  it("decodes when queue is healthy", () => {
+    expect(decodeBacklogPolicy(1, false)).toBe("decode");
   });
 });
