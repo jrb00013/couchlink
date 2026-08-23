@@ -246,6 +246,10 @@ fn respawn_command(root: &std::path::Path, script: &std::path::Path, configured:
         // Respawn is unattended — don't cargo-build on every 20s retry.
         // That was opening a blue PowerShell even when the exe was already there.
         .env("COUCHLINK_SKIP_WIN_CAPTURE_BUILD", "1")
+        // A live but half-open win-capture (writer stuck on a dead Hyper-V
+        // client) must be killed — "already running" would leave the host
+        // disconnected forever.
+        .env("COUCHLINK_WIN_CAPTURE_FORCE", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -416,6 +420,11 @@ mod tests {
         assert_eq!(
             env_of(&cmd, "COUCHLINK_SKIP_WIN_CAPTURE_BUILD").as_deref(),
             Some("1")
+        );
+        assert_eq!(
+            env_of(&cmd, "COUCHLINK_WIN_CAPTURE_FORCE").as_deref(),
+            Some("1"),
+            "respawn must force-kill a stuck half-open win-capture"
         );
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("bash"));
         let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();

@@ -25,8 +25,8 @@
 use anyhow::{bail, Result};
 use std::io::{Read, Write};
 use windows::Win32::Networking::WinSock::{
-    accept, bind, closesocket, listen, recv, send, socket, WSAGetLastError, WSAStartup, ADDRESS_FAMILY,
-    SEND_RECV_FLAGS, SOCKADDR, SOCKET, SOCK_STREAM, WSADATA,
+    accept, bind, closesocket, listen, recv, send, shutdown, socket, WSAGetLastError, WSAStartup,
+    ADDRESS_FAMILY, SEND_RECV_FLAGS, SOCKADDR, SOCKET, SOCK_STREAM, WSADATA, SD_BOTH,
 };
 use windows::Win32::System::Hypervisor::{HV_GUID_VSOCK_TEMPLATE, SOCKADDR_HV};
 
@@ -140,6 +140,18 @@ impl HvStream {
     pub fn try_clone(&self) -> Self {
         Self {
             sock: std::sync::Arc::clone(&self.sock),
+        }
+    }
+
+    /// Unblock a peer stuck in `send`/`recv` after the WSL host drops.
+    ///
+    /// Without this, the writer thread can sit in `send` on a half-open
+    /// Hyper-V socket forever while `accept` never runs again — or worse,
+    /// the next host `connect` parks in the listen backlog (socket looks
+    /// connected on WSL) while frames still go to the dead writer.
+    pub fn shutdown(&self) {
+        unsafe {
+            let _ = shutdown(self.sock.0, SD_BOTH);
         }
     }
 }
