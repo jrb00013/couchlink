@@ -507,6 +507,13 @@ async fn main() -> Result<()> {
         headscale,
         wg_conf.as_deref(),
     );
+    // Write every emulator pad binding before anyone joins, so the emulator can
+    // be launched at any point in the session rather than strictly after the
+    // last player sits down (PCSX2 only reads its ini at startup — see
+    // `emulator_pad::prebind_all`). Off the runtime: it shells out to
+    // PowerShell and the emulator config scripts.
+    tokio::task::spawn_blocking(emulator_pad::prebind_all);
+
     // Always surface the invite — this is what the friend needs.
     println!("friend join URL:\n{join}");
     if verbose {

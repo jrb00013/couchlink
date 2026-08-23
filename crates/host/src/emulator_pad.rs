@@ -63,6 +63,23 @@ fn repo_root() -> Option<PathBuf> {
 /// on the signaling crate, so the value is restated rather than imported.
 pub const MAX_REMOTE_SLOTS: u8 = 3;
 
+/// Emulator player port driven by couchlink remote `slot` (1-based).
+///
+/// The host's own physical pad owns emulator player 1, so remote slot 1 is
+/// emulator player 2, and so on. Written once here rather than as a bare
+/// `slot + 1` at each call site: the join path, the PadInfo path and the
+/// pre-bind path must agree exactly, and a slot bound to the wrong player
+/// fails silently — the pad works everywhere observable and simply does
+/// nothing in the game.
+pub fn emulator_player_for(slot: u8) -> u8 {
+    slot + 1
+}
+
+/// Every remote slot a session can seat, in bind order.
+fn prebind_slots() -> impl Iterator<Item = u8> {
+    1..=MAX_REMOTE_SLOTS
+}
+
 /// Write every remote slot's emulator binding once, before anyone connects.
 ///
 /// PCSX2 reads `PCSX2.ini` exactly once, at launch: an edit made while it is
@@ -90,12 +107,12 @@ pub fn prebind_all() {
     // hot-plugs devices, but a device already present at launch is one less
     // thing depending on that.
     run(&root, "scripts/ensure-ds-vhid.sh", backend, None);
-    for slot in 1..=MAX_REMOTE_SLOTS {
+    for slot in prebind_slots() {
         run(
             &root,
             "scripts/link-emulator-pad.sh",
             backend,
-            Some(slot + 1),
+            Some(emulator_player_for(slot)),
         );
     }
     info!(
@@ -129,7 +146,7 @@ pub fn apply(kind: &str, id: &str, slot: u8) {
 
     info!(
         "player pad is {kind} ({id}) for emulator P{} — virtual pad backend {backend}",
-        slot + 1
+        emulator_player_for(slot)
     );
 
     // Companion first: the emulator binding names the device the companion
@@ -142,7 +159,7 @@ pub fn apply(kind: &str, id: &str, slot: u8) {
         &root,
         "scripts/link-emulator-pad.sh",
         backend,
-        Some(slot + 1),
+        Some(emulator_player_for(slot)),
     );
 }
 
@@ -207,6 +224,94 @@ mod tests {
                 "kind {kind:?} must map to xbox360 — ds4 has no working PCSX2 auto-link"
             );
         }
+    }
+
+    /// The host's own pad owns emulator player 1, so remote slots start at 2.
+    /// Binding a slot to the wrong player is a silent failure — the pad works
+    /// everywhere it can be observed and does nothing in the game — so pin the
+    /// mapping rather than trusting four separate `slot + 1` call sites.
+    #[test]
+    fn remote_slots_map_past_the_hosts_own_player_1() {
+        assert_eq!(emulator_player_for(1), 2);
+        assert_eq!(emulator_player_for(2), 3);
+        assert_eq!(emulator_player_for(3), 4);
+        // Never player 1: that is the host's own controller, and overwriting it
+        // would unbind the person running the session.
+        for slot in prebind_slots() {
+            assert!(
+                emulator_player_for(slot) >= 2,
+                "slot {slot} must not claim emulator player 1 (the host's own pad)"
+            );
+        }
+    }
+
+    /// `prebind_all` exists to remove an ordering constraint: PCSX2 reads its
+    /// ini only at launch, so a slot bound later than PCSX2's start is absent
+    /// for the whole session. That only holds if pre-binding covers *every*
+    /// seatable slot — one gap and that player is silently unplayable, which is
+    /// exactly the bug it was written to prevent.
+    #[test]
+    fn prebind_covers_every_seatable_slot_exactly_once() {
+        let slots: Vec<u8> = prebind_slots().collect();
+        assert_eq!(slots, vec![1, 2, 3], "must cover slots 1..=MAX_REMOTE_SLOTS");
+        assert_eq!(slots.len(), MAX_REMOTE_SLOTS as usize);
+
+        let players: Vec<u8> = slots.iter().copied().map(emulator_player_for).collect();
+        assert_eq!(players, vec![2, 3, 4], "emulator players 2-4, host keeps 1");
+
+        // No slot may pre-bind onto another slot's player port: a duplicate
+        // would have two players sharing one pad, which reads as "my input
+        // moves someone else's character".
+        let mut seen = players.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), players.len(), "duplicate emulator player port");
+    }
+
+    /// The join path and the pre-bind path write the same config file. If they
+    /// ever disagreed about a slot's player port, whichever ran last would
+    /// silently move that player mid-session.
+    #[test]
+    fn prebind_and_join_agree_on_every_slot() {
+        // Both paths route through `emulator_player_for`, so the port cannot
+        // diverge by construction — the live risk is the *backend*: pre-bind
+        // uses JOIN_PAD_KIND, while a later PadInfo carries whatever the
+        // browser reports. If those mapped to different backends, the second
+        // run would rewrite the slot for a different device and silently
+        // unbind the player mid-session.
+        for kind in ["generic", "dualsense", "dualshock4", "ds4", "xbox"] {
+            assert_eq!(
+                backend_for(JOIN_PAD_KIND),
+                backend_for(kind),
+                "a later {kind:?} PadInfo must not swap the backend pre-bind wrote"
+            );
+        }
+    }
+
+    /// `MAX_REMOTE_SLOTS` restates `couchlink_signaling::players::MAX_PLAYERS`
+    /// because the host crate does not depend on the signaling crate. A silent
+    /// drift would under-bind (a seated player with no pad) or over-bind, so
+    /// check it against the actual source of truth rather than a comment.
+    #[test]
+    fn max_remote_slots_matches_signaling() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../signaling/src/players.rs"),
+        )
+        .expect("read signaling players.rs");
+        let line = src
+            .lines()
+            .find(|l| l.contains("pub const MAX_PLAYERS"))
+            .expect("MAX_PLAYERS declaration");
+        let value: u8 = line
+            .rsplit('=')
+            .next()
+            .and_then(|v| v.trim().trim_end_matches(';').parse().ok())
+            .expect("parse MAX_PLAYERS");
+        assert_eq!(
+            MAX_REMOTE_SLOTS, value,
+            "MAX_REMOTE_SLOTS drifted from signaling's MAX_PLAYERS"
+        );
     }
 
     /// Regression: pads used to bind only on PadInfo (first keypress), so a
