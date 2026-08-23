@@ -118,9 +118,26 @@ if [[ "${COUCHLINK_SKIP_WIN_CAPTURE_BUILD:-0}" != "1" ]]; then
   fi
 fi
 
-# One healthy capture is enough. Host maybe_respawn + ensure used to stack
-# multiple win-capture.exe and starve Hyper-V attach. >1 means a race — kill
-# and relaunch a single instance.
+# Serialize launches — host maybe_respawn and start-host both call this and
+# used to race into two win-capture.exe fighting over Hyper-V.
+_LOCK=/tmp/couchlink-win-capture.lock
+_COOL=/tmp/couchlink-win-capture.cooling
+exec 9>"$_LOCK"
+if ! flock -n 9; then
+  echo "==> Windows capture launch already in progress — waiting"
+  flock 9
+fi
+
+# Recent launch still settling (Start-Process is async) — do not stack another.
+if [[ -f "$_COOL" ]]; then
+  _cool_age=$(( $(date +%s) - $(stat -c %Y "$_COOL" 2>/dev/null || echo 0) ))
+  if [[ "$_cool_age" -lt 20 ]]; then
+    echo "==> Windows capture launched ${_cool_age}s ago — leaving it alone"
+    exit 0
+  fi
+fi
+
+# One healthy capture is enough. >1 means a race — kill and relaunch one.
 if command -v tasklist.exe >/dev/null 2>&1; then
   _cap_n=$(tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
     | grep -ci couchlink-win-capture || true)
@@ -132,6 +149,7 @@ fi
 
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
+  sleep 0.5
 fi
 
 # The picker UI lives on the capture exe, not this wrapper. Keep the
@@ -186,6 +204,9 @@ psw -Command "
   }
 " >/dev/null
 
+# Hold off concurrent ensure/respawn until the exe is visible (or we give up).
+touch "$_COOL"
+
 if [[ "$source_mode" == "window" && -n "$window_title" ]]; then
   echo "==> Windows capture launched (source=window, title~='$window_title')"
 else
@@ -197,17 +218,18 @@ fi
 # forever waiting for a socket that never appears.
 if command -v tasklist.exe >/dev/null 2>&1; then
   for _ in $(seq 1 25); do
-    if tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
-      | grep -qi couchlink-win-capture; then
+    _cap_n=$(tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
+      | grep -ci couchlink-win-capture || true)
+    if [[ "$_cap_n" -eq 1 ]]; then
       exit 0
     fi
-    # Window-mode launcher is the PowerShell retry loop until the title exists;
-    # that still counts as "capture is starting" for the picker/desktop case we
-    # care about here.
-    if tasklist.exe /FI "IMAGENAME eq powershell.exe" 2>/dev/null \
-      | grep -qi powershell; then
-      # Can't tell which powershell — keep waiting briefly for the exe.
-      :
+    if [[ "$_cap_n" -gt 1 ]]; then
+      # Race leftover — keep the newest by killing all and failing closed;
+      # next respawn (20s) will start a single instance under the lock.
+      taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
+      rm -f "$_COOL"
+      echo "warning: multiple win-capture.exe detected — cleared; will retry on next respawn" >&2
+      exit 0
     fi
     sleep 0.2
   done
