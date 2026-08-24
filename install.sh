@@ -14,6 +14,8 @@ INSTALL_ROLE="${COUCHLINK_INSTALL_ROLE:-client}"
 INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
 FORCE_CLOUDFLARE=0
 TAILSCALE_CLOUD=0
+# Flags forwarded to ./scripts/run.sh when --run / --online / --local is used.
+RUN_PASS_ARGS=()
 
 # Bare `./install.sh` with no flags on an interactive terminal: walk through
 # the same choices as an argument in a small wizard instead of silently
@@ -98,34 +100,43 @@ fi
 for arg in "$@"; do
   case "$arg" in
     --run) RUN_AFTER=1 ;;
-    --online) RUN_MODE="online"; RUN_AFTER=1 ;;
-    --local) RUN_MODE="local"; RUN_AFTER=1 ;;
+    --online) RUN_MODE="online"; RUN_AFTER=1; RUN_PASS_ARGS+=(--online) ;;
+    --local) RUN_MODE="local"; RUN_AFTER=1; RUN_PASS_ARGS+=(--local) ;;
     --host) INSTALL_ROLE="host" ;;
     --client|--player) INSTALL_ROLE="client" ;; # legacy aliases; default is already client
     --mesh) INSTALL_MESH=1 ;;
     --no-mesh) INSTALL_MESH=0 ;;
-    --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
+    --unblock-firewall) UNBLOCK_FIREWALL=1; RUN_PASS_ARGS+=(--unblock-firewall) ;;
+    --force-cloudflare) FORCE_CLOUDFLARE=1; RUN_PASS_ARGS+=(--force-cloudflare) ;;
+    --mesh-first) RUN_PASS_ARGS+=(--mesh-first) ;;
+    --verbose|-v) RUN_PASS_ARGS+=(--verbose) ;;
+    host|client) RUN_PASS_ARGS+=("$arg") ;;
     -h|--help)
       cat <<EOF
-usage: ./install.sh [--host] [--run|--online|--local] [--mesh|--no-mesh] [--unblock-firewall]
+usage: ./install.sh [--host] [--run] [--online|--local] [run.sh flags…] [--mesh|--no-mesh]
 
   Default (friend / player):
     ./install.sh              build player (Headscale-ready; no Tailscale Inc popup)
-    ./install.sh --run        then start client --local (paste host join URL)
-    ./install.sh --online     then start client --online (paste host join URL;
-                              auto-joins Headscale when invite has hs= + tskey=)
-    ./install.sh --online --unblock-firewall
-                              also open local OS firewall for mesh/TURN
+    ./install.sh --run        install then ./scripts/run.sh client --local
+    ./install.sh --online     install then ./scripts/run.sh client --online
+    ./install.sh --run --online --unblock-firewall
+                              same — all run.sh flags pass through after --run
 
   Host (gaming PC):
     ./install.sh --host                 build host + Headscale + WireGuard
-    ./install.sh --host --online        then host --online (Headscale PRIME mesh)
-    ./install.sh --host --local|--run   then host --local
+    ./install.sh --host --online        install then full online host stack
+    ./install.sh --host --run --online --force-cloudflare --verbose
+    ./install.sh --host --run --online --mesh-first   # legacy mesh-first path
 
   --mesh / --no-mesh   mesh tooling; default on
   Opt-in Tailscale Inc cloud install: COUCHLINK_INSTALL_TAILSCALE_CLOUD=1
 EOF
       exit 0
+      ;;
+    *)
+      echo "unknown install argument: $arg" >&2
+      echo "run ./install.sh --help" >&2
+      exit 1
       ;;
   esac
 done
@@ -514,12 +525,24 @@ fi
 echo ""
 
 if [[ "$RUN_AFTER" == "1" ]]; then
-  RUN_ARGS=("$INSTALL_ROLE" "--${RUN_MODE}")
-  if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
-    RUN_ARGS+=(--unblock-firewall)
-  fi
-  if [[ "$FORCE_CLOUDFLARE" == "1" ]]; then
-    RUN_ARGS+=(--force-cloudflare)
+  RUN_ARGS=()
+  if [[ ${#RUN_PASS_ARGS[@]} -gt 0 ]]; then
+    # User passed explicit run.sh flags (--online, host, --verbose, …).
+    _has_role=0
+    for _a in "${RUN_PASS_ARGS[@]}"; do
+      [[ "$_a" == "host" || "$_a" == "client" ]] && _has_role=1
+    done
+    if [[ "$_has_role" == "1" ]]; then
+      RUN_ARGS=("${RUN_PASS_ARGS[@]}")
+    else
+      RUN_ARGS=("$INSTALL_ROLE" "${RUN_PASS_ARGS[@]}")
+    fi
+    unset _has_role _a
+  else
+    # Wizard or bare --run: role + mode from install choices.
+    RUN_ARGS=("$INSTALL_ROLE" "--${RUN_MODE}")
+    [[ "$UNBLOCK_FIREWALL" == "1" ]] && RUN_ARGS+=(--unblock-firewall)
+    [[ "$FORCE_CLOUDFLARE" == "1" ]] && RUN_ARGS+=(--force-cloudflare)
   fi
   echo "==> starting ./scripts/run.sh ${RUN_ARGS[*]}"
   exec bash "$ROOT/scripts/run.sh" "${RUN_ARGS[@]}"

@@ -24,21 +24,22 @@ source "$ROOT/scripts/lib-mesh.sh"
 
 usage() {
   cat <<EOF
-usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall] [--force-cloudflare]
+usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall] [--force-cloudflare] [--mesh-first]
 
-  host    start signaling + (optional TURN) + couchlink-host
+  host    one command: signaling + TURN + couchlink-host + (online) cloudflared
+          + (WSL) Windows capture — builds missing binaries/UI first.
   client  start couchlink-client (friend/player)
 
   --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
-  --online  Internet. Host prefers Headscale / Tailscale / WireGuard (PRIME mesh)
-            when up; else public IP + TURN + UPnP; on WSL also firewall + WSL
-            portproxy; then Cloudflare HTTPS + IPv6 / bore if the router blocks UPnP.
-            Client: prompts for the host join URL if unset; auto-joins Headscale
-            when the invite has hs= + tskey=.
+  --online  Internet host (default): full stack — cloudflared HTTPS invite,
+            TURN, win-capture, release build + web/dist as needed. No separate
+            install step. Client: paste host join URL; Headscale auto-join when
+            invite has hs= + tskey=.
+  --mesh-first
+            Host --online: try Headscale / Tailscale / WireGuard + UPnP before
+            cloudflared (legacy path). Default online host skips mesh/UPnP.
   --force-cloudflare
-            Host: skip mesh + UPnP entirely and always bring up a cloudflared
-            HTTPS invite (https://*.trycloudflare.com). Use when the mesh or a
-            direct public IP can't reach the friend. Requires --online.
+            Alias for host --online (kept for scripts). Requires --online.
   --verbose
             Chatty bring-up logs, QR code, TRACE-level-ish Rust logs (RUST_LOG).
             Default is quiet — join URL is still printed.
@@ -57,6 +58,7 @@ ROLE="host"
 MODE="local"
 UNBLOCK_FIREWALL=0
 FORCE_CLOUDFLARE=0
+MESH_FIRST=0
 COUCHLINK_VERBOSE="${COUCHLINK_VERBOSE:-0}"
 for arg in "$@"; do
   case "$arg" in
@@ -64,6 +66,7 @@ for arg in "$@"; do
     --local) MODE="local" ;;
     --online) MODE="online" ;;
     --force-cloudflare) FORCE_CLOUDFLARE=1 ;;
+    --mesh-first) MESH_FIRST=1 ;;
     --verbose|-v) COUCHLINK_VERBOSE=1 ;;
     --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -81,8 +84,13 @@ if [[ "$FORCE_CLOUDFLARE" == "1" && "$MODE" != "online" ]]; then
   usage >&2
   exit 1
 fi
+# Host --online: full internet stack by default (cloudflared + TURN + capture).
+# Opt into mesh/UPnP-first with --mesh-first.
+if [[ "$ROLE" == "host" && "$MODE" == "online" && "$MESH_FIRST" != "1" ]]; then
+  FORCE_CLOUDFLARE=1
+fi
 if [[ "$FORCE_CLOUDFLARE" == "1" ]]; then
-  couchlink_say "==> --force-cloudflare: skipping mesh + UPnP, forcing cloudflared HTTPS invite"
+  couchlink_say "==> online host: full stack (cloudflared HTTPS + TURN + capture; skip mesh/UPnP)"
   export COUCHLINK_FORCE_CLOUDFLARE=1 COUCHLINK_SKIP_MESH=1 COUCHLINK_SKIP_UPNP=1
 fi
 
@@ -412,6 +420,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$ROLE" == "host" ]]; then
+  bash "$ROOT/scripts/ensure-host-stack.sh"
   ./scripts/start-signaling.sh &
   PIDS+=($!)
   # Wait until signaling actually accepts TCP — a fixed sleep races the host's
