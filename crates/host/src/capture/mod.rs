@@ -115,6 +115,15 @@ impl FrameCapture {
         }
     }
 
+    pub fn reassert_target(&mut self) {
+        match self {
+            Self::Windows(c) => c.reassert_target(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.reassert_target(),
+            Self::Local(_) => {}
+        }
+    }
+
     /// Discard anything already buffered so the stream starts from *now*.
     pub fn resync(&mut self) {
         match self {

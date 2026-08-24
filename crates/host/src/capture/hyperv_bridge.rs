@@ -164,6 +164,16 @@ impl HyperVBridge {
         }
     }
 
+    pub fn reassert_target(&mut self) {
+        if let Some(target) = self.target {
+            if let Some(stream) = self.stream.as_mut() {
+                if let Err(e) = write_set_target(stream, target) {
+                    tracing::warn!("could not re-command encode target over Hyper-V socket: {e}");
+                }
+            }
+        }
+    }
+
     fn try_reconnect(&mut self) -> bool {
         if let Some(t) = self.last_connect_attempt {
             if t.elapsed() < CONNECT_RETRY_INTERVAL {

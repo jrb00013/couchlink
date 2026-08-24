@@ -49,28 +49,6 @@ const PUSH_BUDGET: Duration = Duration::from_millis(50);
 /// not a second of capture starvation. Failed IDRs wait for `IDR_INTERVAL`.
 const KEYFRAME_PUSH_BUDGET: Duration = Duration::from_millis(120);
 
-/// Commanded Windows encode fps.
-///
-/// Preset fps (often 60) used to clamp `SET_TARGET` even when
-/// `COUCHLINK_CAPTURE_FPS=120`, leaving push stuck ~75. Prefer an explicit
-/// `COUCHLINK_ENCODE_FPS`, else raise toward capture fps — but cap the
-/// auto-raise at 96 so dual-send warmup still leaves room for CLVD/WebCodecs
-/// (160fps dual drowned software WC and killed S_p50).
-fn encode_fps_target(preset_fps: u32) -> u32 {
-    if let Ok(s) = std::env::var("COUCHLINK_ENCODE_FPS") {
-        if let Ok(n) = s.parse::<u32>() {
-            return n.max(1);
-        }
-    }
-    if let Ok(s) = std::env::var("COUCHLINK_CAPTURE_FPS") {
-        if let Ok(n) = s.parse::<u32>() {
-            const AUTO_RAISE_CAP: u32 = 96;
-            return n.max(preset_fps).min(AUTO_RAISE_CAP).max(1);
-        }
-    }
-    preset_fps.max(1)
-}
-
 /// Push one frame, but never let it park the caller.
 ///
 /// `push_h264` awaits twice — the SCTP DataChannel and the RTP sample writer —
@@ -239,9 +217,9 @@ fn spawn_pad_feedback(
 /// Sequential awaits would be wrong: `push_bounded`'s own budget is up to 50ms
 /// per peer (1s for keyframes), and the cadence tick can be as tight as 2ms on
 /// the pre-encoded path — sequential awaits would stall the whole
-/// capture loop. Returns `(received_by_any, congestion_sheds)`: intentional
-/// trickle skips are *not* sheds — counting them pinned drop% at ~50% with two
-/// peers and floored the shared encoder while a healthy peer was fine.
+/// capture loop. Returns `(received_by_any, frame_sheds)`: a frame counts as shed
+/// only when no peer delivered — per-peer partial sheds must not floor the
+/// shared encoder (P1+P2 live pinned drop% at ~9% while Joel received all).
 async fn push_to_all(
     slots: &Arc<Mutex<HashMap<u8, PlayerConn>>>,
     nal: Vec<u8>,
@@ -263,7 +241,8 @@ async fn push_to_all(
             Err(e) => warn!("push h264 (fan-out): {e}"),
         }
     }
-    webrtc_peer::governor_shed_counts(&fates)
+    let (any, _peer_sheds) = webrtc_peer::governor_shed_counts(&fates);
+    (any, webrtc_peer::governor_frame_shed(&fates))
 }
 
 /// Drain a rejoin burst from the inbound queue. One reload (or a double-tab /
@@ -381,6 +360,7 @@ async fn handle_slot_join(
     info!("player joined slot {slot} (player epoch {epoch}) — building WebRTC peer + offer");
     let conn = build_player_conn(args, preset, signal_out, slot, epoch).await?;
     capturer.resync();
+    capturer.reassert_target();
     {
         let mut guard = slots.lock().await;
         if let Some(old) = guard.insert(slot, conn) {
@@ -607,7 +587,7 @@ async fn main() -> Result<()> {
     // Command the Windows encoder to match the preset size/bitrate, but allow
     // encode fps to track capture headroom (`COUCHLINK_CAPTURE_FPS` /
     // `COUCHLINK_ENCODE_FPS`) so a 720p60 label does not clamp a 120 Hz path.
-    let encode_fps = encode_fps_target(preset.fps);
+    let encode_fps = couchlink_capture_bridge::encode_fps_target(preset.fps);
     if encode_fps != preset.fps {
         info!(
             "encode fps {encode_fps} (preset {} — capture/encode env raised the ceiling)",
@@ -700,6 +680,9 @@ async fn main() -> Result<()> {
     // loop is only a relay — so poll fast and forward immediately. Holding an
     // already-encoded frame for the rest of a 16ms beat is pure added latency.
     // On the raw path this interval *is* the metronome and must stay at frame time.
+    // Pre-encoded: poll fast and forward immediately. Rate control is SET_TARGET
+    // on win-capture (encode_fps) — skipping socket reads here left H.264 backlog
+    // and IDR storms while push stuck at the game's ~60 Hz WGC rate.
     let tick = if capturer.is_preencoded() {
         Duration::from_millis(2)
     } else {
@@ -882,16 +865,13 @@ async fn main() -> Result<()> {
                                     } else {
                                         0
                                     };
-                                    // The pre-encoded encoder is the only component the
-                                    // link cannot throttle by itself. If sheds persist,
-                                    // step the commanded target down so the player gets
-                                    // every frame the link can carry. Drops are summed
-                                    // across slots so the single shared governor sees
-                                    // the whole vector — N per-slot governors would
-                                    // fight over the one encoder knob.
+                                    // Governor must use the same attempted denominator as
+                                    // the HUD — old code passed window_frames only, so
+                                    // 43/613 displayed as 6% but scored as 7%+ internally
+                                    // and stepped bitrate to the 1250 kbps floor.
                                     let decided = link_gov.on_window(
                                         dropped_frames as u32,
-                                        window_frames as u32,
+                                        sent as u32,
                                     );
                                     if decided != commanded_target {
                                         commanded_target = decided;

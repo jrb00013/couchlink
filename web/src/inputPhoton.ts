@@ -11,7 +11,7 @@ export { surplusMs } from "./latencyBudget";
 
 let lastPadSentAt = 0;
 
-type PadSend = { seq: number; perfSent: number };
+type PadSend = { seq: number; perfSent: number; clientTsMs?: number };
 const ring: PadSend[] = [];
 const MAX_RING = 256;
 const photonSamples: number[] = [];
@@ -28,10 +28,18 @@ export type InputPhotonSnapshot = {
   watermarkActive: boolean;
 };
 
-export function notePadSent(atMs = performance.now(), seq?: number): void {
+export function notePadSent(
+  atMs = performance.now(),
+  seq?: number,
+  clientTsMs?: number
+): void {
   lastPadSentAt = atMs;
   if (seq != null) {
-    ring.push({ seq: seq >>> 0, perfSent: atMs });
+    ring.push({
+      seq: seq >>> 0,
+      perfSent: atMs,
+      clientTsMs: clientTsMs !== undefined ? clientTsMs >>> 0 : undefined,
+    });
     if (ring.length > MAX_RING) ring.shift();
   }
 }
@@ -54,7 +62,8 @@ export function notePhotonPaint(paintMs: number, inputWm: number): number | null
   const wm = inputWm >>> 0;
   const hit = [...ring].reverse().find((e) => e.seq === wm);
   if (!hit) return null;
-  const ms = Math.max(0, paintMs - hit.perfSent);
+  const sentAt = hit.clientTsMs ?? hit.perfSent;
+  const ms = Math.max(0, paintMs - sentAt);
   photonSamples.push(ms);
   if (photonSamples.length > 120) photonSamples.shift();
   return ms;

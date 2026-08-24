@@ -161,7 +161,7 @@ pub struct WebRtcHost {
     last_input_wm: Arc<AtomicU32>,
 }
 
-/// `present_path` has not been reported yet — send both paths.
+/// `present_path` has not been reported yet — CLVD-first (binary only).
 pub(crate) const PATH_UNKNOWN: u8 = 0;
 /// Client is painting from the CLVD DataChannel. RTP is off — dual/IDR drip
 /// was burning the push budget on 3-friend WAN. Stall → client reports
@@ -170,10 +170,15 @@ pub(crate) const PATH_WEBCODECS: u8 = 1;
 /// Client is painting from the RTP media track — the DataChannel is unnecessary.
 pub(crate) const PATH_RTP: u8 = 2;
 
+/// Stall rescue only — RTP + full CLVD so canvas can recover. Not used on join
+/// (join stays PATH_UNKNOWN = binary-only so WebCodecs paints without dual flood).
+pub(crate) const PATH_WARMUP: u8 = 3;
+
 /// Which of (RTP, DataChannel) to write for a given `present_path` state.
 ///
-/// WebCodecs healthy → CLVD only. Warmup/unknown → both (join + stall rescue).
-/// RTP-only browsers → RTP only. `COUCHLINK_RTP_FULL=1` restores dual always.
+/// Production CLVD-first: unknown = binary only so WebCodecs can paint without
+/// SCTP dual-flood. Warmup = stall rescue (RTP + CLVD). WebCodecs healthy =
+/// CLVD only. `COUCHLINK_RTP_FULL=1` restores dual always.
 pub(crate) fn path_flags(path: u8) -> (bool, bool) {
     if rtp_full_dual() {
         return match path {
@@ -182,9 +187,11 @@ pub(crate) fn path_flags(path: u8) -> (bool, bool) {
         };
     }
     match path {
-        PATH_WEBCODECS => (false, true),
+        PATH_WEBCODECS | PATH_UNKNOWN => (false, true),
         PATH_RTP => (true, false),
-        _ => (true, true),
+        // Explicit stall rescue — canvas needs RTP again.
+        PATH_WARMUP => (true, true),
+        _ => (false, true),
     }
 }
 
@@ -202,30 +209,34 @@ fn rtp_full_dual() -> bool {
 
 /// Whether this AU should hit the RTP media track.
 ///
-/// WebCodecs paints from CLVD only (unless `COUCHLINK_RTP_FULL`). Warmup /
-/// unknown / RTP path still take every AU on RTP.
+/// CLVD-first: unknown/webcodecs never touch RTP. Warmup (stall rescue) keeps
+/// IDR RTP so canvas can recover without dual-flooding every P-frame.
 pub(crate) fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool {
     let (send_rtp, _) = path_flags(path);
     if !send_rtp {
         return false;
     }
-    full_dual || path == PATH_RTP || path == PATH_UNKNOWN || keyframe
+    if full_dual {
+        return true;
+    }
+    match path {
+        PATH_RTP => true,
+        PATH_WARMUP => keyframe,
+        _ => keyframe,
+    }
 }
 
 /// Whether this AU should hit the CLVD DataChannel.
 ///
-/// During warmup dual-send, full-rate CLVD+RTP at 90–150fps permanently
-/// congests SCTP and WebCodecs never paints. Keep RTP full for paint fps;
-/// thin CLVD to keyframes + every 4th delta so input_wm / S_p50 still fill.
+/// Full-rate binary (CLVD v4 `input_wm` + `stamp_us`) whenever the DC path is
+/// live — that is the lightning path for S_p50. Never thin it.
 pub(crate) fn should_send_clvd(keyframe: bool, path: u8, seq: u32) -> bool {
     let (_, send_dc) = path_flags(path);
     if !send_dc {
         return false;
     }
-    if path != PATH_UNKNOWN {
-        return true;
-    }
-    keyframe || seq % 4 == 0
+    let _ = (keyframe, seq);
+    true
 }
 
 /// Parse a client-reported present path. An unrecognised value maps to
@@ -234,9 +245,8 @@ fn parse_present_path(path: &str) -> u8 {
     match path {
         "webcodecs" => PATH_WEBCODECS,
         "rtp" => PATH_RTP,
-        // "warmup": the viewer is bringing up WebCodecs and will switch once it
-        // paints its first frame — until then keep both paths live so RTP is a
-        // safety net and the DataChannel warms the decoder in parallel.
+        // IDR RTP + full CLVD until WebCodecs paints, then PATH_WEBCODECS.
+        "warmup" => PATH_WARMUP,
         _ => PATH_UNKNOWN,
     }
 }
@@ -284,6 +294,12 @@ impl WebRtcHost {
         // A path flip (warmup after a stall, or RTP fallback) needs an IDR
         // so the stream that just became visible is not mid-GOP.
         if prev != next {
+            tracing::info!(
+                prev,
+                next,
+                path,
+                "present_path flipped — IDR so the live stream is not mid-GOP"
+            );
             self.request_keyframe();
         }
     }
@@ -645,13 +661,13 @@ impl WebRtcHost {
         // mid-GOP without IDR recovery (Sunshine/Moonlight + FrameHandoff pattern).
         // Old path skipped every delta while trickling → IDR-only → ~1fps paint.
 
-        // Warmup (PATH_UNKNOWN): CLVD **first** so WebCodecs can paint and stamp
-        // input_wm / S_p50. RTP-first at 90–160fps dual-send left the DC
-        // permanently congested — WC never warmed, presentMode stuck on canvas.
-        // Safari/RTP-only path still gets RTP immediately after (or alone).
+        // CLVD-first (PATH_UNKNOWN / PATH_WEBCODECS): full-rate binary so
+        // WebCodecs can paint and stamp input_wm / S_p50. RTP only on
+        // PATH_WARMUP stall rescue (IDR) or PATH_RTP.
         //
         // WebCodecs healthy: CLVD only (path_flags). Full dual via COUCHLINK_RTP_FULL.
-        let clvd_first = send_dc && (path == PATH_UNKNOWN || path == PATH_WEBCODECS);
+        let clvd_first =
+            send_dc && (path == PATH_UNKNOWN || path == PATH_WARMUP || path == PATH_WEBCODECS);
         // Peek seq for warmup thinning without consuming it on skipped frames.
         let next_seq = self.video_seq.load(Ordering::Relaxed);
 
@@ -677,7 +693,9 @@ impl WebRtcHost {
                     stamp_us: crate::age::now_us(),
                     input_wm: self.last_input_wm.load(Ordering::Relaxed),
                 };
-                let fragments = if self.fec_enabled {
+                let fragments = if self.fec_enabled && path == PATH_WEBCODECS {
+                    // FEC only after binary present is proven — warmup/unknown
+                    // IDRs are the SCTP tax that starved CLVD (Joel fallback_timer).
                     au.encode_fragments_with_fec()
                 } else {
                     au.encode_fragments()
@@ -762,11 +780,26 @@ pub enum PushFate {
     TrickleSkip,
 }
 
-/// Aggregate fan-out fates into (any_delivered, congestion_sheds).
+/// Aggregate fan-out fates into (any_delivered, per_peer_congestion_sheds).
 pub fn governor_shed_counts(fates: &[PushFate]) -> (bool, u64) {
     let any = fates.iter().any(|f| *f == PushFate::Delivered);
     let shed = fates.iter().filter(|f| **f == PushFate::Shed).count() as u64;
     (any, shed)
+}
+
+/// Frame-level shed for the link governor — 1 only when *no* peer got the frame.
+///
+/// Summing per-peer sheds with N>1 inflated drop% (~9% live with P1+P2 while
+/// Joel received every frame) and floored bitrate to 1250 kbps.
+pub fn governor_frame_shed(fates: &[PushFate]) -> u64 {
+    if fates.is_empty() {
+        return 0;
+    }
+    if fates.iter().any(|f| *f == PushFate::Delivered) {
+        0
+    } else {
+        1
+    }
 }
 
 fn coalesce_keyframe_request(wanted: &AtomicBool, coalesce_ms: &AtomicU64) {
@@ -977,8 +1010,8 @@ mod controller_host_tests {
     }
 
     #[test]
-    fn unknown_path_sends_both_so_nobody_goes_black_while_unreported() {
-        assert_eq!(path_flags(PATH_UNKNOWN), (true, true));
+    fn unknown_path_is_clvd_first_binary_only() {
+        assert_eq!(path_flags(PATH_UNKNOWN), (false, true));
     }
 
     #[test]
@@ -987,11 +1020,11 @@ mod controller_host_tests {
     }
 
     #[test]
-    fn warmup_thins_clvd_but_keeps_keyframes() {
-        assert!(should_send_clvd(true, PATH_UNKNOWN, 1));
-        assert!(should_send_clvd(false, PATH_UNKNOWN, 0));
-        assert!(should_send_clvd(false, PATH_UNKNOWN, 4));
-        assert!(!should_send_clvd(false, PATH_UNKNOWN, 1));
+    fn warmup_rescue_keeps_rtp_and_full_clvd() {
+        assert_eq!(path_flags(PATH_WARMUP), (true, true));
+        assert!(should_send_clvd(true, PATH_WARMUP, 1));
+        assert!(should_send_clvd(false, PATH_WARMUP, 1));
+        assert!(should_send_clvd(false, PATH_UNKNOWN, 1));
         assert!(should_send_clvd(false, PATH_WEBCODECS, 1));
     }
 
@@ -1028,6 +1061,12 @@ mod controller_host_tests {
     }
 
     #[test]
+    fn two_peer_one_congestion_shed_is_not_frame_shed() {
+        let fates = [PushFate::Delivered, PushFate::Shed];
+        assert_eq!(governor_frame_shed(&fates), 0);
+    }
+
+    #[test]
     fn two_peer_one_trickle_does_not_report_fifty_pct_to_governor() {
         // The death-spiral arithmetic: healthy Delivered + slow TrickleSkip
         // must yield shed=0. Counting TrickleSkip as Shed pinned drop% at 50.
@@ -1042,11 +1081,15 @@ mod controller_host_tests {
     }
 
     #[test]
-    fn should_send_rtp_off_on_webcodecs_full_on_safari_and_unknown() {
+    fn should_send_rtp_clvd_first_unknown_and_webcodecs() {
         assert!(!should_send_rtp(true, PATH_WEBCODECS, false));
         assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(!should_send_rtp(true, PATH_UNKNOWN, false));
+        assert!(!should_send_rtp(false, PATH_UNKNOWN, false));
         assert!(should_send_rtp(false, PATH_RTP, false));
-        assert!(should_send_rtp(false, PATH_UNKNOWN, false));
+        // Stall rescue: IDR RTP only.
+        assert!(!should_send_rtp(false, PATH_WARMUP, false));
+        assert!(should_send_rtp(true, PATH_WARMUP, false));
         assert!(!should_send_rtp(false, PATH_WEBCODECS, true));
     }
 
@@ -1065,6 +1108,7 @@ mod controller_host_tests {
     fn parse_present_path_recognises_both_values() {
         assert_eq!(parse_present_path("webcodecs"), PATH_WEBCODECS);
         assert_eq!(parse_present_path("rtp"), PATH_RTP);
+        assert_eq!(parse_present_path("warmup"), PATH_WARMUP);
     }
 
     #[test]

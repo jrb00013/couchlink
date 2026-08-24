@@ -245,9 +245,9 @@ export class WebCodecsCanvasView {
     this.lastPaintAt = 0;
     if (this.stallTimer !== null) window.clearInterval(this.stallTimer);
     this.stallTimer = window.setInterval(() => this.checkStall(), 500);
-    // Probe accel before the first IDR so configure is not deferred past the
-    // App's WebCodecs→RTP fallback timer (headless has no prefer-hardware).
-    void this.resolveHwAccel(1280, 720);
+    // Accel probe runs on the first IDR once SPS/PPS are known — probing at
+    // start() with a generic codec string cached a stale promise and blocked
+    // configure in real Chrome (fallback_timer, zero input_wm samples).
     clog("webcodecs canvas ready (latest-frame-wins)", {
       secureContext: window.isSecureContext,
       desynchronized:
@@ -268,6 +268,9 @@ export class WebCodecsCanvasView {
         },
         error: (e) => {
           cwarn("VideoDecoder error", String(e));
+          if (this.hwAccel !== "prefer-software") {
+            this.hwAccel = "prefer-software";
+          }
           this.resetForKeyframe();
         },
       });
@@ -301,6 +304,9 @@ export class WebCodecsCanvasView {
     if (this.hwAccelProbe) return this.hwAccelProbe;
     const codec = this.codec;
     const description = this.description;
+    if (!description) {
+      return Promise.reject(new Error("resolveHwAccel before SPS/PPS"));
+    }
     this.hwAccelProbe = (async () => {
       const candidates: HardwareAcceleration[] = [
         "prefer-hardware",
@@ -447,14 +453,9 @@ export class WebCodecsCanvasView {
           this.resetForKeyframe();
           return;
         }
-        if (!this.hwAccel) {
-          // Probe async; skip this AU and ask for a fresh IDR once we know
-          // which acceleration mode this browser actually supports.
-          void this.resolveHwAccel(au.width, au.height).then(() => {
-            this.requestKeyframe();
-          });
-          return;
-        }
+        // Configure THIS IDR immediately. Waiting on isConfigSupported skipped
+        // the keyframe, asked for another, and Chrome never painted (fallback_timer).
+        if (!this.hwAccel) this.hwAccel = "prefer-hardware";
         try {
           dec.configure({
             codec: this.codec,
@@ -465,13 +466,13 @@ export class WebCodecsCanvasView {
             hardwareAcceleration: this.hwAccel,
           });
         } catch (e) {
-          // Last resort if the probe lied — force software and recreate.
           cwarn("VideoDecoder configure failed; forcing prefer-software", e);
           this.hwAccel = "prefer-software";
           this.resetForKeyframe();
           this.requestKeyframe();
           return;
         }
+        void this.resolveHwAccel(au.width, au.height).catch(() => {});
         this.configured = true;
         clog("VideoDecoder configured", {
           codec: this.codec,
@@ -643,5 +644,7 @@ export class WebCodecsCanvasView {
     this.configured = false;
     this.waitingKeyframe = true;
     this.description = null;
+    this.hwAccel = null;
+    this.hwAccelProbe = null;
   }
 }

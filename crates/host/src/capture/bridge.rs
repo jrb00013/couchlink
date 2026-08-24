@@ -165,6 +165,19 @@ impl WindowsBridge {
         }
     }
 
+    /// Re-send the last commanded target (e.g. after player join) so a race
+    /// between host connect and win-capture's command reader cannot leave the
+    /// encoder at CLI defaults (120 fps) while the relay paces at 96.
+    pub fn reassert_target(&mut self) {
+        if let Some(target) = self.target {
+            if let Some(stream) = self.stream.as_mut() {
+                if let Err(e) = write_set_target(stream, target) {
+                    tracing::warn!("could not re-command encode target to win-capture: {e}");
+                }
+            }
+        }
+    }
+
     fn read_one(&mut self) -> Result<()> {
         loop {
             if self.read_frame(IDLE_POLL)?.is_some() {

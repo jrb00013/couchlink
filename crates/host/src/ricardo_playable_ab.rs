@@ -40,7 +40,7 @@ mod tests {
     use super::*;
     use crate::webrtc_peer::{
         path_flags, should_enter_trickle, should_exit_trickle, should_send_rtp, PATH_UNKNOWN,
-        PATH_WEBCODECS,
+        PATH_WARMUP, PATH_WEBCODECS,
     };
 
     /// Live preset friends joined with that night.
@@ -64,23 +64,23 @@ mod tests {
     }
 
     #[test]
-    fn b_fps_hold_never_drops_below_playable_60() {
+    fn b_bitrate_hold_never_drops_below_playable_5mbps() {
         for r in rungs_from(&playable_preset()) {
             assert_eq!(
-                r.fps, A::ENCODER_FPS,
-                "fps-hold broken vs Ricardo playable: {r:?}"
+                r.bitrate_kbps, A::ENCODER_KBPS,
+                "bitrate-hold broken vs Ricardo playable: {r:?}"
             );
         }
     }
 
     #[test]
-    fn b_bitrate_floor_never_returns_unplayable_625() {
+    fn b_fps_floor_never_returns_unplayable_sub_30() {
         let floor = *rungs_from(&playable_preset()).last().unwrap();
         assert!(
-            floor.bitrate_kbps >= 1_250,
-            "625 kbps was the death spiral; floor={floor:?}"
+            floor.fps >= 45,
+            "sub-45 fps was the death spiral; floor={floor:?}"
         );
-        assert_ne!(floor.bitrate_kbps, 625);
+        assert_eq!(floor.bitrate_kbps, A::ENCODER_KBPS);
     }
 
     #[test]
@@ -97,9 +97,10 @@ mod tests {
     }
 
     #[test]
-    fn b_warmup_still_dual_so_join_is_not_black() {
-        assert_eq!(path_flags(PATH_UNKNOWN), (true, true));
-        assert!(should_send_rtp(false, PATH_UNKNOWN, false));
+    fn b_warmup_keeps_idr_rtp_so_join_is_not_black() {
+        assert_eq!(path_flags(PATH_WARMUP), (true, true));
+        assert!(should_send_rtp(true, PATH_WARMUP, false));
+        assert!(!should_send_rtp(false, PATH_WARMUP, false));
     }
 
     #[test]

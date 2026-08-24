@@ -801,15 +801,11 @@ export class CouchlinkPlayer {
       });
       if (useWc) {
         this.webcodecsPath = true;
-        // Warm-up: tell the host to keep BOTH paths live. Announcing
-        // "webcodecs" now would make it cut RTP while this fresh DataChannel
-        // is still in SCTP slow-start — RTP stops, the keyframe stalls, the
-        // decoder never configures, and the 2.5s fallback lands the viewer on
-        // RTP-with-jitter-buffer for the rest of the session. Stay "warmup"
-        // (both paths) until the first frame actually paints, then promote.
-        this.notifyPresentPath(
-          "warmup",
-          "CLVD DataChannel + WebCodecs warming — RTP stays live as safety net"
+        // CLVD-first: do NOT announce "warmup" (dual-send). Leave present_path
+        // unknown so the host sends full-rate binary only — WebCodecs can paint
+        // without SCTP fighting IDR RTP. Stall/fallback → resumeWarmup().
+        clog(
+          "CLVD DataChannel + WebCodecs warming — binary-only until first paint"
         );
         this.cb.onState("connected", "webcodecs video");
         this.gotVideoTrack = true;
@@ -891,16 +887,13 @@ export class CouchlinkPlayer {
 
   /**
    * WebCodecs painted its first frame. Promote to "webcodecs" so the host
-   * thins RTP to IDR-only (path_flags still keeps the track alive). Staying
-   * on "warmup" forever forced full dual-send and blew the push budget.
+   * keeps CLVD-only (RTP stays off). Stall → resumeWarmup() for canvas rescue.
    */
   promoteWebcodecs() {
-    // Allow early promote before the first paint so high-fps warmup can leave
-    // dual-send; mark the path live even if the DC open handler has not run.
     this.webcodecsPath = true;
     this.notifyPresentPath(
       "webcodecs",
-      "CLVD DataChannel + WebCodecs present — RTP off (stall → warmup rescue)"
+      "CLVD DataChannel + WebCodecs present — binary path live (stall → warmup rescue)"
     );
   }
 
@@ -941,7 +934,7 @@ export class CouchlinkPlayer {
     this.lastPadHold = held;
     this.lastPadHoldAt = now;
     this.padDc.send(encodeClpd({ ...held, clientTsMs: now >>> 0 }));
-    notePadSent(now, held.seq);
+    notePadSent(now, held.seq, now >>> 0);
     this.padSent += 1;
   }
 

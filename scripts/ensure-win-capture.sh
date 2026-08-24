@@ -93,6 +93,13 @@ bitrate_kbps="${COUCHLINK_BITRATE_KBPS:-$bitrate_kbps}"
 # wait, so halving it halves that half. The cost is double the encode and
 # roughly double the bitrate's worth of frames, so it is opt-in.
 capture_fps="${COUCHLINK_CAPTURE_FPS:-60}"
+# MaxFps seeds both WGC interval and the encoder metronome until SET_TARGET.
+# Cap at encode_fps_target (90) so a CAPTURE_FPS=120 launch does not flood
+# CLVD before the host connects — host still reasserts via SET_TARGET.
+if [[ -z "${COUCHLINK_ENCODE_FPS:-}" && "$capture_fps" -gt 90 ]]; then
+  export COUCHLINK_ENCODE_FPS=90
+fi
+encode_fps="${COUCHLINK_ENCODE_FPS:-$capture_fps}"
 source_mode="${COUCHLINK_CAPTURE_SOURCE:-picker}"
 window_title="${COUCHLINK_CAPTURE_WINDOW:-}"
 if [[ -n "$window_title" ]]; then
@@ -193,7 +200,7 @@ task_name="couchlink-win-capture"
 _ps_style="Hidden"
 [[ "$source_mode" == "picker" ]] && _ps_style="Normal"
 psw -Command "
-  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
+  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$encode_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   # Start-Process flattens -ArgumentList arrays WITHOUT quoting, so a window
   # title like 'Marvel - Ultimate Alliance' becomes argv tokens

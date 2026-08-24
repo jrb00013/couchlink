@@ -1,6 +1,6 @@
 //! Two-peer join_all fate arithmetic — the bug that pinned shed% at ~50%.
 
-use crate::webrtc_peer::{governor_shed_counts, PushFate};
+use crate::webrtc_peer::{governor_frame_shed, governor_shed_counts, PushFate};
 
 /// Count shed the **old** way: every non-delivery (including TrickleSkip) was a shed.
 pub fn legacy_shed_count(fates: &[PushFate]) -> u64 {
@@ -52,6 +52,19 @@ mod tests {
     #[test]
     fn fixed_two_peer_trickle_reports_zero_pct_shed() {
         assert_eq!(simulate_two_peer_shed_counting(false), 0);
+    }
+
+    #[test]
+    fn one_peer_shed_while_other_delivers_is_not_frame_shed() {
+        let fates = [PushFate::Delivered, PushFate::Shed];
+        assert_eq!(governor_frame_shed(&fates), 0);
+        assert_eq!(governor_shed_counts(&fates).1, 1);
+    }
+
+    #[test]
+    fn all_peers_shed_counts_as_one_frame_shed() {
+        let fates = [PushFate::Shed, PushFate::Shed];
+        assert_eq!(governor_frame_shed(&fates), 1);
     }
 
     #[test]

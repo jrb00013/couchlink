@@ -346,12 +346,12 @@ export default function App() {
     // Don't tear down a live decoder on every callback.
     if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
     webcodecsActiveRef.current = true;
-    // Ask the host for CLVD-only *before* first paint. Waiting until paint left
-    // warmup dual-send at 90–150fps permanently congesting the DC — WC never
-    // painted and S_p50 died. RTP canvas stays visible until promote/software
-    // path decides; a short freeze beats a permanent canvas-only session.
-    playerRef.current?.promoteWebcodecs();
-    clog("webcodecs decoder warming — host switched to CLVD-primary");
+    // CLVD-first: never early-promote. Host stays binary-only (PATH_UNKNOWN)
+    // until first paint → promoteWebcodecsPresent. Early HW promote flipped
+    // to webcodecs before paint and left canvas on IDR-only when WC stalled.
+    clog("webcodecs warming — CLVD binary-only until first paint", {
+      accel: wcRef.current.hardwareAcceleration(),
+    });
     armWebCodecsFallback();
     return true;
   }
@@ -359,26 +359,10 @@ export default function App() {
   /** WebCodecs painted — show it, but keep RTP decoding on the hidden canvas. */
   function promoteWebcodecsPresent() {
     const accel = wcRef.current?.hardwareAcceleration();
-    // Software-only decode cannot hold Ricardo paint fps. Keep RTP on screen
-    // for paint, leave WebCodecs running hidden so input_wm / S_p50 still
-    // accumulate, and keep the host in warmup dual-send.
+    // Software WebCodecs still paints from CLVD (binary input_wm). Hiding it
+    // and staying on RTP was why Joel felt pad delay with Φ unmeasured.
     if (accel === "prefer-software" || accel === "no-preference") {
-      if (softwarePhotonRef.current) return;
-      softwarePhotonRef.current = true;
-      stalledRef.current = false;
-      clearRtpFallbackTimer();
-      clog(
-        "present mode: WebCodecs software background — RTP stays visible for paint fps"
-      );
-      wcCanvasRef.current?.classList.add("is-hidden");
-      canvasRef.current?.classList.remove("is-hidden");
-      videoRef.current?.classList.add("is-hidden");
-      // presentMode webcodecs marks CLVD/S_p50 path live for the Ricardo scrape
-      // even while the visible surface is still the RTP canvas.
-      setPresentMode("webcodecs");
-      setPresentStuck(null);
-      playerRef.current?.resumeWarmup();
-      return;
+      clog("present mode: WebCodecs software — CLVD on screen (binary path)");
     }
     if (promotedRef.current) return;
     promotedRef.current = true;

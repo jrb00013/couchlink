@@ -26,7 +26,7 @@ pub const GOV_WINDOW_S: f64 = 5.0;
 pub const DOWN_TRIGGER_PCT: u32 = 8;
 
 /// `link_gov.rs` `UP_AFTER_CLEAN_WINDOWS`.
-pub const UP_AFTER_CLEAN_WINDOWS: u32 = 8;
+pub const UP_AFTER_CLEAN_WINDOWS: u32 = 2;
 
 /// Pad wire. `crates/proto/src/pad_frame.rs` `PAD_FRAME_LEN` / player.ts 250 Hz.
 pub const PAD_FRAME_LEN: u32 = 31;
@@ -53,20 +53,21 @@ pub const P720: EncodeTarget = EncodeTarget {
 
 /// Same construction as `link_gov::rungs_from` — must stay a copy so a ladder
 /// change fails these tests instead of silently drifting the WAN model.
-/// Hold `baseline.fps`; step bitrate only (fps-hold invariant).
+/// Hold `baseline.bitrate_kbps`; step fps (frame-rate congestion on CLVD).
 pub fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
-    let mut kbps = baseline.bitrate_kbps;
-    const FLOOR_KBPS: u32 = 1_250;
-    for _ in 0..3 {
-        let next = (kbps / 2).max(FLOOR_KBPS);
-        if next >= kbps {
+    let floor_fps = ((baseline.fps * 5) / 9).max(45).min(baseline.fps);
+    let mut fps = baseline.fps;
+    for _ in 0..4 {
+        let step = (fps / 7).max(6);
+        let next = fps.saturating_sub(step).max(floor_fps);
+        if next >= fps {
             break;
         }
-        kbps = next;
+        fps = next;
         let extra = EncodeTarget {
-            fps: baseline.fps,
-            bitrate_kbps: kbps,
+            fps,
+            bitrate_kbps: baseline.bitrate_kbps,
             ..*baseline
         };
         if !rungs.iter().any(|r| *r == extra) {
@@ -164,29 +165,29 @@ mod tests {
     // ── Inventory locked to measurements ──────────────────────────────
 
     #[test]
-    fn every_rung_from_p720_holds_60_fps() {
+    fn every_rung_from_p720_holds_bitrate() {
         for r in rungs_from(&P720) {
-            assert_eq!(r.fps, 60, "fps-hold violated: {r:?}");
+            assert_eq!(r.bitrate_kbps, P720.bitrate_kbps, "bitrate-hold violated: {r:?}");
         }
     }
 
     #[test]
-    fn p720_ladder_steps_bitrate_only() {
+    fn p720_ladder_steps_fps_only() {
         let r = rungs_from(&P720);
-        assert_eq!(r.len(), 4);
+        assert!(r.len() >= 2);
         assert_eq!(r[0], P720);
-        assert_eq!(r[1], EncodeTarget { bitrate_kbps: 5_000, ..P720 });
-        assert_eq!(r[2], EncodeTarget { bitrate_kbps: 2_500, ..P720 });
-        assert_eq!(r[3], EncodeTarget { bitrate_kbps: 1_250, ..P720 });
+        assert!(r[1].fps < P720.fps);
+        assert_eq!(r[1].bitrate_kbps, P720.bitrate_kbps);
         let floor = *r.last().unwrap();
-        assert_eq!(floor.fps, 60);
-        assert_eq!(floor.bitrate_kbps, 1_250);
+        assert!(floor.fps <= P720.fps);
+        assert!(floor.fps >= 45);
+        assert_eq!(floor.bitrate_kbps, P720.bitrate_kbps);
     }
 
     #[test]
     fn live_trickle_is_historical_observation_not_ladder_floor() {
         // LIVE_TRICKLE is the 2026-08-22 measured death-spiral floor; the
-        // fps-hold ladder floor is 60@1250, not 15@2500.
+        // fps-step ladder holds bitrate and never matches 15@2500.
         assert_eq!(LIVE_TRICKLE.fps, 15);
         assert_eq!(LIVE_TRICKLE.bitrate_kbps, 2_500);
         assert_ne!(*rungs_from(&P720).last().unwrap(), LIVE_TRICKLE);
@@ -270,15 +271,14 @@ mod tests {
     }
 
     #[test]
-    fn first_climb_off_floor_doubles_bits_keeps_60() {
+    fn first_climb_off_floor_raises_fps_keeps_bitrate() {
         let r = rungs_from(&P720);
-        let floor = r[3];
-        let climb = r[2];
-        assert_eq!(floor.fps, 60);
-        assert_eq!(floor.bitrate_kbps, 1_250);
-        assert_eq!(climb.fps, 60);
-        assert_eq!(climb.bitrate_kbps, 2_500);
-        almost(climb_ready_s(), 40.0, 1e-9);
+        let floor = *r.last().unwrap();
+        let climb = r[r.len() - 2];
+        assert!(floor.fps < climb.fps);
+        assert_eq!(floor.bitrate_kbps, P720.bitrate_kbps);
+        assert_eq!(climb.bitrate_kbps, P720.bitrate_kbps);
+        almost(climb_ready_s(), 10.0, 1e-9);
         assert_eq!(
             host_uplink_idr_only_kbps(2_500, N_FRIENDS, 60_000, 1.0),
             8_940
@@ -371,22 +371,21 @@ mod tests {
 
     #[test]
     fn rungs_from_must_not_take_the_live_floor_as_baseline() {
-        // fps-hold relative to *whatever* baseline is passed: every rung keeps
-        // that fps. Passing LIVE_TRICKLE as baseline must not invent 7 fps.
+        // Bitrate-hold relative to *whatever* baseline is passed: every rung keeps
+        // that bitrate. Passing LIVE_TRICKLE as baseline must not invent 625 kbps.
         let from_trickle = rungs_from(&LIVE_TRICKLE);
         for r in &from_trickle {
-            assert_eq!(r.fps, 15, "fps-hold relative to LIVE_TRICKLE: {r:?}");
+            assert_eq!(
+                r.bitrate_kbps, 2_500,
+                "bitrate-hold relative to LIVE_TRICKLE: {r:?}"
+            );
         }
-        assert_eq!(from_trickle[0].bitrate_kbps, 2_500);
-        assert!(
-            from_trickle.iter().any(|r| r.bitrate_kbps == 1_250),
-            "bitrate floors at 1250: {from_trickle:?}"
-        );
+        assert_eq!(from_trickle[0].fps, 15);
         let from_p720 = rungs_from(&P720);
         for r in &from_p720 {
-            assert_eq!(r.fps, 60);
+            assert_eq!(r.bitrate_kbps, P720.bitrate_kbps);
         }
-        assert_eq!(from_p720.last().unwrap().bitrate_kbps, 1_250);
+        assert!(from_p720.last().unwrap().fps < P720.fps);
     }
 
     #[test]
@@ -456,8 +455,8 @@ mod tests {
         assert_eq!(dual, 15_000);
         assert_eq!(idr_only, 8_940);
         assert!(clvd < dual);
-        assert_eq!(rungs_from(&P720)[2].bitrate_kbps, 2_500);
-        assert_eq!(rungs_from(&P720)[2].fps, 60);
+        assert_eq!(rungs_from(&P720)[0].bitrate_kbps, 10_000);
+        assert!(rungs_from(&P720).last().unwrap().fps < 60);
     }
 
     #[test]
