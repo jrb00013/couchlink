@@ -812,11 +812,17 @@ async fn main() -> Result<()> {
                 // slot requesting one costs already-connected slots a harmless
                 // extra keyframe, not a correctness problem — one shared flag is
                 // enough.
+                // Viewer PLI → IDR. Hybrid dual: one IDR (WC bootstrap); exclusive
+                // CLVD / join paths still use the 3-frame burst below.
+                let mut hybrid_viewer_pli = false;
                 {
                     let guard = slots.lock().await;
                     for (_, conn) in guard.iter() {
                         if conn.host.take_keyframe_request() {
                             force_idr = true;
+                            if conn.host.hybrid_dual() {
+                                hybrid_viewer_pli = true;
+                            }
                         }
                     }
                 }
@@ -1015,9 +1021,10 @@ async fn main() -> Result<()> {
                     }
                 }
                 // A single IDR can be lost before the browser's decoder is ready, which
-                // costs the viewer seconds of black. Send a short burst instead.
+                // costs the viewer seconds of black. Burst-of-3 for exclusive/join;
+                // hybrid viewer PLI is one IDR (extra IDRs black shared RTP paint).
                 if force_idr {
-                    idr_burst = 3;
+                    idr_burst = if hybrid_viewer_pli { 1 } else { 3 };
                     force_idr = false;
                 }
                 // Periodic IDR so late joiners / stalled decoders can resync. This MUST be

@@ -159,8 +159,15 @@ export class WebCodecsCanvasView {
   private hwAccelProbe: Promise<HardwareAcceleration> | null = null;
   /** Hybrid: RTP is visible present; WC only stamps input_wm — never path-flip on stall. */
   private photonSidecar = false;
-  /** One DC PLI while waiting for first WC paint — host coalesces ≥3s in hybrid. */
-  private bootstrapPliSent = false;
+  /**
+   * Bootstrap DC PLIs before first WC paint. Host hybrid coalesces ≥3s; we allow
+   * two spaced attempts so a burned throttle / incomplete IDR does not strand
+   * S_p50 at 0 wm forever. After first paint: never PLI (shared-encoder blacks).
+   */
+  private bootstrapPliAttempts = 0;
+  private static readonly BOOTSTRAP_PLI_MAX = 2;
+  /** Match KEYFRAME_COALESCE_DUAL_MS on host — do not spam shared IDR. */
+  private static readonly BOOTSTRAP_PLI_GAP_MS = 3000;
 
   /** Newest decoded frame waiting for the compositor — older ones are closed. */
   private pending: VideoFrame | null = null;
@@ -239,7 +246,7 @@ export class WebCodecsCanvasView {
     this.painted = 0;
     this.paintedTotal = 0;
     this.dropped = 0;
-    this.bootstrapPliSent = false;
+    this.bootstrapPliAttempts = 0;
     this.decodeMsAccum = 0;
     this.lastAgeMs = 0;
     this.lastAgeBand = "ok";
@@ -538,16 +545,26 @@ export class WebCodecsCanvasView {
   }
 
   private requestKeyframe() {
-    // Photon sidecar: one bootstrap PLI until first paint so CLVD gets an IDR
-    // (24 KiB P-cap used to abort mid-IDR; host now allows IDR room + 3s
-    // coalesce). After paint, never PLI — shared-encoder IDR blacks RTP.
+    // Photon sidecar: up to BOOTSTRAP_PLI_MAX spaced PLIs until first paint so
+    // CLVD gets a complete IDR. After paint, never PLI — shared-encoder IDR
+    // blacks every peer's RTP. Do not mark an attempt until we actually send
+    // (old code burned the one-shot on the 200ms throttle).
     if (this.photonSidecar) {
-      if (this.paintedTotal > 0 || this.bootstrapPliSent) return;
-      this.bootstrapPliSent = true;
+      if (this.paintedTotal > 0) return;
+      if (this.bootstrapPliAttempts >= WebCodecsCanvasView.BOOTSTRAP_PLI_MAX) {
+        return;
+      }
     }
     const now = performance.now();
-    if (now - this.lastPli < 200) return;
+    const minGap = this.photonSidecar
+      ? WebCodecsCanvasView.BOOTSTRAP_PLI_GAP_MS
+      : 200;
+    // First bootstrap may fire immediately (lastPli==0); later ones wait 3s.
+    if (this.lastPli > 0 && now - this.lastPli < minGap) return;
     this.lastPli = now;
+    if (this.photonSidecar) {
+      this.bootstrapPliAttempts += 1;
+    }
     this.onNeedKeyframe?.();
   }
 

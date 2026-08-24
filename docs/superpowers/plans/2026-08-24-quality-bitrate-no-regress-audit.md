@@ -141,7 +141,11 @@ BEAT_SELF=1 HOST_LOG=… CLIENT_SCRAPE=/tmp/ricardo.json node scripts/regression
 | `bd21765` | CLVD IDR delivery under hybrid (256 KiB IDR + bootstrap PLI) |
 | `430c40e` | `run.sh host --online` = full stack + `ensure-host-stack.sh`; `install.sh --run` forwards flags |
 
-**Still open for live proof:** beat-self **S_p50 ≤ 5** on Joel / local after hard-refresh of post-`bd21765` build (v34+). Green RTP axes were already seen; wm path was the blocker this leaveoff targets.
+**Still open for live proof:** beat-self **S_p50 ≤ 5** on Joel / local after hard-refresh of post-bootstrap-PLI-fix build. Green RTP axes were already seen; wm path was the blocker.
+
+**Pre-scrape fixes after audit (same PR):**
+- Client: bootstrap PLI no longer burns on throttle; up to 2 attempts @ 3s until first WC paint
+- Host: hybrid viewer PLI → 1 IDR (not burst-of-3) on software encode path; win-capture already single `request_idr`
 
 ---
 

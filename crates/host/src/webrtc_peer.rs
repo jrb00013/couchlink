@@ -310,6 +310,14 @@ impl WebRtcHost {
         self.keyframe_wanted.swap(false, Ordering::Relaxed)
     }
 
+    /// True when this peer is on hybrid dual (full RTP + CLVD). Viewer PLI then
+    /// should force a **single** shared IDR — burst-of-3 blacks every peer's RTP
+    /// while WC only needed one complete CLVD keyframe.
+    pub fn hybrid_dual(&self) -> bool {
+        let (send_rtp, send_dc) = path_flags(self.present_path.load(Ordering::Relaxed));
+        send_rtp && send_dc
+    }
+
     /// Record which path the viewer just reported painting from.
     ///
     /// An unrecognised value is treated as unknown (send both) rather than
