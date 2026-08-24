@@ -805,19 +805,21 @@ export class CouchlinkPlayer {
       if (useWc) {
         this.webcodecsPath = true;
         // Hybrid: full RTP (canvas paint) + thin CLVD until/after WC paints.
-        // Promote announces "webcodecs" for FEC — RTP never turns off.
+        // Promote announces "webcodecs" (FEC stays OFF while RTP is live).
         this.notifyPresentPath(
           "warmup",
           "video DC open — full RTP + thin CLVD (photon sidecar)"
         );
         clog(
-          "CLVD warming under full RTP canvas — promote enables FEC, RTP stays"
+          "CLVD warming under full RTP canvas — RTP stays; FEC off while dual"
         );
         this.cb.onState("connected", "webcodecs video");
         this.gotVideoTrack = true;
         this.mediaHealthy = true;
-        // No PLI on DC open — RTP is already painting; shared-encoder IDR
-        // blacks friends. WC waits for the host's normal ~3s IDR.
+        // Soft bootstrap PLI once DC is open — host dual-coalesces ≥3s and
+        // forces a single shared IDR (not burst-of-3). WC still retries via
+        // webCodecsCanvas bootstrap if the first IDR is incomplete.
+        this.requestVideoKeyframe();
       } else {
         cwarn(
           "video DataChannel open but WebCodecs unavailable — using RTP path",

@@ -289,12 +289,21 @@ impl WebRtcHost {
     /// Same as `request_keyframe`, but rate-limited so a burst of sheds cannot
     /// force the encoder into IDR-only mode. Coalesce clock is **per peer**.
     pub fn request_keyframe_coalesced(&self) {
+        self.request_keyframe_coalesced_within(KEYFRAME_COALESCE_MS);
+    }
+
+    /// Hybrid dual: ≥IDR_INTERVAL gap so CLVD bootstrap cannot storm shared RTP.
+    pub fn request_keyframe_coalesced_dual(&self) {
+        self.request_keyframe_coalesced_within(KEYFRAME_COALESCE_DUAL_MS);
+    }
+
+    fn request_keyframe_coalesced_within(&self, min_gap_ms: u64) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let prev = self.keyframe_coalesce_ms.load(Ordering::Relaxed);
-        if now.saturating_sub(prev) < 750 {
+        if now.saturating_sub(prev) < min_gap_ms {
             return;
         }
         if self
@@ -801,6 +810,11 @@ impl WebRtcHost {
                     delivered = true;
                 } else if idr_ok_for_clvd {
                     self.request_keyframe_coalesced();
+                } else if keyframe && send_rtp {
+                    // Incomplete CLVD IDR under hybrid: one dual-coalesced retry so
+                    // WC can configure / stamp input_wm. Never for P-frame shed —
+                    // that path blacks every peer's RTP while HUD stays 0% drop.
+                    self.request_keyframe_coalesced_dual();
                 }
             } else if dc_open && congested && !keyframe {
                 if idr_ok_for_clvd {
@@ -916,10 +930,30 @@ async fn setup_video_channel(
     keyframe_coalesce_ms: Arc<AtomicU64>,
     present_path: Arc<AtomicU8>,
 ) {
-    dc.on_open(Box::new(move || {
-        info!("video datachannel open (CLVD → browser WebCodecs)");
-        Box::pin(async {})
-    }));
+    {
+        let keyframe_wanted = Arc::clone(&keyframe_wanted);
+        let keyframe_coalesce_ms = Arc::clone(&keyframe_coalesce_ms);
+        let present_path = Arc::clone(&present_path);
+        dc.on_open(Box::new(move || {
+            info!("video datachannel open (CLVD → browser WebCodecs)");
+            let keyframe_wanted = Arc::clone(&keyframe_wanted);
+            let keyframe_coalesce_ms = Arc::clone(&keyframe_coalesce_ms);
+            let present_path = Arc::clone(&present_path);
+            Box::pin(async move {
+                // Hybrid: one soft IDR as soon as CLVD is open so WC can configure
+                // without waiting for the 3s periodic tick. Dual coalesce ≥3s —
+                // never an IDR storm. RTCP PLI still ignored while RTP is live.
+                let (send_rtp, send_dc) = path_flags(present_path.load(Ordering::Relaxed));
+                if send_rtp && send_dc {
+                    coalesce_keyframe_request_within(
+                        &keyframe_wanted,
+                        &keyframe_coalesce_ms,
+                        KEYFRAME_COALESCE_DUAL_MS,
+                    );
+                }
+            })
+        }));
+    }
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
         let keyframe_wanted = Arc::clone(&keyframe_wanted);
         let keyframe_coalesce_ms = Arc::clone(&keyframe_coalesce_ms);
