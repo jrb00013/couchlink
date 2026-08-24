@@ -66,9 +66,9 @@ mod tests {
     }
 
     #[test]
-    fn webcodecs_path_still_clvd_only() {
-        // Sacred: healthy WebCodecs = CLVD only (no dual full RTP send).
-        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
+    fn webcodecs_path_keeps_full_rtp_hybrid() {
+        // Sacred: healthy WebCodecs still keeps full RTP for paint (thin CLVD for Φ).
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
     }
 
     #[test]

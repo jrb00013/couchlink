@@ -25,7 +25,7 @@ export type ConnectionState =
   | "connected"
   | "error";
 
-export type PresentPath = "webcodecs" | "rtp" | "warmup";
+export type PresentPath = "webcodecs" | "rtp" | "warmup" | "clvd";
 
 export interface PlayerCallbacks {
   onState: (s: ConnectionState, detail?: string) => void;
@@ -742,8 +742,11 @@ export class CouchlinkPlayer {
       this.startStatsPolling();
       this.cb.onState("connected", "video track");
       // Always deliver the stream so the UI can fall back if WebCodecs never paints.
-      if (this.webcodecsPath) {
-        clog("RTP track received — painted as safety net until WebCodecs paints");
+      // CRITICAL: do NOT announce "rtp" when WebCodecs is available — ontrack often
+      // wins the race vs the video DataChannel. Announcing rtp locked the host onto
+      // PATH_RTP (CLVD off); Joel got 120fps canvas + 0 watermark samples.
+      if (this.webcodecsPath || (canUseWebCodecs() && !preferLegacyRtp())) {
+        clog("RTP track received — holding as safety net (CLVD binary pending)");
         this.cb.onVideo(stream);
         return;
       }
@@ -801,17 +804,20 @@ export class CouchlinkPlayer {
       });
       if (useWc) {
         this.webcodecsPath = true;
-        // CLVD-first: do NOT announce "warmup" (dual-send). Leave present_path
-        // unknown so the host sends full-rate binary only — WebCodecs can paint
-        // without SCTP fighting IDR RTP. Stall/fallback → resumeWarmup().
+        // Hybrid: full RTP (canvas paint) + thin CLVD until/after WC paints.
+        // Promote announces "webcodecs" for FEC — RTP never turns off.
+        this.notifyPresentPath(
+          "warmup",
+          "video DC open — full RTP + thin CLVD (photon sidecar)"
+        );
         clog(
-          "CLVD DataChannel + WebCodecs warming — binary-only until first paint"
+          "CLVD warming under full RTP canvas — promote enables FEC, RTP stays"
         );
         this.cb.onState("connected", "webcodecs video");
         this.gotVideoTrack = true;
         this.mediaHealthy = true;
-        // Ask for IDR immediately — we may have joined mid-GOP.
-        this.requestVideoKeyframe();
+        // No PLI on DC open — RTP is already painting; shared-encoder IDR
+        // blacks friends. WC waits for the host's normal ~3s IDR.
       } else {
         cwarn(
           "video DataChannel open but WebCodecs unavailable — using RTP path",
@@ -877,8 +883,14 @@ export class CouchlinkPlayer {
     this.notifyPresentPath("rtp", "WebCodecs fallback");
   }
 
-  /** WebCodecs went dark — keep both paths; the UI is switching to the live RTP canvas. */
+  /** WebCodecs went dark — hybrid already dual-sends; do not path-flip (blacks RTP). */
   resumeWarmup() {
+    if (
+      this.presentPathSent === "warmup" ||
+      this.presentPathSent === "webcodecs"
+    ) {
+      return;
+    }
     this.notifyPresentPath(
       "warmup",
       "WebCodecs stalled — RTP stays live"
@@ -886,14 +898,14 @@ export class CouchlinkPlayer {
   }
 
   /**
-   * WebCodecs painted its first frame. Promote to "webcodecs" so the host
-   * keeps CLVD-only (RTP stays off). Stall → resumeWarmup() for canvas rescue.
+   * WebCodecs painted. Announce "webcodecs" once (FEC on). Full RTP stays.
+   * Never resumeWarmup after this — path thrash IDR'd the canvas black.
    */
   promoteWebcodecs() {
     this.webcodecsPath = true;
     this.notifyPresentPath(
       "webcodecs",
-      "CLVD DataChannel + WebCodecs present — binary path live (stall → warmup rescue)"
+      "WC photon live — full RTP paint + thin CLVD"
     );
   }
 

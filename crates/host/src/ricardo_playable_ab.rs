@@ -84,23 +84,24 @@ mod tests {
     }
 
     #[test]
-    fn b_healthy_webcodecs_is_one_path_like_playable_uplink() {
-        // Playable night: push 0.1ms — dual full send cannot stay there on 3 WAN friends.
+    fn b_healthy_hybrid_keeps_full_rtp_for_paint() {
+        // Visible paint = RTP; CLVD is thin sidecar for S_p50 — not exclusive binary.
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+        assert!(should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(true, PATH_WEBCODECS, false));
+        // Uplink model still budgets one full encode path (thin CLVD ≈ FEC tax).
         assert_eq!(PATHS_WEBCODECS, 1);
         assert_eq!(
             host_uplink_kbps(A::ENCODER_KBPS, N_FRIENDS, PATHS_WEBCODECS),
             15_000
         );
-        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
-        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
-        assert!(!should_send_rtp(true, PATH_WEBCODECS, false));
     }
 
     #[test]
-    fn b_warmup_keeps_idr_rtp_so_join_is_not_black() {
+    fn b_warmup_keeps_full_rtp_so_canvas_stays_playable() {
         assert_eq!(path_flags(PATH_WARMUP), (true, true));
         assert!(should_send_rtp(true, PATH_WARMUP, false));
-        assert!(!should_send_rtp(false, PATH_WARMUP, false));
+        assert!(should_send_rtp(false, PATH_WARMUP, false));
     }
 
     #[test]

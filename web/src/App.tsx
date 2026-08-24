@@ -201,9 +201,9 @@ export default function App() {
   const sawAuRef = useRef(false);
   /** WebCodecs stalled this session (warmup rescue); cleared on promote. */
   const stalledRef = useRef(false);
-  /** WebCodecs has painted and owns the visible canvas (RTP no longer on screen). */
+  /** WebCodecs has painted / photon path live (RTP canvas may still be visible). */
   const promotedRef = useRef(false);
-  /** Software WC is stamping input_wm in the background; RTP stays visible. */
+  /** WC stamps input_wm in the background; RTP stays the visible high-fps present. */
   const softwarePhotonRef = useRef(false);
   const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
@@ -234,15 +234,16 @@ export default function App() {
    * empty WebCodecs canvas and keeps the RTP canvas — no re-attach needed. */
   function armWebCodecsFallback() {
     clearRtpFallbackTimer();
+    // Once WC has painted, hybrid keeps RTP visible — don't stamp fallback_timer
+    // and thrash present_path. Photon sidecar recovers via IDR only.
+    if (wcRef.current?.hasPainted() || softwarePhotonRef.current) return;
     rtpFallbackTimer.current = window.setTimeout(() => {
       rtpFallbackTimer.current = null;
       if (!webcodecsActiveRef.current) return;
-      if (wcRef.current?.hasPainted()) return;
+      if (wcRef.current?.hasPainted() || softwarePhotonRef.current) return;
       cwarn("WebCodecs produced no frames — falling back to RTP canvas (will retry on next AU)");
-      // Do not preferRtpPresent() permanently and do not stop() the decoder —
-      // stall path uses warmup; a later AU can still promote WebCodecs.
+      // Do not resumeWarmup() — hybrid stays on dual; path flips blacked RTP.
       promotedRef.current = false;
-      playerRef.current?.resumeWarmup();
       wcCanvasRef.current?.classList.add("is-hidden");
       canvasRef.current?.classList.remove("is-hidden");
       setVideoDiag("webcodecs: no frames yet — RTP safety net (warmup)");
@@ -269,19 +270,16 @@ export default function App() {
       wcRef.current = new WebCodecsCanvasView(wcCanvasRef.current);
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
-        const accel = wcRef.current?.hardwareAcceleration();
-        const softwareBg =
-          accel === "prefer-software" || accel === "no-preference";
-        if (!promotedRef.current && !softwarePhotonRef.current) {
+        if (!promotedRef.current) {
           promoteWebcodecsPresent();
         }
         const fresh = inputFreshnessMs();
         const photon = photonP50Ms();
-        // Software-background: don't overwrite RTP canvas paint fps in the HUD.
-        if (softwareBg || softwarePhotonRef.current) {
+        if (softwarePhotonRef.current) {
           setPresentMode("webcodecs");
+          setPresentStuck(null);
           setVideoDiag(
-            `LIVE RTP+WC(sw) · WC ${s.presentFps}fps · photon path live · drop=${s.dropped}${
+            `LIVE RTP+WC · WC ${s.presentFps}fps · photon path live · drop=${s.dropped}${
               photon != null ? ` · Φ ${photon.toFixed(0)}ms` : fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
             }`
           );
@@ -318,11 +316,10 @@ export default function App() {
         playerRef.current?.echoPaintedAge(a);
       });
       wcRef.current.setStallHandler(() => {
+        // Exclusive-WC stall only (photon sidecar never calls this).
+        // Still: do not path-flip — RTP canvas is already visible in hybrid.
         promotedRef.current = false;
         stalledRef.current = true;
-        playerRef.current?.resumeWarmup();
-        // Keep WebCodecs running — re-promote on next paint via first-paint /
-        // stats path. Stopping here used to leave friends stuck on canvas.
         wcCanvasRef.current?.classList.add("is-hidden");
         canvasRef.current?.classList.remove("is-hidden");
         videoRef.current?.classList.remove("is-hidden");
@@ -346,50 +343,54 @@ export default function App() {
     // Don't tear down a live decoder on every callback.
     if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
     webcodecsActiveRef.current = true;
-    // CLVD-first: never early-promote. Host stays binary-only (PATH_UNKNOWN)
-    // until first paint → promoteWebcodecsPresent. Early HW promote flipped
-    // to webcodecs before paint and left canvas on IDR-only when WC stalled.
-    clog("webcodecs warming — CLVD binary-only until first paint", {
+    // Hybrid: RTP canvas visible; mark sidecar so stall never path-flips.
+    wcRef.current.setPhotonSidecar(true);
+    clog("webcodecs warming — RTP canvas visible, CLVD photon sidecar", {
       accel: wcRef.current.hardwareAcceleration(),
     });
     armWebCodecsFallback();
     return true;
   }
 
-  /** WebCodecs painted — show it, but keep RTP decoding on the hidden canvas. */
+  /**
+   * WebCodecs painted — photon/`input_wm` path is live.
+   *
+   * Hybrid (v25 feel + S_p50): keep RTP canvas visible for high paint fps;
+   * WC runs in background for watermarks. Never hide RTP / go exclusive binary
+   * (that killed responsiveness and left fallback at 1fps).
+   */
   function promoteWebcodecsPresent() {
-    const accel = wcRef.current?.hardwareAcceleration();
-    // Software WebCodecs still paints from CLVD (binary input_wm). Hiding it
-    // and staying on RTP was why Joel felt pad delay with Φ unmeasured.
-    if (accel === "prefer-software" || accel === "no-preference") {
-      clog("present mode: WebCodecs software — CLVD on screen (binary path)");
-    }
     if (promotedRef.current) return;
     promotedRef.current = true;
     stalledRef.current = false;
+    softwarePhotonRef.current = true;
     clearRtpFallbackTimer();
-    // Do not stop the RTP renderer or null the <video> — a lost CLVD
-    // IDR used to freeze the last picture because nothing else was live.
-    canvasRef.current?.classList.add("is-hidden");
-    videoRef.current?.classList.add("is-hidden");
-    wcCanvasRef.current?.classList.remove("is-hidden");
+    // RTP canvas stays on screen. WC canvas stays hidden (photon sidecar).
+    wcCanvasRef.current?.classList.add("is-hidden");
+    canvasRef.current?.classList.remove("is-hidden");
+    videoRef.current?.classList.remove("is-hidden");
     setPresentMode("webcodecs");
     setPresentStuck(null);
-    clog("present mode: WebCodecs + CLVD (RTP off on host after present_path)");
+    clog(
+      "present mode: RTP canvas + WC photon sidecar (full RTP stays on host)"
+    );
     playerRef.current?.promoteWebcodecs();
   }
 
   function attachStream(stream: MediaStream) {
     heldStreamRef.current = stream;
-    // WebCodecs is on screen once promoted, but the RTP renderer stays
-    // started — a stall just unhides that canvas. During warm-up RTP is
-    // the visible safety net.
-    if (promotedRef.current) {
+    // Hybrid: RTP is always the visible present. Never skip attaching just
+    // because WC photon has promoted — that left paint fps stuck / black.
+    if (promotedRef.current && !softwarePhotonRef.current) {
       if (heldLoggedRef.current !== stream) {
         heldLoggedRef.current = stream;
         clog("RTP stream held for fallback — WebCodecs present active");
       }
       return;
+    }
+    if (softwarePhotonRef.current && heldLoggedRef.current !== stream) {
+      heldLoggedRef.current = stream;
+      clog("RTP stream live — WC photon sidecar active");
     }
     clearRtpFallbackTimer();
     // Don't tear down a warming WebCodecs decoder — this is the safety-net
@@ -404,17 +405,24 @@ export default function App() {
     if (wantCanvas && track && canvasRef.current) {
       if (!viewRef.current) {
         viewRef.current = new LowLatencyCanvasView(canvasRef.current);
+        // Self-heal net: the view already retries internally a few times.
+        // If it still can't revive (e.g. the underlying track itself went
+        // bad), re-attach the held RTP stream fresh rather than leaving the
+        // canvas frozen until someone reloads the page.
+        viewRef.current.setPumpDiedHandler(() => {
+          const stream = heldStreamRef.current;
+          if (!stream) return;
+          cwarn("low-latency canvas pump died — re-attaching RTP stream");
+          attachStream(stream);
+        });
         viewRef.current.setStatsHandler((s) => {
-          // After HW WebCodecs promote, RTP stays warm but must not steal HUD.
-          // Software-background WC: keep presentMode=webcodecs (honest S_p50)
-          // while using RTP paint fps for the Ricardo paint axis.
-          if (promotedRef.current) return;
+          // Hybrid: RTP canvas owns paint fps; WC photon sidecar owns S_p50.
           if (softwarePhotonRef.current) {
             const fresh = inputFreshnessMs();
             const photon = photonP50Ms();
             setPresentMode("webcodecs");
             setVideoDiag(
-              `LIVE RTP+WC(sw) · paint ${s.presentFps}fps · photon path live · drop=${s.dropped}${
+              `LIVE RTP+WC · paint ${s.presentFps}fps · photon path live · drop=${s.dropped}${
                 photon != null
                   ? ` · Φ ${photon.toFixed(0)}ms`
                   : fresh != null
@@ -433,6 +441,7 @@ export default function App() {
             });
             return;
           }
+          if (promotedRef.current) return;
           const fresh = inputFreshnessMs();
           setVideoDiag(
             `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age${
@@ -457,6 +466,12 @@ export default function App() {
             recvMs: a.recvMs,
             paintMs: a.paintMs,
           });
+        });
+        viewRef.current.setPumpDiedHandler(() => {
+          const stream = heldStreamRef.current;
+          if (!stream) return;
+          cwarn("RTP canvas pump dead — reattaching stream (no page refresh)");
+          attachStream(stream);
         });
       }
       void viewRef.current.start(track).then((ok) => {
@@ -585,7 +600,7 @@ export default function App() {
     onVideo: (stream) => attachStream(stream),
     onPresentPath: (path, detail) => {
       clog("present path", path, detail ?? "");
-      if (path === "webcodecs") {
+      if (path === "webcodecs" || path === "clvd") {
         if (!ensureWebCodecs()) {
           cwarn("WebCodecs present failed to start — waiting for RTP fallback");
           webcodecsActiveRef.current = false;
