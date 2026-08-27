@@ -842,10 +842,15 @@ async fn main() -> Result<()> {
                                 conn.host.set_video_size(w, h);
                             }
                         }
-                        // One AU per cadence tick — H.264 stays in encode order on
-                        // the wire. Bursting every drained frame stacked host age
-                        // (~58ms p50 live) while the browser is latest-frame-wins;
-                        // the extra P-frames did not improve paint, only SCTP depth.
+                        // LFW + pace to commanded fps. A 2ms poll that forwarded every
+                        // AU sprayed ~90fps into Chrome while target said 60 — JB grew
+                        // on motion and pans felt behind the (already-good) pad.
+                        let min_gap = Duration::from_micros(
+                            1_000_000 / u64::from(commanded_target.fps.max(1)),
+                        );
+                        if !keyframe && last_push.elapsed() < min_gap {
+                            continue;
+                        }
                         let burst_gap = last_push
                             .elapsed()
                             .clamp(Duration::from_millis(1), Duration::from_millis(500));
