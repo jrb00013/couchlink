@@ -5,6 +5,7 @@ import { TouchGamepadInput } from "./touchPad";
 import {
   ClvdAssembler,
   decodeClvdFragment,
+  decodeWmTip,
   PLI_BYTES,
   VIDEO_CHANNEL,
   type VideoAccessUnit,
@@ -25,7 +26,7 @@ export type ConnectionState =
   | "connected"
   | "error";
 
-export type PresentPath = "webcodecs" | "rtp" | "warmup";
+export type PresentPath = "webcodecs" | "rtp" | "warmup" | "clvd";
 
 export interface PlayerCallbacks {
   onState: (s: ConnectionState, detail?: string) => void;
@@ -33,6 +34,8 @@ export interface PlayerCallbacks {
   /** Annex-B access units from the unordered `video` DataChannel.
    * `recvMs` is performance.now() at fragment assemble — use for age budget. */
   onVideoAccessUnit?: (au: VideoAccessUnit, recvMs: number) => void;
+  /** Tiny CLWM tip — input_wm without H.264 (post-promote Φ path). */
+  onInputWm?: (wm: number, recvMs: number) => void;
   /** Fired when the preferred present path is known. */
   onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: (info: {
@@ -60,6 +63,11 @@ export interface PlayerCallbacks {
     target_bitrate_kbps: number;
     age_p50_ms?: number;
     age_p95_ms?: number;
+    frames_received?: number;
+    handoff_wait_ms?: number;
+    handoff_copy_ms?: number;
+    handoff_wait_p95_ms?: number;
+    shm_gate_trips?: boolean;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
   /** This browser's own assigned slot (1-based), so it can label itself
@@ -121,7 +129,8 @@ const MEDIA_RECOVER_DELAY_MS = 12_000;
 /** Shorter delay when the peer was never healthy (first-connect failure). */
 const MEDIA_RECOVER_DELAY_COLD_MS = 5_000;
 /** 250Hz — matches the native client and keeps sampling off the display clock. */
-const PAD_POLL_MS = 4;
+/** 500Hz pad poll — halves input quantisation vs 250Hz (Ricardo native path). */
+const PAD_POLL_MS = 2;
 
 function preferLegacyRtp(): boolean {
   if (typeof location === "undefined") return false;
@@ -148,6 +157,9 @@ export class CouchlinkPlayer {
   private sessionRetries = 0;
   private pending: { sid: string; pin: string } | null = null;
   private seq = 0;
+  /** Soft-hold previous pad for one missed digital poll. */
+  private lastPadHold: PadState | null = null;
+  private lastPadHoldAt = 0;
   private padSent = 0;
   private padWindowStart = 0;
   private padName = "none";
@@ -191,7 +203,9 @@ export class CouchlinkPlayer {
 
   /** Attach or detach a keyboard/mouse input source. Call with null to disable. */
   setKbm(kbm: KeyboardMouseInput | null) {
+    if (this.kbm) this.kbm.onActivity = null;
     this.kbm = kbm;
+    if (kbm) kbm.onActivity = () => this.flushKbmPadImmediate();
   }
 
   /** Attach or detach the mobile touch controller. Call with null to disable. */
@@ -719,7 +733,7 @@ export class CouchlinkPlayer {
       };
       track.onended = () => clog("track ended", track.kind, track.id);
       if (track.kind === "video" && "contentHint" in track) {
-        track.contentHint = "detail";
+        track.contentHint = "motion";
       }
       const stream =
         ev.streams[0] ?? new MediaStream(ev.track ? [ev.track] : []);
@@ -731,8 +745,11 @@ export class CouchlinkPlayer {
       this.startStatsPolling();
       this.cb.onState("connected", "video track");
       // Always deliver the stream so the UI can fall back if WebCodecs never paints.
-      if (this.webcodecsPath) {
-        clog("RTP track received — painted as safety net until WebCodecs paints");
+      // CRITICAL: do NOT announce "rtp" when WebCodecs is available — ontrack often
+      // wins the race vs the video DataChannel. Announcing rtp locked the host onto
+      // PATH_RTP (CLVD off); Joel got 120fps canvas + 0 watermark samples.
+      if (this.webcodecsPath || (canUseWebCodecs() && !preferLegacyRtp())) {
+        clog("RTP track received — holding as safety net (CLVD binary pending)");
         this.cb.onVideo(stream);
         return;
       }
@@ -790,20 +807,21 @@ export class CouchlinkPlayer {
       });
       if (useWc) {
         this.webcodecsPath = true;
-        // Warm-up: tell the host to keep BOTH paths live. Announcing
-        // "webcodecs" now would make it cut RTP while this fresh DataChannel
-        // is still in SCTP slow-start — RTP stops, the keyframe stalls, the
-        // decoder never configures, and the 2.5s fallback lands the viewer on
-        // RTP-with-jitter-buffer for the rest of the session. Stay "warmup"
-        // (both paths) until the first frame actually paints, then promote.
+        // Hybrid: full RTP (canvas paint) + thin CLVD until/after WC paints.
+        // Promote announces "webcodecs" (FEC stays OFF while RTP is live).
         this.notifyPresentPath(
           "warmup",
-          "CLVD DataChannel + WebCodecs warming — RTP stays live as safety net"
+          "video DC open — full RTP + thin CLVD (photon sidecar)"
+        );
+        clog(
+          "CLVD warming under full RTP canvas — RTP stays; FEC off while dual"
         );
         this.cb.onState("connected", "webcodecs video");
         this.gotVideoTrack = true;
         this.mediaHealthy = true;
-        // Ask for IDR immediately — we may have joined mid-GOP.
+        // Soft bootstrap PLI once DC is open — host dual-coalesces ≥3s and
+        // forces a single shared IDR (not burst-of-3). WC still retries via
+        // webCodecsCanvas bootstrap if the first IDR is incomplete.
         this.requestVideoKeyframe();
       } else {
         cwarn(
@@ -825,6 +843,11 @@ export class CouchlinkPlayer {
       if (!this.webcodecsPath) return;
       const data = ev.data;
       if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) return;
+      const tipWm = decodeWmTip(data as ArrayBuffer);
+      if (tipWm != null && tipWm !== 0) {
+        this.cb.onInputWm?.(tipWm, performance.now());
+        return;
+      }
       const frag = decodeClvdFragment(data as ArrayBuffer);
       if (!frag) return;
       const au = this.clvdAsm.push(frag);
@@ -870,8 +893,14 @@ export class CouchlinkPlayer {
     this.notifyPresentPath("rtp", "WebCodecs fallback");
   }
 
-  /** WebCodecs went dark — keep both paths; the UI is switching to the live RTP canvas. */
+  /** WebCodecs went dark — hybrid already dual-sends; do not path-flip (blacks RTP). */
   resumeWarmup() {
+    if (
+      this.presentPathSent === "warmup" ||
+      this.presentPathSent === "webcodecs"
+    ) {
+      return;
+    }
     this.notifyPresentPath(
       "warmup",
       "WebCodecs stalled — RTP stays live"
@@ -879,15 +908,14 @@ export class CouchlinkPlayer {
   }
 
   /**
-   * WebCodecs painted its first frame. Promote to "webcodecs" so the host
-   * thins RTP to IDR-only (path_flags still keeps the track alive). Staying
-   * on "warmup" forever forced full dual-send and blew the push budget.
+   * WebCodecs painted. Announce "webcodecs" once (FEC on). Full RTP stays.
+   * Never resumeWarmup after this — path thrash IDR'd the canvas black.
    */
   promoteWebcodecs() {
-    if (!this.webcodecsPath) return;
+    this.webcodecsPath = true;
     this.notifyPresentPath(
       "webcodecs",
-      "CLVD DataChannel + WebCodecs present — RTP off (stall → warmup rescue)"
+      "WC photon live — full RTP paint; CLVD video off (CLWM tips)"
     );
   }
 
@@ -905,7 +933,39 @@ export class CouchlinkPlayer {
   private startPadLoop() {
     this.padWindowStart = performance.now();
     this.padSent = 0;
+    this.lastPadHold = null;
+    this.lastPadHoldAt = 0;
     this.padTimer = window.setInterval(() => this.pollAndSendPad(), PAD_POLL_MS);
+  }
+
+  /** Keep digital buttons one poll if Gamepad API glitched empty. */
+  private holdDigitalOneTick(state: PadState, now: number): PadState {
+    const TICK_MS = 5;
+    const prev = this.lastPadHold;
+    if (!prev || now - this.lastPadHoldAt > TICK_MS) return state;
+    if (state.buttons === 0 && prev.buttons !== 0) {
+      return { ...state, buttons: prev.buttons };
+    }
+    return state;
+  }
+
+  private emitPad(state: PadState) {
+    if (this.padDc?.readyState !== "open") return;
+    const now = performance.now();
+    const held = this.holdDigitalOneTick(state, now);
+    this.lastPadHold = held;
+    this.lastPadHoldAt = now;
+    this.padDc.send(encodeClpd({ ...held, clientTsMs: now >>> 0 }));
+    notePadSent(now, held.seq, now >>> 0);
+    this.padSent += 1;
+  }
+
+  /** Event-driven kbm send — zero poll wait on button edges (Ricardo-class Φ). */
+  private flushKbmPadImmediate() {
+    const kbm = this.kbm;
+    if (!kbm?.hasInput()) return;
+    this.seq = (this.seq + 1) >>> 0;
+    this.emitPad(kbm.sample(this.seq));
   }
 
   private pollAndSendPad() {
@@ -922,9 +982,7 @@ export class CouchlinkPlayer {
       if (touch) {
         this.seq = (this.seq + 1) >>> 0;
         const state = touch.sample(this.seq);
-        this.padDc.send(encodeClpd(state));
-        notePadSent();
-        this.padSent += 1;
+        this.emitPad(state);
         // "generic" selects the emulator-side virtual pad *backend*
         // (backend_for()'s catch-all, XInput), not the wire format — CLPD
         // frames are the same shape regardless of source. Touch has no real
@@ -958,9 +1016,7 @@ export class CouchlinkPlayer {
       if (!kbm) return;
       this.seq = (this.seq + 1) >>> 0;
       const kbmState = kbm.sample(this.seq);
-      this.padDc.send(encodeClpd(kbmState));
-      notePadSent();
-      this.padSent += 1;
+      this.emitPad(kbmState);
       // See the touch branch above for why this is "generic" and not
       // "dualsense": no real controller identity to report, and the
       // backend that maps to (XInput) is what actually gets recognized as
@@ -1004,9 +1060,7 @@ export class CouchlinkPlayer {
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
     const state: PadState = fromBrowserGamepad(gp, this.seq);
-    this.padDc.send(encodeClpd(state));
-    notePadSent();
-    this.padSent += 1;
+    this.emitPad(state);
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {
       this.lastPadHz = this.padSent;

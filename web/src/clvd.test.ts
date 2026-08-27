@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   ClvdAssembler,
   decodeClvdFragment,
+  decodeWmTip,
   VIDEO_HEADER_LEN,
   VIDEO_HEADER_LEN_V2,
   VIDEO_MAGIC,
   VIDEO_MAX_FRAGMENT_PAYLOAD,
   VIDEO_VERSION,
   VIDEO_VERSION_V2,
+  WM_TIP_MAGIC,
   FLAG_KEYFRAME,
 } from "./clvd";
 
@@ -160,5 +162,38 @@ describe("decodeClvdFragment", () => {
     expect(Array.from(frag.payload)).toEqual([1, 2, 3]);
     const au = new ClvdAssembler().push(frag);
     expect(au?.stampUs).toBe(0);
+  });
+
+  it("decodes v4 input_wm on the wire", () => {
+    const payload = new Uint8Array([4, 5, 6]);
+    const buf = new ArrayBuffer(30 + payload.byteLength);
+    const u8 = new Uint8Array(buf);
+    const view = new DataView(buf);
+    for (let i = 0; i < 4; i++) u8[i] = VIDEO_MAGIC.charCodeAt(i);
+    u8[4] = 4;
+    u8[5] = 0;
+    view.setUint16(6, 1280, true);
+    view.setUint16(8, 720, true);
+    view.setUint32(10, 9, true);
+    view.setUint16(14, 0, true);
+    view.setUint16(16, 1, true);
+    view.setBigUint64(18, 99n, true);
+    view.setUint32(26, 42, true);
+    u8.set(payload, 30);
+    const frag = decodeClvdFragment(buf)!;
+    expect(frag.inputWm).toBe(42);
+    expect(frag.stampUs).toBe(99);
+    const au = new ClvdAssembler().push(frag);
+    expect(au?.inputWm).toBe(42);
+  });
+
+  it("decodes CLWM watermark tips", () => {
+    const buf = new ArrayBuffer(8);
+    const u8 = new Uint8Array(buf);
+    const view = new DataView(buf);
+    for (let i = 0; i < 4; i++) u8[i] = WM_TIP_MAGIC.charCodeAt(i);
+    view.setUint32(4, 99, true);
+    expect(decodeWmTip(buf)).toBe(99);
+    expect(decodeWmTip(new ArrayBuffer(4))).toBeNull();
   });
 });

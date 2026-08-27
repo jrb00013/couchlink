@@ -21,7 +21,7 @@ pub mod ricardo_playable_a {
     pub const ENCODER_W: u32 = 1280;
     pub const ENCODER_H: u32 = 720;
     pub const ENCODER_FPS: u32 = 60;
-    pub const ENCODER_KBPS: u32 = 5_000;
+    pub const ENCODER_KBPS: u32 = 10_000;
     pub const CAPTURE_MS: f64 = 1.7;
     pub const PAINT_FPS: f64 = 74.0;
     pub const DECODE_FPS: f64 = 82.0;
@@ -40,7 +40,7 @@ mod tests {
     use super::*;
     use crate::webrtc_peer::{
         path_flags, should_enter_trickle, should_exit_trickle, should_send_rtp, PATH_UNKNOWN,
-        PATH_WEBCODECS,
+        PATH_WARMUP, PATH_WEBCODECS,
     };
 
     /// Live preset friends joined with that night.
@@ -55,7 +55,7 @@ mod tests {
     }
 
     #[test]
-    fn a_baseline_encoder_matches_720p60_at_5mbps() {
+    fn a_baseline_encoder_matches_720p60_at_10mbps() {
         let p = playable_preset();
         assert_eq!(p.width, A::ENCODER_W);
         assert_eq!(p.height, A::ENCODER_H);
@@ -64,49 +64,75 @@ mod tests {
     }
 
     #[test]
-    fn b_fps_hold_never_drops_below_playable_60() {
+    fn b_bitrate_hold_never_drops_below_playable_10mbps() {
         for r in rungs_from(&playable_preset()) {
             assert_eq!(
-                r.fps, A::ENCODER_FPS,
-                "fps-hold broken vs Ricardo playable: {r:?}"
+                r.bitrate_kbps, A::ENCODER_KBPS,
+                "bitrate-hold broken vs Ricardo playable: {r:?}"
             );
         }
     }
 
     #[test]
-    fn b_bitrate_floor_never_returns_unplayable_625() {
+    fn b_fps_floor_never_returns_unplayable_sub_30() {
         let floor = *rungs_from(&playable_preset()).last().unwrap();
         assert!(
-            floor.bitrate_kbps >= 1_250,
-            "625 kbps was the death spiral; floor={floor:?}"
+            floor.fps >= 45,
+            "sub-45 fps was the death spiral; floor={floor:?}"
         );
-        assert_ne!(floor.bitrate_kbps, 625);
+        assert_eq!(floor.bitrate_kbps, A::ENCODER_KBPS);
     }
 
     #[test]
-    fn b_healthy_webcodecs_is_one_path_like_playable_uplink() {
-        // Playable night: push 0.1ms — dual full send cannot stay there on 3 WAN friends.
+    fn b_healthy_hybrid_keeps_full_rtp_for_paint() {
+        // Visible paint = RTP; after promote CLVD video off (pad SCTP free).
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
+        assert!(should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(true, PATH_WEBCODECS, false));
+        // Uplink model still budgets one full encode path (thin CLVD ≈ FEC tax).
         assert_eq!(PATHS_WEBCODECS, 1);
         assert_eq!(
             host_uplink_kbps(A::ENCODER_KBPS, N_FRIENDS, PATHS_WEBCODECS),
-            15_000
+            30_000
         );
-        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
-        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
-        assert!(!should_send_rtp(true, PATH_WEBCODECS, false));
     }
 
     #[test]
-    fn b_warmup_still_dual_so_join_is_not_black() {
-        assert_eq!(path_flags(PATH_UNKNOWN), (true, true));
-        assert!(should_send_rtp(false, PATH_UNKNOWN, false));
+    fn b_warmup_keeps_full_rtp_so_canvas_stays_playable() {
+        assert_eq!(path_flags(PATH_WARMUP), (true, true));
+        assert!(should_send_rtp(true, PATH_WARMUP, false));
+        assert!(should_send_rtp(false, PATH_WARMUP, false));
     }
 
     #[test]
     fn b_trickle_isolates_slow_peer_without_killing_healthy() {
         assert!(should_enter_trickle(8));
         assert!(!should_enter_trickle(7));
-        assert!(should_exit_trickle(30));
+        assert!(should_exit_trickle(4));
+        assert!(!should_exit_trickle(3));
+    }
+
+    #[test]
+    fn b_live_sim_target_beats_ricardo_on_all_axes() {
+        use crate::latency_live_sim::{beats_ricardo, SessionMetrics};
+        // Hard bars: ≥Ricardo paint (74), ≤3% shed, hold 5 Mbps, S≤45.
+        let m = SessionMetrics {
+            push_fps: A::PUSH_FPS,
+            shed_pct: 0,
+            encoder_kbps: A::ENCODER_KBPS,
+            paint_fps: A::PAINT_FPS,
+            input_s_p50_ms: 35.0,
+        };
+        assert!(beats_ricardo(m));
+        // Soft-floor mediocrity must not pass the hard gate.
+        let soft = SessionMetrics {
+            push_fps: 50.0,
+            shed_pct: 8,
+            encoder_kbps: A::ENCODER_KBPS,
+            paint_fps: 70.0,
+            input_s_p50_ms: 40.0,
+        };
+        assert!(!beats_ricardo(soft));
     }
 
     #[test]

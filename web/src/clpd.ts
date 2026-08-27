@@ -1,6 +1,10 @@
 /** Binary CLPD pad frames — must match crates/proto/src/pad_frame.rs */
 
 export const PAD_CHANNEL = "pad";
+export const PAD_VERSION = 1;
+export const PAD_VERSION_V2 = 2;
+export const PAD_FRAME_LEN = 31;
+export const PAD_FRAME_LEN_V2 = 35;
 
 export const BTN = {
   SQUARE: 1 << 0,
@@ -33,16 +37,18 @@ export type PadState = {
   ry: number;
   l2: number;
   r2: number;
+  /** Browser performance.now at send (ms, u32 wrap ok). */
+  clientTsMs?: number;
 };
 
 export function encodeClpd(p: PadState): ArrayBuffer {
-  const buf = new ArrayBuffer(31);
+  const buf = new ArrayBuffer(PAD_FRAME_LEN_V2);
   const v = new DataView(buf);
   v.setUint8(0, 0x43); // C
   v.setUint8(1, 0x4c); // L
   v.setUint8(2, 0x50); // P
   v.setUint8(3, 0x44); // D
-  v.setUint8(4, 1);
+  v.setUint8(4, PAD_VERSION_V2);
   v.setUint32(5, p.seq >>> 0, true);
   v.setUint32(9, p.buttons >>> 0, true);
   v.setUint8(13, p.lx & 0xff);
@@ -52,6 +58,7 @@ export function encodeClpd(p: PadState): ArrayBuffer {
   v.setUint8(17, p.l2 & 0xff);
   v.setUint8(18, p.r2 & 0xff);
   // gx,gy,gz,touch… zeroed
+  v.setUint32(31, (p.clientTsMs ?? performance.now()) >>> 0, true);
   return buf;
 }
 

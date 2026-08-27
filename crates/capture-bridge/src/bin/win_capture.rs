@@ -18,7 +18,7 @@ mod run {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::io::BufWriter;
     use std::net::TcpStream;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use tracing::{info, warn};
     use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
@@ -754,17 +754,39 @@ mod run {
                     let _ = stream.set_nodelay(true);
                     info!("connected to {connect}");
                     // The host writes back on this socket to request keyframes; read
-                    // it on its own thread so writes never block on it.
+                    // it on its own thread so writes never block on it. EOF on that
+                    // reader means the host is gone — break the write loop so we
+                    // reconnect instead of filling the queue forever.
+                    let peer_alive = Arc::new(AtomicBool::new(true));
+                    let flag = Arc::clone(&peer_alive);
                     if let Ok(reader) = stream.try_clone() {
-                        std::thread::spawn(move || watch_commands(reader));
+                        std::thread::spawn(move || {
+                            watch_commands(reader);
+                            flag.store(false, Ordering::SeqCst);
+                        });
                     }
+                    // Shutdown unblocks a stuck write when the host drops.
+                    let shutdown_stream = stream.try_clone().ok();
                     let mut writer = BufWriter::new(stream);
-                    while let Ok((w, h, payload, format, keyframe)) = rx.recv() {
-                        if let Err(e) =
-                            write_frame_with_format(&mut writer, w, h, format, keyframe, &payload)
-                        {
-                            warn!("send frame failed: {e:#} — reconnecting");
+                    loop {
+                        if !peer_alive.load(Ordering::SeqCst) {
+                            info!("host gone on {connect} — reconnecting");
+                            if let Some(s) = shutdown_stream.as_ref() {
+                                let _ = s.shutdown(std::net::Shutdown::Both);
+                            }
                             break;
+                        }
+                        match rx.recv_timeout(Duration::from_millis(50)) {
+                            Ok((w, h, payload, format, keyframe)) => {
+                                if let Err(e) = write_frame_with_format(
+                                    &mut writer, w, h, format, keyframe, &payload,
+                                ) {
+                                    warn!("send frame failed: {e:#} — reconnecting");
+                                    break;
+                                }
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return,
                         }
                     }
                 }
@@ -779,8 +801,15 @@ mod run {
     /// Listens on a Hyper-V socket and serves whichever WSL2 host connects.
     /// One listener, re-accepted forever, mirroring the TCP writer's own
     /// reconnect-and-keep-serving behaviour.
+    ///
+    /// Critical: when the WSL host drops the vsock, `write` often keeps
+    /// succeeding into the Hyper-V buffer while `accept` never runs again —
+    /// host logs "link lost", capture logs "queue full", and
+    /// `ensure-win-capture` leaves the stuck process alone. Tear down the
+    /// write loop as soon as the command reader sees EOF so we re-accept.
     fn spawn_hyperv_writer(port: u32, vm_id: windows::core::GUID, rx: mpsc::Receiver<FrameMsg>) {
         use couchlink_capture_bridge::hyperv::HvListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
         std::thread::spawn(move || {
             let listener = match HvListener::bind(port, vm_id) {
                 Ok(l) => l,
@@ -793,16 +822,42 @@ mod run {
                 match listener.accept() {
                     Ok(mut stream) => {
                         info!("Hyper-V socket: WSL2 host connected");
+                        let peer_alive = Arc::new(AtomicBool::new(true));
+                        let flag = Arc::clone(&peer_alive);
                         let reader = stream.try_clone();
-                        std::thread::spawn(move || watch_commands(reader));
-                        while let Ok((w, h, payload, format, keyframe)) = rx.recv() {
-                            if let Err(e) =
-                                write_frame_with_format(&mut stream, w, h, format, keyframe, &payload)
-                            {
-                                warn!("send frame over Hyper-V socket failed: {e:#} — reconnecting");
+                        std::thread::spawn(move || {
+                            watch_commands(reader.try_clone());
+                            // Unblock a send() stuck on the half-open peer so
+                            // the writer loop can re-accept the next host.
+                            reader.shutdown();
+                            flag.store(false, Ordering::SeqCst);
+                        });
+                        loop {
+                            if !peer_alive.load(Ordering::SeqCst) {
+                                info!("Hyper-V socket: WSL2 host gone — accepting again");
                                 break;
                             }
+                            match rx.recv_timeout(Duration::from_millis(50)) {
+                                Ok((w, h, payload, format, keyframe)) => {
+                                    if let Err(e) = write_frame_with_format(
+                                        &mut stream,
+                                        w,
+                                        h,
+                                        format,
+                                        keyframe,
+                                        &payload,
+                                    ) {
+                                        warn!(
+                                            "send frame over Hyper-V socket failed: {e:#} — reconnecting"
+                                        );
+                                        break;
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                            }
                         }
+                        stream.shutdown();
                     }
                     Err(e) => {
                         warn!("Hyper-V socket accept failed: {e:#}");

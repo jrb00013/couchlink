@@ -48,6 +48,14 @@ export class LowLatencyCanvasView {
   private paintSeq = 0;
   private onStats: ((s: PresentStats) => void) | null = null;
   private onPainted: ((a: CanvasPaintedAge) => void) | null = null;
+  private onPumpDied: (() => void) | null = null;
+  /** MSTC delivered frames but canvas stays ink-black — fall back to <video>. */
+  private onBlackPresent: (() => void) | null = null;
+  private blackStreak = 0;
+  /** Bumped by every `start()`/`stop()` so a pump that dies after the caller
+   * already moved on (new track, or stopped) does not restart a stale one. */
+  private generation = 0;
+  private restarts = 0;
 
   constructor(private canvas: HTMLCanvasElement) {}
 
@@ -59,17 +67,33 @@ export class LowLatencyCanvasView {
     this.onPainted = cb;
   }
 
+  /** Called when the pump could not be revived after its own retries — the
+   * caller (App) should re-attach a fresh stream rather than leave the
+   * canvas frozen on its last frame with no page refresh. */
+  setPumpDiedHandler(cb: (() => void) | null) {
+    this.onPumpDied = cb;
+  }
+
+  /** Fired when the canvas is receiving frames but stays near-black — MSTC
+   * quirk on some Chromium forks. Caller should switch to <video srcObject>. */
+  setBlackPresentHandler(cb: (() => void) | null) {
+    this.onBlackPresent = cb;
+  }
+
   async start(track: MediaStreamTrack): Promise<boolean> {
     this.stop();
     if (!canUseLowLatencyCanvas() || track.kind !== "video") {
       return false;
     }
+    this.restarts = 0;
+    return this.startInternal(track, ++this.generation);
+  }
 
+  private async startInternal(track: MediaStreamTrack, gen: number): Promise<boolean> {
     try {
       if ("contentHint" in track) {
-        // Prefer spatial detail over pure motion — UI text stays readable on LAN
-        // without adding a present queue (still desynchronized canvas).
-        track.contentHint = "detail";
+        // Motion > spatial detail — "detail" made pans feel behind/stuttery.
+        track.contentHint = "motion";
       }
 
       const ctx = this.canvas.getContext("2d", {
@@ -80,8 +104,8 @@ export class LowLatencyCanvasView {
         cwarn("low-latency canvas: 2d context unavailable");
         return false;
       }
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
+      // Gaming: nearest-neighbor, no HQ scale tax (1206≠1280 was stuttering).
+      ctx.imageSmoothingEnabled = false;
       this.ctx = ctx;
 
       const attrs = (
@@ -109,10 +133,20 @@ export class LowLatencyCanvasView {
       this.windowStart = performance.now();
 
       const pump = async () => {
+        // Distinct from an intentional stop() (aborted) — this is the pump
+        // ending on its own (reader threw, or the stream reported `done`
+        // without anyone calling stop()). Left unhandled, that used to
+        // freeze the canvas on its last frame forever — no more paints, no
+        // stats callback, and no signal to the caller that anything was
+        // wrong (the black/frozen screen Joel had to refresh to clear).
+        let diedUnexpectedly = false;
         try {
           while (!abort.signal.aborted) {
             const { value, done } = await reader.read();
-            if (done || !value) break;
+            if (done || !value) {
+              diedUnexpectedly = !abort.signal.aborted;
+              break;
+            }
             // Paint immediately — waiting for rAF would add up to one display frame.
             const frame: VideoFrame = value;
             const recvMs = performance.now();
@@ -121,6 +155,7 @@ export class LowLatencyCanvasView {
           }
         } catch (e) {
           if (!abort.signal.aborted) {
+            diedUnexpectedly = true;
             cwarn("low-latency canvas read ended", String(e));
           }
         } finally {
@@ -129,6 +164,9 @@ export class LowLatencyCanvasView {
           } catch {
             /* already locked/closed */
           }
+        }
+        if (diedUnexpectedly && gen === this.generation) {
+          this.recoverPump(track, gen);
         }
       };
 
@@ -139,6 +177,31 @@ export class LowLatencyCanvasView {
       this.stop();
       return false;
     }
+  }
+
+  /** Bounded self-heal after the pump dies without `stop()` being called.
+   * Most hiccups (a transient decoder error, a brief track mute around a
+   * forced IDR) clear within one retry; if they don't, hand back to the
+   * caller so it can re-attach a fresh stream instead of the canvas sitting
+   * frozen with nothing painting until someone reloads the page. */
+  private recoverPump(track: MediaStreamTrack, gen: number) {
+    if (this.restarts >= 5) {
+      cwarn("low-latency canvas pump died repeatedly — asking caller to re-attach");
+      this.onPumpDied?.();
+      return;
+    }
+    this.restarts += 1;
+    const attempt = this.restarts;
+    const delayMs = Math.min(150 * attempt, 1000);
+    cwarn(`low-latency canvas pump died — restarting (attempt ${attempt}/5)`);
+    window.setTimeout(() => {
+      if (gen !== this.generation) return; // stop()/start() moved on already
+      void this.startInternal(track, gen).then((ok) => {
+        if (!ok && gen === this.generation) {
+          this.recoverPump(track, gen);
+        }
+      });
+    }, delayMs);
   }
 
   private paint(frame: VideoFrame, recvMs: number) {
@@ -158,10 +221,12 @@ export class LowLatencyCanvasView {
     const ageMs = Math.max(0, paintMs - recvMs);
     this.lastAgeMs = ageMs;
     this.paintSeq = (this.paintSeq + 1) >>> 0;
-    // Sample ~4 Hz so pad DC is not flooded (host skips stamp_us=0 for glass age,
-    // but records recv→paint as present-path age).
-    if (this.paintSeq % 15 === 1) {
-      this.onPainted?.({ seq: this.paintSeq, recvMs, paintMs });
+    // Every paint so CLWM→Φ can sample the next frame (throttled echo is App's job).
+    this.onPainted?.({ seq: this.paintSeq, recvMs, paintMs });
+    // Detect MSTC "frames" that are ink-black while the track is live — seen as
+    // a frozen black stage on some Chromium forks. Fall back to <video>.
+    if (this.paintSeq % 20 === 0 && w >= 32 && h >= 32) {
+      this.sampleBlackPresent(ctx, w, h);
     }
 
     const now = paintMs;
@@ -181,9 +246,43 @@ export class LowLatencyCanvasView {
     }
   }
 
+  /** Near-zero luma across a few center samples for several checks ⇒ black present. */
+  private sampleBlackPresent(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number
+  ) {
+    try {
+      const cx = (w / 2) | 0;
+      const cy = (h / 2) | 0;
+      const sample = ctx.getImageData(Math.max(0, cx - 2), Math.max(0, cy - 2), 4, 4);
+      let sum = 0;
+      const n = sample.data.length / 4;
+      for (let i = 0; i < sample.data.length; i += 4) {
+        sum += sample.data[i]! + sample.data[i + 1]! + sample.data[i + 2]!;
+      }
+      const avg = sum / (n * 3);
+      if (avg < 2.5) {
+        this.blackStreak += 1;
+        // ~8 checks × 20 paints ≈ 160 frames (~1–2s at 90–120fps)
+        if (this.blackStreak >= 8) {
+          this.blackStreak = 0;
+          cwarn("low-latency canvas staying black — asking caller for <video> fallback");
+          this.onBlackPresent?.();
+        }
+      } else {
+        this.blackStreak = 0;
+      }
+    } catch {
+      // desynchronized / tainted canvas — cannot sample; leave present alone
+    }
+  }
+
   stop() {
+    this.generation += 1;
     this.abort?.abort();
     this.abort = null;
     this.ctx = null;
+    this.blackStreak = 0;
   }
 }

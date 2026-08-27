@@ -15,9 +15,8 @@ import {
 } from "./h264Avc";
 import {
   ageBand,
-  AGE_DROP_MS,
+  decodeBacklogPolicy,
   shouldReplacePending,
-  shouldSkipDecode,
   type AgeBand,
 } from "./presentAge";
 
@@ -60,6 +59,33 @@ export function webcodecsDiagnosis(
   return "healthy";
 }
 
+type HardwareAcceleration =
+  | "no-preference"
+  | "prefer-hardware"
+  | "prefer-software";
+
+/**
+ * Prefer hardware (Ricardo bar), then software, then no-preference.
+ * Headless / WSL Chromium often reports prefer-hardware unsupported — probing
+ * avoids OperationError on configure and keeps WebCodecs (and S_p50) alive.
+ */
+export function pickHardwareAcceleration(
+  supported: ReadonlyArray<{
+    accel: HardwareAcceleration;
+    supported: boolean;
+  }>
+): HardwareAcceleration {
+  const order: HardwareAcceleration[] = [
+    "prefer-hardware",
+    "prefer-software",
+    "no-preference",
+  ];
+  for (const accel of order) {
+    if (supported.find((s) => s.accel === accel)?.supported) return accel;
+  }
+  return "prefer-software";
+}
+
 export type WebCodecsStats = {
   mode: "webcodecs";
   presentFps: number;
@@ -70,12 +96,15 @@ export type WebCodecsStats = {
   /** Receive → present age of the last painted frame (ms). */
   ageMs: number;
   ageBand: AgeBand;
+  /** Present-path triage string from webcodecsDiagnosis. */
+  diagnosis?: string;
 };
 
 /** Fired when a frame is actually painted — for host age_echo. */
 export type PaintedAge = {
   seq: number;
   stampUs: number;
+  inputWm: number;
   recvMs: number;
   paintMs: number;
 };
@@ -83,6 +112,7 @@ export type PaintedAge = {
 type FrameMeta = {
   seq: number;
   stampUs: number;
+  inputWm: number;
   recvMs: number;
 };
 
@@ -117,11 +147,27 @@ export class WebCodecsCanvasView {
   private lastPli = 0;
   private lastPaintAt = 0;
   private stallTimer: number | null = null;
+  /** Min ms between paints — ~120Hz cap; immediate paint beats rAF for Ricardo-class fps. */
+  private static readonly MIN_PAINT_MS = 1000 / 120;
   /** After a first paint, this many ms without another means the GOP is dead. */
   private static readonly STALL_MS = 1500;
   private description: Uint8Array | null = null;
   private codec = "avc1.4D0028";
   private running = false;
+  /** Resolved once via isConfigSupported — prefer-hardware when the GPU path exists. */
+  private hwAccel: HardwareAcceleration | null = null;
+  private hwAccelProbe: Promise<HardwareAcceleration> | null = null;
+  /** Hybrid: RTP is visible present; WC only stamps input_wm — never path-flip on stall. */
+  private photonSidecar = false;
+  /**
+   * Bootstrap DC PLIs before first WC paint. Host hybrid coalesces ≥3s; we allow
+   * two spaced attempts so a burned throttle / incomplete IDR does not strand
+   * S_p50 at 0 wm forever. After first paint: never PLI (shared-encoder blacks).
+   */
+  private bootstrapPliAttempts = 0;
+  private static readonly BOOTSTRAP_PLI_MAX = 2;
+  /** Match KEYFRAME_COALESCE_DUAL_MS on host — do not spam shared IDR. */
+  private static readonly BOOTSTRAP_PLI_GAP_MS = 3000;
 
   /** Newest decoded frame waiting for the compositor — older ones are closed. */
   private pending: VideoFrame | null = null;
@@ -152,6 +198,11 @@ export class WebCodecsCanvasView {
     this.onStall = cb;
   }
 
+  /** RTP canvas is the visible present — WC only measures photon (no path thrash). */
+  setPhotonSidecar(on: boolean) {
+    this.photonSidecar = on;
+  }
+
   /** Fired on each paint with timestamps for host age_echo. */
   setPaintedHandler(cb: ((a: PaintedAge) => void) | null) {
     this.onPainted = cb;
@@ -160,6 +211,11 @@ export class WebCodecsCanvasView {
   /** True once at least one frame has been painted. */
   hasPainted(): boolean {
     return this.paintedTotal > 0;
+  }
+
+  /** Acceleration mode chosen by isConfigSupported (null until probed). */
+  hardwareAcceleration(): HardwareAcceleration | null {
+    return this.hwAccel;
   }
 
   isRunning(): boolean {
@@ -190,6 +246,7 @@ export class WebCodecsCanvasView {
     this.painted = 0;
     this.paintedTotal = 0;
     this.dropped = 0;
+    this.bootstrapPliAttempts = 0;
     this.decodeMsAccum = 0;
     this.lastAgeMs = 0;
     this.lastAgeBand = "ok";
@@ -205,6 +262,9 @@ export class WebCodecsCanvasView {
     this.lastPaintAt = 0;
     if (this.stallTimer !== null) window.clearInterval(this.stallTimer);
     this.stallTimer = window.setInterval(() => this.checkStall(), 500);
+    // Accel probe runs on the first IDR once SPS/PPS are known — probing at
+    // start() with a generic codec string cached a stale promise and blocked
+    // configure in real Chrome (fallback_timer, zero input_wm samples).
     clog("webcodecs canvas ready (latest-frame-wins)", {
       secureContext: window.isSecureContext,
       desynchronized:
@@ -225,6 +285,9 @@ export class WebCodecsCanvasView {
         },
         error: (e) => {
           cwarn("VideoDecoder error", String(e));
+          if (this.hwAccel !== "prefer-software") {
+            this.hwAccel = "prefer-software";
+          }
           this.resetForKeyframe();
         },
       });
@@ -252,9 +315,49 @@ export class WebCodecsCanvasView {
     this.requestKeyframe();
   }
 
+  /** Probe once which acceleration mode this browser can actually configure. */
+  private resolveHwAccel(width: number, height: number): Promise<HardwareAcceleration> {
+    if (this.hwAccel) return Promise.resolve(this.hwAccel);
+    if (this.hwAccelProbe) return this.hwAccelProbe;
+    const codec = this.codec;
+    const description = this.description;
+    if (!description) {
+      return Promise.reject(new Error("resolveHwAccel before SPS/PPS"));
+    }
+    this.hwAccelProbe = (async () => {
+      const candidates: HardwareAcceleration[] = [
+        "prefer-hardware",
+        "prefer-software",
+        "no-preference",
+      ];
+      const results: { accel: HardwareAcceleration; supported: boolean }[] = [];
+      for (const accel of candidates) {
+        try {
+          const r = await VideoDecoder.isConfigSupported({
+            codec,
+            description: description ?? undefined,
+            codedWidth: width || undefined,
+            codedHeight: height || undefined,
+            optimizeForLatency: true,
+            hardwareAcceleration: accel,
+          });
+          results.push({ accel, supported: !!r.supported });
+        } catch {
+          results.push({ accel, supported: false });
+        }
+      }
+      const picked = pickHardwareAcceleration(results);
+      this.hwAccel = picked;
+      clog("VideoDecoder accel", { picked, results });
+      return picked;
+    })();
+    return this.hwAccelProbe;
+  }
+
   /**
    * Park the newest decoded frame; close any older pending frame.
-   * Presentation happens on rAF — never drain a queue of old pictures.
+   * Paint immediately when budget allows (Ricardo canvas path) — rAF alone
+   * capped Joel at ~31fps while host pushed ~92fps.
    */
   private parkDecoded(frame: VideoFrame) {
     const ts = frame.timestamp;
@@ -274,15 +377,28 @@ export class WebCodecsCanvasView {
 
     if (this.pending) {
       this.pending.close();
-      this.dropped += 1;
+      // LFW supersede — not a loss; don't inflate the dropped counter.
     }
     this.pending = frame;
     this.pendingMeta = meta;
     this.pendingTs = ts;
-    this.schedulePresent();
+    this.schedulePresent(true);
   }
 
-  private schedulePresent() {
+  /** Present pending frame — immediate when allowed, else coalesce on rAF. */
+  private schedulePresent(preferImmediate = false) {
+    const now = performance.now();
+    if (
+      preferImmediate &&
+      now - this.lastPaintAt >= WebCodecsCanvasView.MIN_PAINT_MS
+    ) {
+      if (this.raf) {
+        cancelAnimationFrame(this.raf);
+        this.raf = 0;
+      }
+      this.presentLatest();
+      return;
+    }
     if (this.raf) return;
     this.raf = requestAnimationFrame(() => {
       this.raf = 0;
@@ -316,6 +432,7 @@ export class WebCodecsCanvasView {
       this.onPainted?.({
         seq: meta.seq,
         stampUs: meta.stampUs,
+        inputWm: meta.inputWm,
         recvMs: meta.recvMs,
         paintMs,
       });
@@ -323,6 +440,10 @@ export class WebCodecsCanvasView {
   }
 
   push(au: VideoAccessUnit, recvMs = performance.now()) {
+    // Photon sidecar after first paint: App stops feeding us; belt-and-suspenders
+    // so a stray push never runs dual decode beside RTP (choppy feel).
+    if (this.photonSidecar && this.paintedTotal > 0) return;
+
     const dec = this.decoder;
     if (!dec || dec.state === "closed") return;
 
@@ -353,38 +474,47 @@ export class WebCodecsCanvasView {
           this.resetForKeyframe();
           return;
         }
-        dec.configure({
-          codec: this.codec,
-          description: this.description,
-          codedWidth: au.width || undefined,
-          codedHeight: au.height || undefined,
-          optimizeForLatency: true,
-        });
+        // Configure THIS IDR immediately. Waiting on isConfigSupported skipped
+        // the keyframe, asked for another, and Chrome never painted (fallback_timer).
+        if (!this.hwAccel) this.hwAccel = "prefer-hardware";
+        try {
+          dec.configure({
+            codec: this.codec,
+            description: this.description,
+            codedWidth: au.width || undefined,
+            codedHeight: au.height || undefined,
+            optimizeForLatency: true,
+            hardwareAcceleration: this.hwAccel,
+          });
+        } catch (e) {
+          cwarn("VideoDecoder configure failed; forcing prefer-software", e);
+          this.hwAccel = "prefer-software";
+          this.resetForKeyframe();
+          this.requestKeyframe();
+          return;
+        }
+        void this.resolveHwAccel(au.width, au.height).catch(() => {});
         this.configured = true;
         clog("VideoDecoder configured", {
           codec: this.codec,
           w: au.width,
           h: au.height,
           annexB: au.annexB.byteLength,
+          hardwareAcceleration: this.hwAccel,
         });
       }
 
-      if (shouldSkipDecode(dec.decodeQueueSize, keyframe)) {
-        // Decoder is backed up locally (slow paint/GPU, not a network issue).
-        // Drop the frame to let it catch up, but do NOT set waitingKeyframe —
-        // the decoder is still configured and the last keyframe is still valid.
+      const backlog = decodeBacklogPolicy(
+        dec.decodeQueueSize,
+        keyframe,
+        this.lastAgeBand
+      );
+      if (backlog === "skip-request-idr") {
         this.dropped += 1;
+        this.requestKeyframe();
         return;
       }
-
-      // If we already hold a pending frame older than the drop budget, prefer
-      // not to enqueue more deltas until the presenter drains.
-      if (
-        this.pending &&
-        this.pendingMeta &&
-        !keyframe &&
-        performance.now() - this.pendingMeta.recvMs > AGE_DROP_MS
-      ) {
+      if (backlog === "skip") {
         this.dropped += 1;
         return;
       }
@@ -396,7 +526,12 @@ export class WebCodecsCanvasView {
       }
 
       const ts = chunkTimestampUs(au.seq);
-      this.metaByTs.set(ts, { seq: au.seq, stampUs: au.stampUs, recvMs });
+      this.metaByTs.set(ts, {
+        seq: au.seq,
+        stampUs: au.stampUs,
+        inputWm: au.inputWm,
+        recvMs,
+      });
 
       const t0 = performance.now();
       const chunk = new EncodedVideoChunk({
@@ -414,9 +549,26 @@ export class WebCodecsCanvasView {
   }
 
   private requestKeyframe() {
+    // Photon sidecar: up to BOOTSTRAP_PLI_MAX spaced PLIs until first paint so
+    // CLVD gets a complete IDR. After paint, never PLI — shared-encoder IDR
+    // blacks every peer's RTP. Do not mark an attempt until we actually send
+    // (old code burned the one-shot on the 200ms throttle).
+    if (this.photonSidecar) {
+      if (this.paintedTotal > 0) return;
+      if (this.bootstrapPliAttempts >= WebCodecsCanvasView.BOOTSTRAP_PLI_MAX) {
+        return;
+      }
+    }
     const now = performance.now();
-    if (now - this.lastPli < 200) return;
+    const minGap = this.photonSidecar
+      ? WebCodecsCanvasView.BOOTSTRAP_PLI_GAP_MS
+      : 200;
+    // First bootstrap may fire immediately (lastPli==0); later ones wait 3s.
+    if (this.lastPli > 0 && now - this.lastPli < minGap) return;
     this.lastPli = now;
+    if (this.photonSidecar) {
+      this.bootstrapPliAttempts += 1;
+    }
     this.onNeedKeyframe?.();
   }
 
@@ -493,7 +645,21 @@ export class WebCodecsCanvasView {
 
   private checkStall() {
     if (!this.running || this.paintedTotal === 0 || this.lastPaintAt === 0) return;
-    if (performance.now() - this.lastPaintAt < WebCodecsCanvasView.STALL_MS) return;
+    // Hybrid photon sidecar / software: gaps between thinned CLVD IDRs are
+    // normal. Never flip host present_path (that thrashed warmup↔webcodecs in
+    // ~3s and zeroed Joel's input_wm samples while RTP stayed perfect).
+    const soft =
+      this.hwAccel === "prefer-software" ||
+      this.hwAccel === "no-preference" ||
+      this.photonSidecar;
+    const budget = soft ? 5000 : WebCodecsCanvasView.STALL_MS;
+    if (performance.now() - this.lastPaintAt < budget) return;
+    if (soft) {
+      // Hybrid: RTP canvas is the present. Never PLI — that IDRs the shared
+      // encoder and blacks every friend's RTP picture periodically.
+      this.lastPaintAt = performance.now();
+      return;
+    }
     cwarn("webcodecs stall — no paint, resetting decoder and showing live RTP");
     this.lastPaintAt = performance.now();
     this.resetForKeyframe();
@@ -518,5 +684,7 @@ export class WebCodecsCanvasView {
     this.configured = false;
     this.waitingKeyframe = true;
     this.description = null;
+    this.hwAccel = null;
+    this.hwAccelProbe = null;
   }
 }

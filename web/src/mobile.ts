@@ -95,7 +95,10 @@ export async function exitElementFullscreen(): Promise<void> {
 
 export async function lockLandscape(): Promise<void> {
   try {
-    await screen.orientation?.lock?.("landscape");
+    const o = screen.orientation as ScreenOrientation & {
+      lock?: (orientation: string) => Promise<void>;
+    };
+    await o.lock?.("landscape");
   } catch {
     /* iOS / unsigned web — lock is optional */
   }

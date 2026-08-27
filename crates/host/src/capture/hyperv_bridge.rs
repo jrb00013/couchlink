@@ -55,6 +55,8 @@ const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// stops sending, so `maybe_respawn` needs a second trigger besides a socket
 /// error.
 const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
+/// Cap on per-frame wait samples kept for p95 (SHM decision gate).
+const WAIT_SAMPLE_CAP: usize = 120;
 
 fn is_timeout(e: &std::io::Error) -> bool {
     matches!(
@@ -90,8 +92,14 @@ pub struct HyperVBridge {
     ever_connected: bool,
     /// Accumulated bridge wait (socket read / latest_frame) for diagnostics.
     wait_ns: u64,
+    /// Number of wait samples accumulated into `wait_ns` this window.
+    wait_count: u64,
     /// Accumulated buffer take/copy for diagnostics.
     copy_ns: u64,
+    /// Number of copy samples accumulated into `copy_ns` this window.
+    copy_count: u64,
+    /// Per-frame wait samples (ms) for p95 SHM gate — capped ring.
+    wait_samples_ms: Vec<f64>,
 }
 
 impl HyperVBridge {
@@ -140,7 +148,10 @@ impl HyperVBridge {
             last_connect_attempt: None,
             ever_connected,
             wait_ns: 0,
+            wait_count: 0,
             copy_ns: 0,
+            copy_count: 0,
+            wait_samples_ms: Vec::with_capacity(WAIT_SAMPLE_CAP),
         })
     }
 
@@ -149,6 +160,16 @@ impl HyperVBridge {
         if let Some(stream) = self.stream.as_mut() {
             if let Err(e) = write_set_target(stream, target) {
                 tracing::warn!("could not command encode target over Hyper-V socket: {e}");
+            }
+        }
+    }
+
+    pub fn reassert_target(&mut self) {
+        if let Some(target) = self.target {
+            if let Some(stream) = self.stream.as_mut() {
+                if let Err(e) = write_set_target(stream, target) {
+                    tracing::warn!("could not re-command encode target over Hyper-V socket: {e}");
+                }
             }
         }
     }
@@ -212,11 +233,28 @@ impl HyperVBridge {
         std::mem::take(&mut self.frames_received)
     }
 
-    /// (wait_ms, copy_ms) averages cleared for the next window.
-    pub fn take_handoff_ms(&mut self) -> (f64, f64) {
-        let w = std::mem::take(&mut self.wait_ns) as f64 / 1_000_000.0;
-        let c = std::mem::take(&mut self.copy_ns) as f64 / 1_000_000.0;
-        (w, c)
+    /// Per-frame handoff averages + wait p95 (ms), then clear the window.
+    ///
+    /// Returns `(wait_avg_ms, copy_avg_ms, wait_p95_ms)`. Zeros when no samples.
+    /// SHM gate uses p95 (`input_photon_budget::shm_gate_trips`).
+    ///
+    /// Averages use the true sample counts (`wait_count` / `copy_count`), not the
+    /// capped p95 ring length — dividing total ns by a truncated ring inflated
+    /// mean wait ~6× and falsely screamed SHM while p95 stayed ~2ms.
+    pub fn take_handoff_ms(&mut self) -> (f64, f64, f64) {
+        let wait_n = std::mem::take(&mut self.wait_count).max(1) as f64;
+        let copy_n = std::mem::take(&mut self.copy_count).max(1) as f64;
+        let wait_avg = std::mem::take(&mut self.wait_ns) as f64 / 1_000_000.0 / wait_n;
+        let copy_avg = std::mem::take(&mut self.copy_ns) as f64 / 1_000_000.0 / copy_n;
+        let mut samples = std::mem::take(&mut self.wait_samples_ms);
+        let p95 = if samples.is_empty() {
+            0.0
+        } else {
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let idx = ((samples.len() as f64 - 1.0) * 0.95).floor() as usize;
+            samples[idx.min(samples.len() - 1)]
+        };
+        (wait_avg, copy_avg, p95)
     }
 
     fn latest_frame(&mut self) -> Result<bool> {
@@ -277,7 +315,14 @@ impl HyperVBridge {
         match {
             let t_wait = Instant::now();
             let got = self.latest_frame();
-            self.wait_ns += t_wait.elapsed().as_nanos() as u64;
+            let elapsed = t_wait.elapsed();
+            self.wait_ns += elapsed.as_nanos() as u64;
+            self.wait_count += 1;
+            let wait_ms = elapsed.as_secs_f64() * 1000.0;
+            if self.wait_samples_ms.len() >= WAIT_SAMPLE_CAP {
+                self.wait_samples_ms.remove(0);
+            }
+            self.wait_samples_ms.push(wait_ms);
             got
         } {
             Ok(true) => {
@@ -285,6 +330,7 @@ impl HyperVBridge {
                 let t_copy = Instant::now();
                 let frame = std::mem::take(&mut self.buf);
                 self.copy_ns += t_copy.elapsed().as_nanos() as u64;
+                self.copy_count += 1;
                 if self.format == FrameFormat::H264 {
                     return Ok(Some(Captured::H264 {
                         nal: frame,

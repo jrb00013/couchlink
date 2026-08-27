@@ -5,6 +5,7 @@ import {
   AGE_EMERGENCY_MS,
   AGE_TARGET_MS,
   AGE_WARN_MS,
+  decodeBacklogPolicy,
   shouldReplacePending,
   shouldSkipDecode,
 } from "./presentAge";
@@ -38,7 +39,29 @@ describe("shouldSkipDecode", () => {
 
   it("skips deltas when the decoder queue is backed up", () => {
     expect(shouldSkipDecode(0, false)).toBe(false);
-    expect(shouldSkipDecode(1, false)).toBe(false);
-    expect(shouldSkipDecode(2, false)).toBe(true);
+    expect(shouldSkipDecode(3, false)).toBe(false);
+    expect(shouldSkipDecode(4, false)).toBe(true);
+  });
+
+  it("maxQueue 3 leaves headroom for ~70fps paint at high push", () => {
+    expect(shouldSkipDecode(2, false)).toBe(false);
+    expect(shouldSkipDecode(3, false)).toBe(false);
+  });
+});
+
+describe("decodeBacklogPolicy", () => {
+  it("skips deltas on backlog without requesting IDR (CPU congestion)", () => {
+    expect(decodeBacklogPolicy(4, false)).toBe("skip");
+    expect(decodeBacklogPolicy(4, false, "ok")).toBe("skip");
+    expect(decodeBacklogPolicy(4, false, "warn")).toBe("skip");
+  });
+
+  it("requests IDR only when backlog coincides with late age", () => {
+    expect(decodeBacklogPolicy(4, false, "drop")).toBe("skip-request-idr");
+    expect(decodeBacklogPolicy(4, false, "emergency")).toBe("skip-request-idr");
+  });
+
+  it("decodes when queue is healthy", () => {
+    expect(decodeBacklogPolicy(1, false)).toBe("decode");
   });
 });

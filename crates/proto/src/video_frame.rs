@@ -17,6 +17,7 @@ pub const VIDEO_CHANNEL: &str = "video";
 pub const VIDEO_MAGIC: &[u8; 4] = b"CLVD";
 pub const VIDEO_VERSION: u8 = 3;
 pub const VIDEO_VERSION_V2: u8 = 2;
+pub const VIDEO_VERSION_V4: u8 = 4;
 
 pub const FLAG_KEYFRAME: u8 = 1 << 0;
 
@@ -25,6 +26,8 @@ pub const FLAG_KEYFRAME: u8 = 1 << 0;
 pub const VIDEO_HEADER_LEN_V2: usize = 18;
 /// v3 adds stamp_us (u64 LE) after frag_count.
 pub const VIDEO_HEADER_LEN: usize = 26;
+/// v4 adds input_wm (u32 LE) — last pad seq applied when this AU was encoded.
+pub const VIDEO_HEADER_LEN_V4: usize = 30;
 
 /// Stay under common SCTP maxMessageSize (65536) with margin for DTLS/SCTP overhead.
 pub const VIDEO_MAX_FRAGMENT_PAYLOAD: usize = 14_000;
@@ -50,6 +53,8 @@ pub struct VideoAccessUnit {
     pub annex_b: Vec<u8>,
     /// Host monotonic µs at capture-read. 0 = unknown / v2 peer.
     pub stamp_us: u64,
+    /// Pad seq last applied on the host when this AU was encoded. 0 = none / v3 peer.
+    pub input_wm: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,14 +66,33 @@ pub struct VideoFragment {
     pub frag_idx: u16,
     pub frag_count: u16,
     pub stamp_us: u64,
+    pub input_wm: u32,
     pub payload: Vec<u8>,
 }
 
 impl VideoFragment {
+    fn wire_version(&self) -> u8 {
+        if self.input_wm != 0 || self.stamp_us != 0 {
+            VIDEO_VERSION_V4
+        } else {
+            VIDEO_VERSION_V2
+        }
+    }
+
+    fn wire_header_len(ver: u8) -> usize {
+        match ver {
+            VIDEO_VERSION_V4 => VIDEO_HEADER_LEN_V4,
+            VIDEO_VERSION => VIDEO_HEADER_LEN,
+            _ => VIDEO_HEADER_LEN_V2,
+        }
+    }
+
     pub fn encode(&self, out: &mut BytesMut) {
-        out.reserve(VIDEO_HEADER_LEN + self.payload.len());
+        let ver = self.wire_version();
+        let header_len = Self::wire_header_len(ver);
+        out.reserve(header_len + self.payload.len());
         out.put_slice(VIDEO_MAGIC);
-        out.put_u8(VIDEO_VERSION);
+        out.put_u8(ver);
         let mut flags = 0u8;
         if self.keyframe {
             flags |= FLAG_KEYFRAME;
@@ -79,7 +103,12 @@ impl VideoFragment {
         out.put_u32_le(self.seq);
         out.put_u16_le(self.frag_idx);
         out.put_u16_le(self.frag_count);
-        out.put_u64_le(self.stamp_us);
+        if ver == VIDEO_VERSION_V4 {
+            out.put_u64_le(self.stamp_us);
+            out.put_u32_le(self.input_wm);
+        } else if ver == VIDEO_VERSION {
+            out.put_u64_le(self.stamp_us);
+        }
         out.put_slice(&self.payload);
     }
 
@@ -93,14 +122,10 @@ impl VideoFragment {
             return Err(VideoCodecError::BadMagic);
         }
         let ver = buf.get_u8();
-        if ver != VIDEO_VERSION && ver != VIDEO_VERSION_V2 {
+        if ver != VIDEO_VERSION && ver != VIDEO_VERSION_V2 && ver != VIDEO_VERSION_V4 {
             return Err(VideoCodecError::BadVersion(ver));
         }
-        let header_len = if ver == VIDEO_VERSION {
-            VIDEO_HEADER_LEN
-        } else {
-            VIDEO_HEADER_LEN_V2
-        };
+        let header_len = Self::wire_header_len(ver);
         if buf.len() + 5 < header_len {
             return Err(VideoCodecError::Short);
         }
@@ -110,13 +135,20 @@ impl VideoFragment {
         let seq = buf.get_u32_le();
         let frag_idx = buf.get_u16_le();
         let frag_count = buf.get_u16_le();
-        let stamp_us = if ver == VIDEO_VERSION {
-            if buf.len() < 8 {
-                return Err(VideoCodecError::Short);
+        let (stamp_us, input_wm) = match ver {
+            VIDEO_VERSION_V4 => {
+                if buf.len() < 12 {
+                    return Err(VideoCodecError::Short);
+                }
+                (buf.get_u64_le(), buf.get_u32_le())
             }
-            buf.get_u64_le()
-        } else {
-            0
+            VIDEO_VERSION => {
+                if buf.len() < 8 {
+                    return Err(VideoCodecError::Short);
+                }
+                (buf.get_u64_le(), 0)
+            }
+            _ => (0, 0),
         };
         // `frag_idx == frag_count` is legal: it marks the FEC parity fragment,
         // one slot past the last data index. Only a data-fragment index must
@@ -134,6 +166,7 @@ impl VideoFragment {
             frag_idx,
             frag_count,
             stamp_us,
+            input_wm,
             payload: buf.to_vec(),
         })
     }
@@ -187,9 +220,11 @@ impl VideoAccessUnit {
                 frag_idx: i as u16,
                 frag_count,
                 stamp_us: self.stamp_us,
+                input_wm: self.input_wm,
                 payload: piece.to_vec(),
             };
-            let mut buf = BytesMut::with_capacity(VIDEO_HEADER_LEN + piece.len());
+            let header_len = VideoFragment::wire_header_len(frag.wire_version());
+            let mut buf = BytesMut::with_capacity(header_len + piece.len());
             frag.encode(&mut buf);
             out.push(buf);
         }
@@ -202,9 +237,11 @@ impl VideoAccessUnit {
                 frag_idx: 0,
                 frag_count: 1,
                 stamp_us: self.stamp_us,
+                input_wm: self.input_wm,
                 payload: Vec::new(),
             };
-            let mut buf = BytesMut::with_capacity(VIDEO_HEADER_LEN);
+            let header_len = VideoFragment::wire_header_len(frag.wire_version());
+            let mut buf = BytesMut::with_capacity(header_len);
             frag.encode(&mut buf);
             out.push(buf);
             return out;
@@ -224,9 +261,11 @@ impl VideoAccessUnit {
                 frag_idx: frag_count,
                 frag_count,
                 stamp_us: self.stamp_us,
+                input_wm: self.input_wm,
                 payload: parity_payload,
             };
-            let mut buf = BytesMut::with_capacity(VIDEO_HEADER_LEN + parity.payload.len());
+            let header_len = VideoFragment::wire_header_len(parity.wire_version());
+            let mut buf = BytesMut::with_capacity(header_len + parity.payload.len());
             parity.encode(&mut buf);
             out.push(buf);
         }
@@ -246,6 +285,7 @@ pub struct FragmentAssembler {
     keyframe: bool,
     frag_count: u16,
     stamp_us: u64,
+    input_wm: u32,
     parts: Vec<Option<Vec<u8>>>,
     parity: Option<Vec<u8>>,
 }
@@ -259,6 +299,7 @@ impl FragmentAssembler {
             self.keyframe = frag.keyframe;
             self.frag_count = frag.frag_count;
             self.stamp_us = frag.stamp_us;
+            self.input_wm = frag.input_wm;
             self.parts = vec![None; frag.frag_count as usize];
             self.parity = None;
         }
@@ -305,6 +346,7 @@ impl FragmentAssembler {
             keyframe: self.keyframe,
             annex_b,
             stamp_us: self.stamp_us,
+            input_wm: self.input_wm,
         };
         self.seq = None;
         self.parity = None;
@@ -391,6 +433,7 @@ mod tests {
             keyframe: true,
             annex_b: vec![0, 0, 0, 1, 0x65, 1, 2, 3],
             stamp_us: 0,
+            input_wm: 0,
         };
         let frags = au.encode_fragments();
         assert_eq!(frags.len(), 1);
@@ -411,6 +454,7 @@ mod tests {
             keyframe: true,
             annex_b: annex_b.clone(),
             stamp_us: 0,
+            input_wm: 0,
         };
         let frags = au.encode_fragments();
         assert!(frags.len() > 1);
@@ -440,6 +484,7 @@ mod tests {
             keyframe: true,
             annex_b,
             stamp_us: 0,
+            input_wm: 0,
         }
     }
 
@@ -531,6 +576,7 @@ mod tests {
             keyframe: false,
             annex_b: vec![1, 2, 3],
             stamp_us: 0,
+            input_wm: 0,
         };
         // A parity of one fragment against nothing recovers nothing —
         // sending it would cost bandwidth for zero benefit.
@@ -547,6 +593,7 @@ mod tests {
             frag_idx: 3,
             frag_count: 3,
             stamp_us: 0,
+            input_wm: 0,
             payload: vec![0; 2 + VIDEO_MAX_FRAGMENT_PAYLOAD],
         };
         let mut buf = BytesMut::new();
@@ -601,15 +648,37 @@ mod tests {
             keyframe: true,
             annex_b: vec![0, 0, 0, 1, 0x65],
             stamp_us: 1_234_567,
+            input_wm: 0,
         };
         let frags = au.encode_fragments();
-        assert_eq!(frags[0].len(), VIDEO_HEADER_LEN + au.annex_b.len());
+        assert_eq!(frags[0].len(), VIDEO_HEADER_LEN_V4 + au.annex_b.len());
         let back = {
             let mut asm = FragmentAssembler::default();
             asm.push(VideoFragment::decode(&frags[0]).unwrap()).unwrap()
         };
         assert_eq!(back.stamp_us, 1_234_567);
         assert_eq!(back.annex_b, au.annex_b);
+    }
+
+    #[test]
+    fn v4_round_trips_input_wm() {
+        let au = VideoAccessUnit {
+            seq: 3,
+            width: 1280,
+            height: 720,
+            keyframe: false,
+            annex_b: vec![0, 0, 0, 1, 0x09],
+            stamp_us: 99,
+            input_wm: 42,
+        };
+        let frags = au.encode_fragments();
+        assert_eq!(frags[0].len(), VIDEO_HEADER_LEN_V4 + au.annex_b.len());
+        let back = {
+            let mut asm = FragmentAssembler::default();
+            asm.push(VideoFragment::decode(&frags[0]).unwrap()).unwrap()
+        };
+        assert_eq!(back.input_wm, 42);
+        assert_eq!(back.stamp_us, 99);
     }
 
     #[test]
@@ -621,6 +690,7 @@ mod tests {
             keyframe: true,
             annex_b: (0..30_000).map(|i| (i % 251) as u8).collect(),
             stamp_us: 99,
+            input_wm: 0,
         };
         let frags = au.encode_fragments_with_fec();
         let decoded: Vec<VideoFragment> = frags

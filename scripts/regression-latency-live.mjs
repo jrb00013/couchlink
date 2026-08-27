@@ -1,254 +1,416 @@
 #!/usr/bin/env node
 /**
- * Live LAN latency probe against a running couchlink host.
+ * Live Ricardo + self-beat probe against a running couchlink host.
  *
- * Opens the join URL in Chromium, waits for WebRTC connected, samples
- * inbound-rtp getStats, and fails if jitter buffer / fps regress past the
- * gates locked in web/src/latencyStats.ts (JB ≤ 20ms, fps ≥ 50, drops = 0).
+ * **Authority for S_p50 is real Chrome** — use HOST_ONLY=1 + paste a scrape from
+ * `window.__couchlinkRicardo()` (see scripts/joel-live-gate.sh). Playwright is
+ * optional smoke only (PLAYWRIGHT=1).
  *
- * Usage: node scripts/regression-latency-live.mjs '<join-url>'
+ * Gates:
+ *   Ricardo floor:  push ≥ 74 · shed ≤ 3% · encode ≥ 5000 · paint ≥ 74 · S_p50 ≤ 45
+ *   Self-beat bars: push ≥ 90 · shed ≤ 1% · encode ≥ 5000 · paint ≥ 100 · S_p50 ≤ 5
+ *
+ * Usage:
+ *   HOST_ONLY=1 HOST_LOG=/tmp/couchlink-stack.log node scripts/regression-latency-live.mjs
+ *   CLIENT_SCRAPE=/tmp/ricardo.json HOST_LOG=… node scripts/regression-latency-live.mjs
+ *   PLAYWRIGHT=1 JOIN_URL='…' HOST_LOG=… node scripts/regression-latency-live.mjs
  */
 import { createRequire } from "node:module";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const webDir = path.join(root, "web");
-const joinUrl = process.argv[2];
-if (!joinUrl) {
-  console.error("usage: node scripts/regression-latency-live.mjs <join-url>");
+
+const hostOnly =
+  process.env.HOST_ONLY === "1" || process.env.HOST_ONLY === "true";
+const usePlaywright =
+  process.env.PLAYWRIGHT === "1" || process.env.PLAYWRIGHT === "true";
+const joinUrl = process.argv[2] || process.env.JOIN_URL || "";
+const hostLog = process.env.HOST_LOG || "";
+const clientScrapePath = process.env.CLIENT_SCRAPE || "";
+
+/** Hard Ricardo gate — mirrors crates/host/src/latency_live_sim/ricardo_gate.rs */
+export const RICARDO = {
+  minPushFps: 74,
+  maxShedPct: 3,
+  minEncodeKbps: 5000,
+  minPaintFps: 74,
+  maxSurplusP50Ms: 45,
+};
+
+/** Beat-self bars — clear margin over frozen self baseline (74.8/84/7.4). */
+export const SELF = {
+  minPushFps: 90,
+  maxShedPct: 1,
+  minEncodeKbps: 5000,
+  minPaintFps: 100,
+  maxSurplusP50Ms: 5,
+};
+
+const beatSelf =
+  process.env.BEAT_SELF !== "0" && process.env.BEAT_SELF !== "false";
+const GATE = beatSelf ? SELF : RICARDO;
+
+export function parseHostStreamingWindows(logPath, n = 8, afterMarker = null) {
+  if (!logPath || !fs.existsSync(logPath)) return [];
+  const text = fs.readFileSync(logPath, "utf8");
+  let body = text;
+  if (afterMarker) {
+    const idx = text.lastIndexOf(afterMarker);
+    if (idx >= 0) body = text.slice(idx);
+  }
+  const lines = body
+    .split(/\r?\n/)
+    .filter((l) => l.includes("[couchlink-host] streaming"));
+  const out = [];
+  for (const line of lines.slice(-n)) {
+    const fps = /streaming ([\d.]+) fps/.exec(line);
+    const drop = /dropped \d+\/\d+ \((\d+)%\)/.exec(line);
+    const pushFps = fps ? Number(fps[1]) : 0;
+    if (pushFps < 10) continue;
+    out.push({
+      pushFps,
+      shedPct: drop ? Number(drop[1]) : 99,
+      raw: line.trim(),
+    });
+  }
+  return out;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function loadClientScrape() {
+  if (!clientScrapePath) return null;
+  try {
+    const raw = fs.readFileSync(clientScrapePath, "utf8");
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error("CLIENT_SCRAPE parse failed:", e.message || e);
+    process.exit(2);
+  }
+}
+
+/** Normalize __couchlinkRicardo() hook output into gate scrape shape. */
+export function scrapeFromHook(snap) {
+  if (!snap) return null;
+  const paint = snap.present?.fps || 0;
+  const encode = snap.hostStats?.target_bitrate_kbps ?? 0;
+  const surplus =
+    snap.inputPhoton?.surplusP50Ms ?? snap.present?.surplusP50Ms ?? null;
+  const photon =
+    snap.inputPhoton?.photonP50Ms ?? snap.present?.photonP50Ms ?? null;
+  return {
+    presentMode: snap.presentMode || "—",
+    paintFps: paint || 0,
+    encodeKbps: encode || 0,
+    hostPushFps: snap.hostStats?.fps ?? 0,
+    hostShedPct: snap.hostStats?.drop_pct ?? 100,
+    surplusP50Ms: surplus,
+    photonP50Ms: photon,
+    rttMs: snap.rttMs || 0,
+    sampleCount: snap.inputPhoton?.sampleCount ?? 0,
+    watermarkActive: !!snap.inputPhoton?.watermarkActive,
+  };
+}
+
+export function mergeBest(hostBest, clientBest) {
+  if (!clientBest) return { ...hostBest };
+  return {
+    presentMode: clientBest.presentMode || hostBest.presentMode,
+    paintFps: Math.max(hostBest.paintFps, clientBest.paintFps || 0),
+    encodeKbps: Math.max(hostBest.encodeKbps, clientBest.encodeKbps || 0),
+    hostPushFps: hostBest.hostPushFps || clientBest.hostPushFps || 0,
+    hostShedPct: hostBest.hostShedPct ?? clientBest.hostShedPct ?? 100,
+    surplusP50Ms:
+      clientBest.surplusP50Ms != null
+        ? clientBest.surplusP50Ms
+        : hostBest.surplusP50Ms,
+    photonP50Ms:
+      clientBest.photonP50Ms != null
+        ? clientBest.photonP50Ms
+        : hostBest.photonP50Ms,
+    rttMs: clientBest.rttMs || hostBest.rttMs,
+    sampleCount: Math.max(hostBest.sampleCount, clientBest.sampleCount || 0),
+    watermarkActive: hostBest.watermarkActive || clientBest.watermarkActive,
+  };
+}
+
+export function scoreGate(best, gate, { hostLog, scoreWindows, requireClient }) {
+  const failures = [];
+  if (hostLog && !scoreWindows.length) {
+    failures.push(
+      "no host streaming windows after probe start (host log stale or dead)"
+    );
+  }
+  if (requireClient) {
+    if (best.presentMode !== "webcodecs") {
+      failures.push(
+        `presentMode=${best.presentMode} (need webcodecs for honest S_p50)`
+      );
+    }
+    if (best.encodeKbps < gate.minEncodeKbps) {
+      failures.push(`encode ${best.encodeKbps} < ${gate.minEncodeKbps} kbps`);
+    }
+    if (best.paintFps < gate.minPaintFps) {
+      failures.push(`paint ${best.paintFps.toFixed(1)} < ${gate.minPaintFps}`);
+    }
+    if (!best.watermarkActive || best.sampleCount < 16) {
+      failures.push(
+        `input_wm samples=${best.sampleCount} active=${best.watermarkActive} (need ≥16)`
+      );
+    }
+    if (best.surplusP50Ms == null) {
+      failures.push("S_p50 missing (need WebCodecs + CLVD v4 input_wm in Chrome)");
+    } else if (best.surplusP50Ms > gate.maxSurplusP50Ms) {
+      failures.push(
+        `S_p50 ${best.surplusP50Ms.toFixed(1)}ms > ${gate.maxSurplusP50Ms}ms`
+      );
+    }
+  }
+  if (best.hostPushFps < gate.minPushFps) {
+    failures.push(`push ${best.hostPushFps.toFixed(1)} < ${gate.minPushFps}`);
+  }
+  if (best.hostShedPct > gate.maxShedPct) {
+    failures.push(`shed ${best.hostShedPct}% > ${gate.maxShedPct}%`);
+  }
+  return failures;
+}
+
+function applyHostWindows(best, hostLog, probeMarker) {
+  const windows = parseHostStreamingWindows(hostLog, 8, probeMarker);
+  const steady = windows.filter((w) => w.pushFps >= 60);
+  const scoreWindows =
+    steady.length >= 3
+      ? steady.slice(-3)
+      : steady.length
+        ? steady
+        : windows.slice(-3);
+  if (scoreWindows.length) {
+    for (const w of scoreWindows) console.log("host log streaming:", w.raw);
+    best.hostPushFps = Math.min(...scoreWindows.map((w) => w.pushFps));
+    best.hostShedPct = Math.max(...scoreWindows.map((w) => w.shedPct));
+  }
+  return scoreWindows;
+}
+
+async function runHostOnly(probeMarker) {
+  const waitSec = Number(process.env.HOST_WAIT_SEC || 25);
+  console.log(`HOST_ONLY: waiting ${waitSec}s for post-marker streaming windows…`);
+  for (let i = 0; i < waitSec; i++) {
+    const wins = parseHostStreamingWindows(hostLog, 8, probeMarker);
+    if (wins.filter((w) => w.pushFps >= 60).length >= 1) break;
+    await sleep(1000);
+  }
+  const best = {
+    presentMode: "—",
+    paintFps: 0,
+    encodeKbps: 0,
+    hostPushFps: 0,
+    hostShedPct: 100,
+    surplusP50Ms: null,
+    photonP50Ms: null,
+    rttMs: 0,
+    sampleCount: 0,
+    watermarkActive: false,
+  };
+  const scoreWindows = applyHostWindows(best, hostLog, probeMarker);
+  return { best, scoreWindows, consoleLines: [] };
+}
+
+async function runPlaywright(probeMarker) {
+  if (!joinUrl) {
+    console.error("PLAYWRIGHT=1 requires JOIN_URL");
+    process.exit(2);
+  }
+  const require = createRequire(import.meta.url);
+  function loadPlaywright() {
+    try {
+      return require(path.join(webDir, "node_modules/playwright"));
+    } catch {
+      console.error("Installing playwright (one-time)…");
+      execSync("npm install --no-fund --no-audit playwright@1", {
+        cwd: webDir,
+        stdio: "inherit",
+      });
+      execSync("npx playwright install chromium", {
+        cwd: webDir,
+        stdio: "inherit",
+      });
+      return require(path.join(webDir, "node_modules/playwright"));
+    }
+  }
+  const { chromium } = loadPlaywright();
+  const launchOpts = {
+    headless: true,
+    args: [
+      "--autoplay-policy=no-user-gesture-required",
+      "--use-fake-device-for-media-stream",
+    ],
+  };
+  let browser;
+  try {
+    browser = await chromium.launch({ ...launchOpts, channel: "chrome" });
+    console.log("browser: chrome channel (smoke only — not S_p50 authority)");
+  } catch {
+    browser = await chromium.launch(launchOpts);
+    console.log("browser: bundled chromium (smoke only)");
+  }
+  const page = await browser.newPage();
+  await page.addInitScript(() => {
+    const axes = [0, 0, 0, 0];
+    const buttons = Array.from({ length: 17 }, () => ({
+      pressed: false,
+      touched: false,
+      value: 0,
+    }));
+    let tick = 0;
+    const gp = {
+      id: "Couchlink Ricardo Probe Pad (Standard)",
+      index: 0,
+      connected: true,
+      mapping: "standard",
+      timestamp: 0,
+      axes,
+      buttons,
+      hapticActuators: [],
+      vibrationActuator: null,
+    };
+    navigator.getGamepads = () => {
+      tick += 1;
+      axes[0] = Math.sin(tick / 8) * 0.55;
+      gp.timestamp = performance.now();
+      return [gp, null, null, null];
+    };
+  });
+  const consoleLines = [];
+  page.on("console", (msg) => {
+    const t = msg.text();
+    if (/couchlink|present|webcodecs|photon|surplus/i.test(t)) {
+      consoleLines.push(t);
+    }
+  });
+  console.log("opening", joinUrl);
+  await page.goto(joinUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await page.waitForFunction(
+    () => {
+      const pill = document.querySelector(".pill");
+      return pill && /connected/i.test(pill.textContent || "");
+    },
+    { timeout: 60_000 }
+  );
+  let best = {
+    presentMode: "—",
+    paintFps: 0,
+    encodeKbps: 0,
+    hostPushFps: 0,
+    hostShedPct: 100,
+    surplusP50Ms: null,
+    photonP50Ms: null,
+    rttMs: 0,
+    sampleCount: 0,
+    watermarkActive: false,
+  };
+  for (let i = 0; i < 50; i++) {
+    await page.waitForTimeout(1000);
+    const snap = await page.evaluate(() => {
+      const hook = window.__couchlinkRicardo;
+      return typeof hook === "function" ? hook() : null;
+    });
+    const scraped = scrapeFromHook(snap);
+    if (scraped) {
+      best = mergeBest(best, scraped);
+    }
+    const hostWindows = parseHostStreamingWindows(hostLog, 8, probeMarker);
+    if (
+      best.watermarkActive &&
+      best.sampleCount >= 16 &&
+      hostWindows.filter((w) => w.pushFps >= 60).length >= 1
+    ) {
+      break;
+    }
+  }
+  await browser.close();
+  const scoreWindows = applyHostWindows(best, hostLog, probeMarker);
+  return { best, scoreWindows, consoleLines };
+}
+
+// --- main ---
+if (!hostOnly && !usePlaywright && !clientScrapePath) {
+  console.error(
+    "usage: HOST_ONLY=1 HOST_LOG=… node scripts/regression-latency-live.mjs\n" +
+      "   or: CLIENT_SCRAPE=/tmp/ricardo.json HOST_LOG=… node …\n" +
+      "   or: PLAYWRIGHT=1 JOIN_URL=… HOST_LOG=… node … (smoke only)"
+  );
   process.exit(2);
 }
 
-const GATES = { maxJitterBufferMs: 20, minDecodeFps: 50, maxFramesDropped: 0 };
-
-function evaluate(sample) {
-  const failures = [];
-  if (sample.jitterBufferMs > GATES.maxJitterBufferMs) {
-    failures.push(
-      `jitterBufferMs ${sample.jitterBufferMs.toFixed(1)} > ${GATES.maxJitterBufferMs}`
-    );
-  }
-  if (sample.decodeFps < GATES.minDecodeFps) {
-    failures.push(`decodeFps ${sample.decodeFps.toFixed(1)} < ${GATES.minDecodeFps}`);
-  }
-  if (sample.framesDropped > GATES.maxFramesDropped) {
-    failures.push(`framesDropped ${sample.framesDropped} > ${GATES.maxFramesDropped}`);
-  }
-  return { ok: failures.length === 0, failures };
-}
-
-const require = createRequire(import.meta.url);
-function loadPlaywright() {
+const probeMarker = `[ricardo-probe] start ${Date.now()}`;
+if (hostLog) {
   try {
-    return require(path.join(webDir, "node_modules/playwright"));
-  } catch {
-    console.error("Installing playwright (one-time)…");
-    execSync("npm install --no-fund --no-audit playwright@1", {
-      cwd: webDir,
-      stdio: "inherit",
-    });
-    execSync("npx playwright install chromium", { cwd: webDir, stdio: "inherit" });
-    return require(path.join(webDir, "node_modules/playwright"));
+    fs.appendFileSync(hostLog, `\n${probeMarker}\n`);
+  } catch (e) {
+    console.warn("could not append probe marker to HOST_LOG:", e.message || e);
   }
 }
 
-const { chromium } = loadPlaywright();
-const browser = await chromium.launch({
-  headless: true,
-  args: ["--autoplay-policy=no-user-gesture-required"],
-});
-const page = await browser.newPage();
+let best;
+let scoreWindows;
+let consoleLines = [];
 
-// Capture every RTCPeerConnection the page creates so we can read getStats.
-await page.addInitScript(() => {
-  const Orig = window.RTCPeerConnection;
-  const pcs = [];
-  function Patched(...args) {
-    const pc = new Orig(...args);
-    pcs.push(pc);
-    return pc;
+if (usePlaywright) {
+  ({ best, scoreWindows, consoleLines } = await runPlaywright(probeMarker));
+} else {
+  ({ best, scoreWindows, consoleLines } = await runHostOnly(probeMarker));
+}
+
+const clientRaw = loadClientScrape();
+if (clientRaw) {
+  const fromFile =
+    clientRaw.presentMode != null
+      ? clientRaw
+      : scrapeFromHook(clientRaw);
+  if (fromFile) {
+    console.log("CLIENT_SCRAPE merged");
+    best = mergeBest(best, fromFile);
   }
-  Patched.prototype = Orig.prototype;
-  Object.keys(Orig).forEach((k) => {
-    try {
-      Patched[k] = Orig[k];
-    } catch {
-      /* ignore */
-    }
-  });
-  window.RTCPeerConnection = Patched;
-  window.__couchlinkPcs = pcs;
+}
+
+console.log("Ricardo scrape:", JSON.stringify(best, null, 2));
+
+const requireClient = !!clientScrapePath || usePlaywright;
+const failures = scoreGate(best, GATE, {
+  hostLog,
+  scoreWindows,
+  requireClient,
 });
 
-const consoleLines = [];
-page.on("console", (msg) => {
-  const t = msg.text();
-  if (/couchlink|present|canvas|webcodecs|video stats|CLVD/i.test(t)) consoleLines.push(t);
-});
-
-console.log("opening", joinUrl);
-await page.goto(joinUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-
-await page.waitForFunction(
-  () => {
-    const pill = document.querySelector(".pill");
-    return pill && /connected/i.test(pill.textContent || "");
-  },
-  { timeout: 60_000 }
-);
-console.log("UI state: connected — waiting for present path…");
-
-// WebCodecs may need an IDR + 1s stats window; RTP canvas may also take a beat.
-// Prefer a painted present path over a premature "webcodecs" label with no frames.
-let present = "unknown";
-let wcDiag = null;
-for (let i = 0; i < 12; i++) {
-  await page.waitForTimeout(1000);
-  const snap = await page.evaluate(() => {
-    const spans = Array.from(document.querySelectorAll("footer.meta span"));
-    const text = spans.map((s) => s.textContent || "").join(" ");
-    const wcLine = spans
-      .map((s) => s.textContent || "")
-      .find((t) => /webcodecs:\s*\d+/i.test(t));
-    const canvasLine = spans
-      .map((s) => s.textContent || "")
-      .find((t) => /canvas:\s*\d+/i.test(t));
-    let path = "unknown";
-    if (wcLine) path = "webcodecs";
-    else if (canvasLine || /present:\s*canvas/i.test(text)) path = "canvas";
-    else if (/present:\s*video/i.test(text)) path = "video";
-    else if (/present:\s*webcodecs/i.test(text)) path = "webcodecs-pending";
-    let diag = null;
-    if (wcLine) {
-      const fps = /@\s*(\d+)fps/i.exec(wcLine);
-      const drop = /drop=(\d+)/i.exec(wcLine);
-      diag = {
-        presentFps: fps ? Number(fps[1]) : 0,
-        dropped: drop ? Number(drop[1]) : -1,
-        raw: wcLine,
-      };
-    }
-    return { path, diag, text };
-  });
-  present = snap.path;
-  wcDiag = snap.diag;
-  if (present === "webcodecs" && wcDiag && wcDiag.presentFps >= 50) break;
-  if (present === "canvas" || present === "video") break;
-}
-if (present === "webcodecs-pending") present = "webcodecs";
-console.log("present path:", present);
-
-async function readInbound() {
-  return page.evaluate(async () => {
-    const pcs = window.__couchlinkPcs || [];
-    for (const pc of pcs) {
-      if (!pc || pc.connectionState === "closed") continue;
-      const report = await pc.getStats();
-      let found = null;
-      report.forEach((r) => {
-        if (r.type === "inbound-rtp" && r.kind === "video") {
-          found = {
-            jitterBufferDelay: r.jitterBufferDelay ?? 0,
-            jitterBufferEmittedCount: r.jitterBufferEmittedCount ?? 0,
-            framesDecoded: r.framesDecoded ?? 0,
-            framesDropped: r.framesDropped ?? 0,
-            frameHeight: r.frameHeight ?? 0,
-            jitterBufferTarget: r.jitterBufferTarget ?? null,
-          };
-        }
-      });
-      if (found) return found;
-    }
-    return null;
-  });
-}
-
-const samples = [];
-let prev = await readInbound();
-// WebCodecs path may never emit inbound-rtp decode counters — that's OK.
-if (!prev) {
-  console.warn("no inbound-rtp yet — may be WebCodecs-only present; continuing…");
-}
-
-for (let i = 0; i < 4; i++) {
-  await page.waitForTimeout(2000);
-  const next = await readInbound();
-  if (!next || !prev) {
-    prev = next;
-    continue;
-  }
-  const countDelta = next.jitterBufferEmittedCount - prev.jitterBufferEmittedCount;
-  if (countDelta > 0) {
-    const delayDelta = next.jitterBufferDelay - prev.jitterBufferDelay;
-    const decodedDelta = next.framesDecoded - prev.framesDecoded;
-    samples.push({
-      jitterBufferMs: (delayDelta / countDelta) * 1000,
-      decodeFps: decodedDelta / 2,
-      framesDropped: next.framesDropped,
-      frameHeight: next.frameHeight,
-    });
-  }
-  prev = next;
-}
-
-await browser.close();
-
-console.log("present path (final):", present);
-if (present === "webcodecs") {
-  console.log("webcodecs diag:", wcDiag);
-  // WebCodecs bypasses inbound-rtp JB — gate on present FPS from the UI diag.
-  if (!wcDiag || wcDiag.presentFps < 50) {
+if (failures.length) {
+  console.error(
+    `FAIL ${beatSelf ? "beat-self" : "Ricardo"} hard gate:`,
+    failures.join("; ")
+  );
+  if (!requireClient) {
     console.error(
-      "FAIL: WebCodecs present fps too low",
-      wcDiag ?? "(no diag)"
+      "\nClient axes skipped (HOST_ONLY). In real Chrome DevTools console:\n" +
+        "  copy(JSON.stringify(window.__couchlinkRicardo()))\n" +
+        "Save to /tmp/ricardo.json then:\n" +
+        "  CLIENT_SCRAPE=/tmp/ricardo.json HOST_LOG=… node scripts/regression-latency-live.mjs"
     );
-    process.exit(1);
   }
-  if (wcDiag.dropped > 30) {
-    console.error("FAIL: WebCodecs drop count high", wcDiag);
-    process.exit(1);
+  if (consoleLines.length) {
+    console.error("console tail:\n", consoleLines.slice(-50).join("\n"));
   }
-  console.log(
-    `LIVE latency regression PASS (WebCodecs path — JB bypassed, present≈${wcDiag.presentFps}fps)`
-  );
-  process.exit(0);
-}
-
-console.log("samples:");
-for (const s of samples) {
-  console.log(
-    `  JB=${s.jitterBufferMs.toFixed(1)}ms  fps=${s.decodeFps.toFixed(1)}  drops=${s.framesDropped}  h=${s.frameHeight}`
-  );
-}
-
-if (samples.length === 0) {
-  console.error("FAIL: no usable getStats windows");
-  console.error("console:\n", consoleLines.slice(-30).join("\n"));
   process.exit(1);
 }
 
-const last = samples[samples.length - 1];
-const avg = {
-  jitterBufferMs: samples.reduce((a, s) => a + s.jitterBufferMs, 0) / samples.length,
-  decodeFps: samples.reduce((a, s) => a + s.decodeFps, 0) / samples.length,
-  framesDropped: last.framesDropped,
-};
+const mode = hostOnly && !clientScrapePath ? "HOST" : "FULL";
 console.log(
-  `average: JB=${avg.jitterBufferMs.toFixed(1)}ms  fps=${avg.decodeFps.toFixed(1)}  drops=${avg.framesDropped}`
+  `LIVE ${beatSelf ? "SELF" : "Ricardo"} ${mode} PASS — push≥${best.hostPushFps.toFixed(1)} shed≤${best.hostShedPct}% encode=${best.encodeKbps} paint=${best.paintFps.toFixed(1)} S_p50=${best.surplusP50Ms?.toFixed?.(1) ?? "—"}ms present=${best.presentMode} samples=${best.sampleCount}`
 );
-
-const gate = evaluate(avg);
-if (present !== "canvas") {
-  console.warn("WARN: expected present: canvas or webcodecs on Chromium");
-}
-if (!gate.ok) {
-  console.error("FAIL latency gates:", gate.failures.join("; "));
-  process.exit(1);
-}
-console.log("LIVE latency regression PASS (vs gates JB≤20ms fps≥50 drops=0)");
-console.log(
-  `baseline reference from prior session: JB≈6–9ms fps≈59 — now JB=${avg.jitterBufferMs.toFixed(1)}ms fps=${avg.decodeFps.toFixed(1)}`
-);
+process.exit(0);

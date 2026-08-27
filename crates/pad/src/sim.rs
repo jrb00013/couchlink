@@ -4,7 +4,7 @@
 //! (optionally) encode CLPD for the host path — same pipeline the real
 //! client readers and host injector use.
 
-use couchlink_proto::pad_frame::{buttons, PadCodecError, PAD_FRAME_LEN};
+use couchlink_proto::pad_frame::{buttons, PadCodecError, PAD_FRAME_LEN_V2};
 use couchlink_proto::PadFrame;
 
 use crate::dualsense::{INPUT_BT, INPUT_USB};
@@ -286,7 +286,7 @@ pub fn simulate_dualsense_frame(raw: &[u8]) -> Option<PadFrame> {
 
 /// Encode a frame the way the client sends it on the `pad` DataChannel.
 pub fn encode_clpd(frame: &PadFrame) -> Vec<u8> {
-    let mut out = bytes::BytesMut::with_capacity(PAD_FRAME_LEN);
+    let mut out = bytes::BytesMut::with_capacity(PAD_FRAME_LEN_V2);
     frame.encode(&mut out);
     out.to_vec()
 }

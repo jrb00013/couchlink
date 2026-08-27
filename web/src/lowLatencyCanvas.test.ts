@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ageBand, shouldReplacePending, shouldSkipDecode } from "./presentAge";
+import { ageBand, decodeBacklogPolicy, shouldReplacePending } from "./presentAge";
 
 /** Canvas present-path age uses the same bands as WebCodecs. */
 describe("canvas present age bands (B-R)", () => {
@@ -15,8 +15,9 @@ describe("sacred latest-frame-wins (S6)", () => {
     expect(shouldReplacePending(2, 1)).toBe(false);
   });
 
-  it("skips deltas when decode queue backs up", () => {
-    expect(shouldSkipDecode(2, false)).toBe(true);
-    expect(shouldSkipDecode(2, true)).toBe(false);
+  it("decode backlog on delta requests IDR recovery", () => {
+    expect(decodeBacklogPolicy(4, false)).toBe("skip");
+    expect(decodeBacklogPolicy(4, false, "drop")).toBe("skip-request-idr");
+    expect(decodeBacklogPolicy(2, false)).toBe("decode");
   });
 });
