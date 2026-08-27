@@ -207,10 +207,11 @@ pub(crate) const PATH_WARMUP: u8 = 3;
 
 /// Which of (RTP, DataChannel) to write for a given `present_path` state.
 ///
-/// Hybrid (Joel beat-self): visible paint = full RTP forever; CLVD rides thin
-/// for WebCodecs + `input_wm` (S_p50). Exclusive CLVD-only flipped RTP off and
-/// either never painted or fell into IDR-only 1fps (v26). `COUCHLINK_RTP_FULL=1`
-/// forces full dual CLVD (escape hatch — WAN shed risk).
+/// Hybrid: full RTP forever for visible paint (Ricardo night). CLVD video only
+/// during warmup/unknown so WC can bootstrap once — after promote, CLVD video
+/// **off** (pad shares SCTP with video DC; P-frame flood = ice-drift feel).
+/// `input_wm` after promote rides tiny `CLWM` tips, not H.264. `COUCHLINK_RTP_FULL=1`
+/// forces dual CLVD (escape hatch — WAN shed risk).
 pub(crate) fn path_flags(path: u8) -> (bool, bool) {
     if rtp_full_dual() {
         return match path {
@@ -220,8 +221,10 @@ pub(crate) fn path_flags(path: u8) -> (bool, bool) {
     }
     match path {
         PATH_RTP => (true, false),
-        // Hybrid: full RTP + CLVD for every WC-capable path.
-        PATH_WEBCODECS | PATH_UNKNOWN | PATH_WARMUP => (true, true),
+        // Promoted: RTP paint only — no CLVD video tax on the pad's SCTP assoc.
+        PATH_WEBCODECS => (true, false),
+        // Join / stall rescue: thin (IDR-only) CLVD for WC first paint.
+        PATH_UNKNOWN | PATH_WARMUP => (true, true),
         _ => (true, true),
     }
 }
@@ -250,9 +253,11 @@ pub(crate) fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool
 
 /// Whether this AU should hit the CLVD DataChannel.
 ///
-/// Thin by default (IDR + every 2nd) while full RTP carries paint — dual-full
-/// shed 20–67% (v26). `COUCHLINK_RTP_FULL=1` → every AU on CLVD too.
-pub(crate) fn should_send_clvd(keyframe: bool, path: u8, seq: u32) -> bool {
+/// Warmup/unknown: **IDR only** so WC can configure — every-2nd P-frame CLVD
+/// shared SCTP with the pad DC and felt like ice-drift (Ricardo). After promote
+/// `path_flags` clears send_dc; `input_wm` uses CLWM tips. `COUCHLINK_RTP_FULL=1`
+/// → every AU on CLVD too.
+pub(crate) fn should_send_clvd(keyframe: bool, path: u8, _seq: u32) -> bool {
     let (_, send_dc) = path_flags(path);
     if !send_dc {
         return false;
@@ -260,8 +265,7 @@ pub(crate) fn should_send_clvd(keyframe: bool, path: u8, seq: u32) -> bool {
     if rtp_full_dual() {
         return true;
     }
-    // IDR + every 2nd — denser than /4 so WC stays warm without dual-full shed.
-    keyframe || seq % 2 == 0
+    keyframe
 }
 
 /// Parse a client-reported present path. An unrecognised value maps to
@@ -666,6 +670,27 @@ impl WebRtcHost {
         self.video_h.store(height, Ordering::Relaxed);
     }
 
+    /// 8-byte `CLWM` tip: magic + input_wm. Best-effort; never blocks the cadence.
+    async fn push_wm_tip(&self) {
+        let wm = self.last_input_wm.load(Ordering::Relaxed);
+        if wm == 0 {
+            return;
+        }
+        if self.video_dc.ready_state()
+            != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+        {
+            return;
+        }
+        // Never queue behind leftover CLVD — skip if anything is buffered.
+        if self.video_dc.buffered_amount().await > 0 {
+            return;
+        }
+        let mut buf = BytesMut::with_capacity(8);
+        buf.extend_from_slice(b"CLWM");
+        buf.extend_from_slice(&wm.to_le_bytes());
+        let _ = self.video_dc.send(&buf.freeze()).await;
+    }
+
     pub async fn create_and_send_offer(
         &self,
         signal_out: &mpsc::UnboundedSender<SignalMessage>,
@@ -749,10 +774,10 @@ impl WebRtcHost {
         // mid-GOP without IDR recovery (Sunshine/Moonlight + FrameHandoff pattern).
         // Old path skipped every delta while trickling → IDR-only → ~1fps paint.
 
-        // Hybrid: full RTP for visible paint + thin CLVD for WC/`input_wm`.
-        // FEC only on PATH_WEBCODECS (photon proven). Full dual via COUCHLINK_RTP_FULL.
+        // Hybrid: full RTP for visible paint. CLVD video only while warming
+        // (IDR bootstrap). After promote, CLWM tips carry input_wm — not H.264.
         let hybrid_clvd =
-            send_dc && (path == PATH_UNKNOWN || path == PATH_WARMUP || path == PATH_WEBCODECS);
+            send_dc && (path == PATH_UNKNOWN || path == PATH_WARMUP);
         // Peek seq for thinning without consuming it on skipped frames.
         let next_seq = self.video_seq.load(Ordering::Relaxed);
 
@@ -846,6 +871,9 @@ impl WebRtcHost {
                 })
                 .await?;
             delivered = true;
+            // Tiny input_wm tip — not H.264. Keeps Φ honest after CLVD video stops
+            // at promote (pad SCTP must stay empty for Ricardo-night feel).
+            self.push_wm_tip().await;
         }
 
         // CLVD is best-effort beside RTP. Awaiting SCTP on a slow peer used to
@@ -1169,16 +1197,19 @@ mod controller_host_tests {
     #[test]
     fn hybrid_paths_keep_full_rtp_and_thin_clvd() {
         assert_eq!(path_flags(PATH_UNKNOWN), (true, true));
-        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+        // After promote: RTP only — CLVD video off so pad SCTP stays snappy.
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
         assert_eq!(path_flags(PATH_WARMUP), (true, true));
         assert!(should_send_rtp(false, PATH_UNKNOWN, false));
         assert!(should_send_rtp(false, PATH_WEBCODECS, false));
         assert!(should_send_rtp(false, PATH_WARMUP, false));
         assert!(should_send_clvd(true, PATH_WARMUP, 1));
-        assert!(should_send_clvd(false, PATH_WARMUP, 2));
+        // Warmup: IDR only (no every-2nd P — that iced the pad).
+        assert!(!should_send_clvd(false, PATH_WARMUP, 2));
         assert!(!should_send_clvd(false, PATH_WARMUP, 1));
         assert!(!should_send_clvd(false, PATH_UNKNOWN, 1));
-        assert!(should_send_clvd(false, PATH_WEBCODECS, 2));
+        assert!(!should_send_clvd(false, PATH_WEBCODECS, 2));
+        assert!(!should_send_clvd(true, PATH_WEBCODECS, 1));
     }
 
     #[test]
@@ -1249,7 +1280,7 @@ mod controller_host_tests {
 
     #[test]
     fn webcodecs_promote_does_not_cut_rtp() {
-        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
         assert!(should_send_rtp(false, PATH_WEBCODECS, false));
     }
 

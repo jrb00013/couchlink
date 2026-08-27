@@ -637,18 +637,23 @@ export default function App() {
       sawAuRef.current = true;
       if (au.inputWm) {
         const wm = au.inputWm >>> 0;
-        // Queue one sample for the next RTP paint (felt path). Skip duplicates.
         if (wm && wm !== lastSampledWmRef.current && wm !== pendingPhotonWmRef.current) {
           pendingPhotonWmRef.current = wm;
         }
       }
       // After promote: stop WC decode — dual decode was the choppy regression.
-      // CLVD still delivers input_wm above; RTP owns paint (amazing night).
       if (softwarePhotonRef.current) return;
       if (!webcodecsActiveRef.current) {
         if (!ensureWebCodecs()) return;
       }
       wcRef.current?.push(au, recvMs);
+    },
+    onInputWm: (wm) => {
+      // Post-promote CLWM tips — once-per-wm at next RTP paint (felt Φ).
+      const w = wm >>> 0;
+      if (w && w !== lastSampledWmRef.current && w !== pendingPhotonWmRef.current) {
+        pendingPhotonWmRef.current = w;
+      }
     },
     onStreamInfo: (info) => {
       setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);

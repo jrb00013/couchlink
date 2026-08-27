@@ -67,8 +67,8 @@ mod tests {
 
     #[test]
     fn webcodecs_path_keeps_full_rtp_hybrid() {
-        // Sacred: healthy WebCodecs still keeps full RTP for paint (thin CLVD for Φ).
-        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+        // Sacred: healthy WebCodecs keeps full RTP for paint; CLVD video off (CLWM tips).
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
     }
 
     #[test]

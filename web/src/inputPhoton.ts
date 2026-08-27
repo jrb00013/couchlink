@@ -1,9 +1,9 @@
 /**
  * Input→photon (est.): visible paint − pad send for a frame's `input_wm`.
  *
- * Hybrid (Ricardo canvas night): RTP owns the picture; CLVD only carries wm.
- * Sample **once per distinct wm** at the next RTP paint — never reuse one wm
- * across many paints (that inflated Φ with paint fps). WC does not own Φ/age.
+ * Hybrid (Ricardo canvas night): RTP owns the picture. After promote, CLVD
+ * video is off (pad shares SCTP — H.264 flood = ice-drift). `input_wm` rides
+ * tiny CLWM tips; sample **once per distinct wm** at the next RTP paint.
  */
 
 import { surplusMs } from "./latencyBudget";

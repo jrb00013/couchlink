@@ -5,6 +5,7 @@ import { TouchGamepadInput } from "./touchPad";
 import {
   ClvdAssembler,
   decodeClvdFragment,
+  decodeWmTip,
   PLI_BYTES,
   VIDEO_CHANNEL,
   type VideoAccessUnit,
@@ -33,6 +34,8 @@ export interface PlayerCallbacks {
   /** Annex-B access units from the unordered `video` DataChannel.
    * `recvMs` is performance.now() at fragment assemble — use for age budget. */
   onVideoAccessUnit?: (au: VideoAccessUnit, recvMs: number) => void;
+  /** Tiny CLWM tip — input_wm without H.264 (post-promote Φ path). */
+  onInputWm?: (wm: number, recvMs: number) => void;
   /** Fired when the preferred present path is known. */
   onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: (info: {
@@ -840,6 +843,11 @@ export class CouchlinkPlayer {
       if (!this.webcodecsPath) return;
       const data = ev.data;
       if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) return;
+      const tipWm = decodeWmTip(data as ArrayBuffer);
+      if (tipWm != null && tipWm !== 0) {
+        this.cb.onInputWm?.(tipWm, performance.now());
+        return;
+      }
       const frag = decodeClvdFragment(data as ArrayBuffer);
       if (!frag) return;
       const au = this.clvdAsm.push(frag);
@@ -907,7 +915,7 @@ export class CouchlinkPlayer {
     this.webcodecsPath = true;
     this.notifyPresentPath(
       "webcodecs",
-      "WC photon live — full RTP paint + thin CLVD"
+      "WC photon live — full RTP paint; CLVD video off (CLWM tips)"
     );
   }
 

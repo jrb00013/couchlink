@@ -85,8 +85,8 @@ mod tests {
 
     #[test]
     fn b_healthy_hybrid_keeps_full_rtp_for_paint() {
-        // Visible paint = RTP; CLVD is thin sidecar for S_p50 — not exclusive binary.
-        assert_eq!(path_flags(PATH_WEBCODECS), (true, true));
+        // Visible paint = RTP; after promote CLVD video off (pad SCTP free).
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
         assert!(should_send_rtp(false, PATH_WEBCODECS, false));
         assert!(should_send_rtp(true, PATH_WEBCODECS, false));
         // Uplink model still budgets one full encode path (thin CLVD ≈ FEC tax).
