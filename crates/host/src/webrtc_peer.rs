@@ -79,11 +79,21 @@ pub(crate) fn sanitize_nat_1to1_ips(ice_ips: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Queue depth on the video DataChannel past which frames are shed rather than
-/// awaited. At 5 Mbps (~625 KB/s), 24 KiB ≈ 39 ms — inside the 45 ms input
-/// wow-bar so trickle/governor react before bufferbloat eats the whole budget.
+/// Queue depth on the video DataChannel past which *P-frames* are shed rather
+/// than awaited. At 5 Mbps (~625 KB/s), 24 KiB ≈ 39 ms — inside the 45 ms
+/// input wow-bar so trickle/governor react before bufferbloat eats the budget.
 /// (96 KiB was ~157 ms — congestion looked healthy while paint died.)
 const VIDEO_DC_MAX_BUFFERED: usize = 24 * 1024;
+
+/// Keyframes must clear this higher ceiling so a multi-fragment IDR can finish.
+/// Fragments are 14 KiB each; a 720p IDR is often 40–100 KiB. The P-frame 24 KiB
+/// cap aborted mid-AU → WC never configured → 0 `input_wm` / S_p50 forever while
+/// RTP paint stayed green. 256 KiB ≈ one IDR; SCTP drains async after queue.
+const VIDEO_DC_MAX_BUFFERED_IDR: usize = 256 * 1024;
+
+/// Coalesce window for hybrid DC bootstrap PLI (RTP live). Matches IDR_INTERVAL
+/// so we never storm the shared encoder — one early IDR for WC, then silence.
+const KEYFRAME_COALESCE_DUAL_MS: u64 = 3000;
 
 /// Any friend's pad report coalesces here. Video loop takes it once.
 static EXPEDITE: AtomicBool = AtomicBool::new(false);
@@ -159,26 +169,49 @@ pub struct WebRtcHost {
     ok_streak: Arc<AtomicU32>,
     /// Last pad seq applied — stamped into CLVD as input_wm for client photon metric.
     last_input_wm: Arc<AtomicU32>,
+    /// Wall-clock ms this peer last transitioned into `PATH_WEBCODECS`, or 0.
+    /// FEC engagement waits `FEC_PROMOTE_GRACE_MS` past this so the CLVD parity
+    /// tax does not stack on top of the promote-moment bandwidth re-estimate
+    /// (that stacking is what forced a real Chrome RTCP PLI on the shared RTP
+    /// encoder right after promote — see `coalesce_keyframe_request_within`).
+    webcodecs_since_ms: Arc<AtomicU64>,
 }
 
-/// `present_path` has not been reported yet — CLVD-first (binary only).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Grace period after a promote to `PATH_WEBCODECS` before FEC parity
+/// fragments are added to the CLVD channel. Chrome's bandwidth estimate is
+/// still re-settling right after a path flip; adding FEC's ~50% CLVD size tax
+/// in that same instant was stealing the link RTP needed, which triggered a
+/// real Chrome RTCP PLI on the shared encoder (big IDR on an already
+/// congested link) — the black flash Joel saw at promote.
+const FEC_PROMOTE_GRACE_MS: u64 = 1500;
+
+/// Pre-announce / `"clvd"` reclaim — same hybrid as warmup (full RTP + thin CLVD).
 pub(crate) const PATH_UNKNOWN: u8 = 0;
-/// Client is painting from the CLVD DataChannel. RTP is off — dual/IDR drip
-/// was burning the push budget on 3-friend WAN. Stall → client reports
-/// `warmup` and RTP comes back as the safety net.
+/// Photon path live (`input_wm` + WC). **RTP stays full** for visible paint
+/// (v25 feel); CLVD stays thin for S_p50. Exclusive binary killed paint/feel.
 pub(crate) const PATH_WEBCODECS: u8 = 1;
-/// Client is painting from the RTP media track — the DataChannel is unnecessary.
+/// Safari / no-WebCodecs: RTP only (no CLVD).
 pub(crate) const PATH_RTP: u8 = 2;
 
-/// Stall rescue only — RTP + full CLVD so canvas can recover. Not used on join
-/// (join stays PATH_UNKNOWN = binary-only so WebCodecs paints without dual flood).
+/// Dual hybrid — full RTP (playable canvas) + thinned CLVD (WC/`input_wm`).
+/// Join (DC open), stall rescue, and healthy promote all land here flags-wise;
+/// WEBCODECS only adds FEC.
 pub(crate) const PATH_WARMUP: u8 = 3;
 
 /// Which of (RTP, DataChannel) to write for a given `present_path` state.
 ///
-/// Production CLVD-first: unknown = binary only so WebCodecs can paint without
-/// SCTP dual-flood. Warmup = stall rescue (RTP + CLVD). WebCodecs healthy =
-/// CLVD only. `COUCHLINK_RTP_FULL=1` restores dual always.
+/// Hybrid: full RTP forever for visible paint (Ricardo night). CLVD video only
+/// during warmup/unknown so WC can bootstrap once — after promote, CLVD video
+/// **off** (pad shares SCTP with video DC; P-frame flood = ice-drift feel).
+/// `input_wm` after promote rides tiny `CLWM` tips, not H.264. `COUCHLINK_RTP_FULL=1`
+/// forces dual CLVD (escape hatch — WAN shed risk).
 pub(crate) fn path_flags(path: u8) -> (bool, bool) {
     if rtp_full_dual() {
         return match path {
@@ -187,16 +220,17 @@ pub(crate) fn path_flags(path: u8) -> (bool, bool) {
         };
     }
     match path {
-        PATH_WEBCODECS | PATH_UNKNOWN => (false, true),
         PATH_RTP => (true, false),
-        // Explicit stall rescue — canvas needs RTP again.
-        PATH_WARMUP => (true, true),
-        _ => (false, true),
+        // Promoted: RTP paint only — no CLVD video tax on the pad's SCTP assoc.
+        PATH_WEBCODECS => (true, false),
+        // Join / stall rescue: thin (IDR-only) CLVD for WC first paint.
+        PATH_UNKNOWN | PATH_WARMUP => (true, true),
+        _ => (true, true),
     }
 }
 
-/// Opt into full dual-send (every AU on RTP+DC). Default is CLVD-only once
-/// WebCodecs has painted so 3-friend WAN does not pay `N·2·R` uplink.
+/// Opt into **full-rate** CLVD alongside full RTP (every AU on both). Default
+/// is thin CLVD (`should_send_clvd`) so dual does not SCTP-death the link.
 fn rtp_full_dual() -> bool {
     matches!(
         std::env::var("COUCHLINK_RTP_FULL").as_deref(),
@@ -209,34 +243,29 @@ fn rtp_full_dual() -> bool {
 
 /// Whether this AU should hit the RTP media track.
 ///
-/// CLVD-first: unknown/webcodecs never touch RTP. Warmup (stall rescue) keeps
-/// IDR RTP so canvas can recover without dual-flooding every P-frame.
+/// Hybrid: whenever RTP is enabled, send **every** frame (v25 feel). IDR-only
+/// RTP on dual left Joel at 1fps after fallback_timer.
 pub(crate) fn should_send_rtp(keyframe: bool, path: u8, full_dual: bool) -> bool {
     let (send_rtp, _) = path_flags(path);
-    if !send_rtp {
-        return false;
-    }
-    if full_dual {
-        return true;
-    }
-    match path {
-        PATH_RTP => true,
-        PATH_WARMUP => keyframe,
-        _ => keyframe,
-    }
+    let _ = (keyframe, full_dual);
+    send_rtp
 }
 
 /// Whether this AU should hit the CLVD DataChannel.
 ///
-/// Full-rate binary (CLVD v4 `input_wm` + `stamp_us`) whenever the DC path is
-/// live — that is the lightning path for S_p50. Never thin it.
-pub(crate) fn should_send_clvd(keyframe: bool, path: u8, seq: u32) -> bool {
+/// Warmup/unknown: **IDR only** so WC can configure — every-2nd P-frame CLVD
+/// shared SCTP with the pad DC and felt like ice-drift (Ricardo). After promote
+/// `path_flags` clears send_dc; `input_wm` uses CLWM tips. `COUCHLINK_RTP_FULL=1`
+/// → every AU on CLVD too.
+pub(crate) fn should_send_clvd(keyframe: bool, path: u8, _seq: u32) -> bool {
     let (_, send_dc) = path_flags(path);
     if !send_dc {
         return false;
     }
-    let _ = (keyframe, seq);
-    true
+    if rtp_full_dual() {
+        return true;
+    }
+    keyframe
 }
 
 /// Parse a client-reported present path. An unrecognised value maps to
@@ -245,8 +274,10 @@ fn parse_present_path(path: &str) -> u8 {
     match path {
         "webcodecs" => PATH_WEBCODECS,
         "rtp" => PATH_RTP,
-        // IDR RTP + full CLVD until WebCodecs paints, then PATH_WEBCODECS.
+        // Stall rescue — RTP + CLVD so canvas can recover.
         "warmup" => PATH_WARMUP,
+        // Alias for hybrid UNKNOWN (full RTP + thin CLVD, FEC off).
+        "clvd" | "binary" => PATH_UNKNOWN,
         _ => PATH_UNKNOWN,
     }
 }
@@ -262,12 +293,21 @@ impl WebRtcHost {
     /// Same as `request_keyframe`, but rate-limited so a burst of sheds cannot
     /// force the encoder into IDR-only mode. Coalesce clock is **per peer**.
     pub fn request_keyframe_coalesced(&self) {
+        self.request_keyframe_coalesced_within(KEYFRAME_COALESCE_MS);
+    }
+
+    /// Hybrid dual: ≥IDR_INTERVAL gap so CLVD bootstrap cannot storm shared RTP.
+    pub fn request_keyframe_coalesced_dual(&self) {
+        self.request_keyframe_coalesced_within(KEYFRAME_COALESCE_DUAL_MS);
+    }
+
+    fn request_keyframe_coalesced_within(&self, min_gap_ms: u64) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let prev = self.keyframe_coalesce_ms.load(Ordering::Relaxed);
-        if now.saturating_sub(prev) < 750 {
+        if now.saturating_sub(prev) < min_gap_ms {
             return;
         }
         if self
@@ -283,6 +323,14 @@ impl WebRtcHost {
         self.keyframe_wanted.swap(false, Ordering::Relaxed)
     }
 
+    /// True when this peer is on hybrid dual (full RTP + CLVD). Viewer PLI then
+    /// should force a **single** shared IDR — burst-of-3 blacks every peer's RTP
+    /// while WC only needed one complete CLVD keyframe.
+    pub fn hybrid_dual(&self) -> bool {
+        let (send_rtp, send_dc) = path_flags(self.present_path.load(Ordering::Relaxed));
+        send_rtp && send_dc
+    }
+
     /// Record which path the viewer just reported painting from.
     ///
     /// An unrecognised value is treated as unknown (send both) rather than
@@ -291,16 +339,29 @@ impl WebRtcHost {
     pub fn set_present_path(&self, path: &str) {
         let next = parse_present_path(path);
         let prev = self.present_path.swap(next, Ordering::Relaxed);
-        // A path flip (warmup after a stall, or RTP fallback) needs an IDR
-        // so the stream that just became visible is not mid-GOP.
-        if prev != next {
-            tracing::info!(
-                prev,
-                next,
-                path,
-                "present_path flipped — IDR so the live stream is not mid-GOP"
-            );
+        if prev == next {
+            return;
+        }
+        let (rtp_prev, _) = path_flags(prev);
+        let (rtp_next, _) = path_flags(next);
+        tracing::warn!(
+            prev,
+            next,
+            path,
+            rtp_prev,
+            rtp_next,
+            "present_path flipped"
+        );
+        // Hybrid warmup↔webcodecs keeps full RTP. IDR on every flip blacked
+        // Joel's canvas every ~2s (v28). Only IDR when RTP enablement changes.
+        if rtp_prev != rtp_next {
             self.request_keyframe();
+        }
+        // Stamp the promote moment so FEC (below) waits out the bandwidth
+        // re-estimate instead of taxing the link the instant RTP is still
+        // settling from the flip.
+        if next == PATH_WEBCODECS && prev != PATH_WEBCODECS {
+            self.webcodecs_since_ms.store(now_ms(), Ordering::Relaxed);
         }
     }
 
@@ -313,7 +374,16 @@ impl WebRtcHost {
     /// idle at ~1% CPU — the connection still up, simply no new frames. Shedding here
     /// keeps the loop turning; the paired keyframe request repairs the decoder.
     async fn video_dc_congested(&self) -> bool {
-        self.video_dc.buffered_amount().await > VIDEO_DC_MAX_BUFFERED
+        self.video_dc_congested_for(false).await
+    }
+
+    async fn video_dc_congested_for(&self, keyframe: bool) -> bool {
+        let cap = if keyframe {
+            VIDEO_DC_MAX_BUFFERED_IDR
+        } else {
+            VIDEO_DC_MAX_BUFFERED
+        };
+        self.video_dc.buffered_amount().await > cap
     }
 
     pub async fn new(
@@ -418,8 +488,10 @@ impl WebRtcHost {
         // "send me a keyframe" feedback and answer it.
         let keyframe_wanted = Arc::new(AtomicBool::new(false));
         let keyframe_coalesce_ms = Arc::new(AtomicU64::new(0));
+        let present_path = Arc::new(AtomicU8::new(PATH_UNKNOWN));
         let kf = Arc::clone(&keyframe_wanted);
         let kf_ms = Arc::clone(&keyframe_coalesce_ms);
+        let rtcp_path = Arc::clone(&present_path);
         tokio::spawn(async move {
             while let Ok((packets, _)) = rtp_sender.read_rtcp().await {
                 for p in packets {
@@ -427,7 +499,20 @@ impl WebRtcHost {
                     if any.downcast_ref::<PictureLossIndication>().is_some()
                         || any.downcast_ref::<FullIntraRequest>().is_some()
                     {
-                        coalesce_keyframe_request(&kf, &kf_ms);
+                        // Hybrid dual: Chrome RTCP PLI is usually our own CLVD
+                        // tax stealing RTP, not a real picture problem. Ignoring
+                        // it stops the shared-encoder IDR → black cycle; the
+                        // periodic 3s IDR_INTERVAL still heals genuine loss.
+                        let path = rtcp_path.load(Ordering::Relaxed);
+                        let (send_rtp, send_dc) = path_flags(path);
+                        if send_rtp && send_dc {
+                            continue;
+                        }
+                        coalesce_keyframe_request_within(
+                            &kf,
+                            &kf_ms,
+                            KEYFRAME_COALESCE_MS,
+                        );
                     }
                 }
             }
@@ -501,7 +586,13 @@ impl WebRtcHost {
             .await?;
         let kf_dc = Arc::clone(&keyframe_wanted);
         let kf_dc_ms = Arc::clone(&keyframe_coalesce_ms);
-        setup_video_channel(Arc::clone(&video_dc), kf_dc, kf_dc_ms).await;
+        setup_video_channel(
+            Arc::clone(&video_dc),
+            kf_dc,
+            kf_dc_ms,
+            Arc::clone(&present_path),
+        )
+        .await;
 
         Ok((
             Self {
@@ -517,7 +608,7 @@ impl WebRtcHost {
                 player_slot,
                 keyframe_wanted,
                 keyframe_coalesce_ms,
-                present_path: Arc::new(AtomicU8::new(PATH_UNKNOWN)),
+                present_path,
                 // On by default: a single lost CLVD fragment used to freeze the
                 // viewer until the next complete IDR made it through, which on
                 // a flapping WAN often never did. `COUCHLINK_FEC=0` turns it off.
@@ -529,6 +620,7 @@ impl WebRtcHost {
                 shed_streak: Arc::new(AtomicU32::new(0)),
                 ok_streak: Arc::new(AtomicU32::new(0)),
                 last_input_wm,
+                webcodecs_since_ms: Arc::new(AtomicU64::new(0)),
             },
             pad_rx,
         ))
@@ -576,6 +668,27 @@ impl WebRtcHost {
     pub fn set_video_size(&self, width: u32, height: u32) {
         self.video_w.store(width, Ordering::Relaxed);
         self.video_h.store(height, Ordering::Relaxed);
+    }
+
+    /// 8-byte `CLWM` tip: magic + input_wm. Best-effort; never blocks the cadence.
+    async fn push_wm_tip(&self) {
+        let wm = self.last_input_wm.load(Ordering::Relaxed);
+        if wm == 0 {
+            return;
+        }
+        if self.video_dc.ready_state()
+            != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+        {
+            return;
+        }
+        // Never queue behind leftover CLVD — skip if anything is buffered.
+        if self.video_dc.buffered_amount().await > 0 {
+            return;
+        }
+        let mut buf = BytesMut::with_capacity(8);
+        buf.extend_from_slice(b"CLWM");
+        buf.extend_from_slice(&wm.to_le_bytes());
+        let _ = self.video_dc.send(&buf.freeze()).await;
     }
 
     pub async fn create_and_send_offer(
@@ -661,25 +774,33 @@ impl WebRtcHost {
         // mid-GOP without IDR recovery (Sunshine/Moonlight + FrameHandoff pattern).
         // Old path skipped every delta while trickling → IDR-only → ~1fps paint.
 
-        // CLVD-first (PATH_UNKNOWN / PATH_WEBCODECS): full-rate binary so
-        // WebCodecs can paint and stamp input_wm / S_p50. RTP only on
-        // PATH_WARMUP stall rescue (IDR) or PATH_RTP.
-        //
-        // WebCodecs healthy: CLVD only (path_flags). Full dual via COUCHLINK_RTP_FULL.
-        let clvd_first =
-            send_dc && (path == PATH_UNKNOWN || path == PATH_WARMUP || path == PATH_WEBCODECS);
-        // Peek seq for warmup thinning without consuming it on skipped frames.
+        // Hybrid: full RTP for visible paint. CLVD video only while warming
+        // (IDR bootstrap). After promote, CLWM tips carry input_wm — not H.264.
+        let hybrid_clvd =
+            send_dc && (path == PATH_UNKNOWN || path == PATH_WARMUP);
+        // Peek seq for thinning without consuming it on skipped frames.
         let next_seq = self.video_seq.load(Ordering::Relaxed);
 
         let mut push_clvd = async || -> (bool, bool) {
             let mut delivered = false;
             let mut trickle_skip = false;
-            if !should_send_clvd(keyframe, path, next_seq) {
-                return (false, false);
-            }
             let dc_open = self.video_dc.ready_state()
                 == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open;
-            let congested = dc_open && self.video_dc_congested().await;
+            // Thin CLVD (IDR + every 2nd) — densify-on-slack flooded SCTP and,
+            // with WC still decoding, made sessions choppy vs Ricardo's RTP night.
+            // input_wm samples once-per-wm on the client; thin rate is enough.
+            let thin_ok = should_send_clvd(keyframe, path, next_seq);
+            if !thin_ok {
+                return (false, false);
+            }
+            // P-frames stay inside the 24 KiB wow-bar; IDRs use the larger
+            // ceiling so multi-fragment keyframes actually complete on CLVD.
+            let congested = dc_open && self.video_dc_congested_for(keyframe).await;
+            // When RTP is the visible present, never IDR the shared encoder for
+            // CLVD SCTP pain — that blacks every peer's picture while HUD stays
+            // 0% drop (RTP still Delivered). WC waits for the normal 3s IDR
+            // (or one hybrid bootstrap PLI).
+            let idr_ok_for_clvd = !send_rtp;
             if dc_open && !congested {
                 let seq = self.video_seq.fetch_add(1, Ordering::Relaxed);
                 let w = self.video_w.load(Ordering::Relaxed).min(u32::from(u16::MAX)) as u16;
@@ -693,16 +814,18 @@ impl WebRtcHost {
                     stamp_us: crate::age::now_us(),
                     input_wm: self.last_input_wm.load(Ordering::Relaxed),
                 };
-                let fragments = if self.fec_enabled && path == PATH_WEBCODECS {
-                    // FEC only after binary present is proven — warmup/unknown
-                    // IDRs are the SCTP tax that starved CLVD (Joel fallback_timer).
+                // Hybrid keeps full RTP as the present path. FEC parity on CLVD
+                // at promote taxed the shared link, Chrome RTCP-PLI'd, and the
+                // shared encoder IDR blacked Joel (05:08:18). Never FEC while
+                // RTP is live — thin CLVD is enough for input_wm / S_p50.
+                let fragments = if self.fec_enabled && path == PATH_WEBCODECS && !send_rtp {
                     au.encode_fragments_with_fec()
                 } else {
                     au.encode_fragments()
                 };
                 let mut sent_all = true;
                 for frag in fragments {
-                    if self.video_dc_congested().await {
+                    if self.video_dc_congested_for(keyframe).await {
                         sent_all = false;
                         break;
                     }
@@ -714,11 +837,18 @@ impl WebRtcHost {
                 }
                 if sent_all {
                     delivered = true;
-                } else {
+                } else if idr_ok_for_clvd {
                     self.request_keyframe_coalesced();
+                } else if keyframe && send_rtp {
+                    // Incomplete CLVD IDR under hybrid: one dual-coalesced retry so
+                    // WC can configure / stamp input_wm. Never for P-frame shed —
+                    // that path blacks every peer's RTP while HUD stays 0% drop.
+                    self.request_keyframe_coalesced_dual();
                 }
             } else if dc_open && congested && !keyframe {
-                self.request_keyframe_coalesced();
+                if idr_ok_for_clvd {
+                    self.request_keyframe_coalesced();
+                }
                 if self.trickle.load(Ordering::Relaxed) {
                     trickle_skip = true;
                 }
@@ -726,14 +856,7 @@ impl WebRtcHost {
             (delivered, trickle_skip)
         };
 
-        if clvd_first {
-            let (d, t) = push_clvd().await;
-            delivered |= d;
-            trickle_skip |= t;
-        }
-
-        // RTP: every browser can decode this. After CLVD on warmup so WC is fed.
-        // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
+        // Hybrid: RTP FIRST so visible paint never waits on SCTP CLVD sends.
         if send_rtp && should_send_rtp(keyframe, path, rtp_full_dual()) {
             let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
             self.video
@@ -748,9 +871,33 @@ impl WebRtcHost {
                 })
                 .await?;
             delivered = true;
+            // Tiny input_wm tip — not H.264. Keeps Φ honest after CLVD video stops
+            // at promote (pad SCTP must stay empty for Ricardo-night feel).
+            self.push_wm_tip().await;
         }
 
-        if send_dc && !clvd_first {
+        // CLVD is best-effort beside RTP. Awaiting SCTP on a slow peer used to
+        // HOL-block join_all → every friend's push aged ~RTT+ (live Φ≈240ms /
+        // age_p95≈225 while paint fps still looked green). Budget CLVD so the
+        // shared cadence never waits on photon sidecar delivery.
+        if hybrid_clvd {
+            let clvd_budget = if keyframe {
+                Duration::from_millis(48)
+            } else {
+                Duration::from_millis(6)
+            };
+            match tokio::time::timeout(clvd_budget, push_clvd()).await {
+                Ok((d, t)) => {
+                    delivered |= d;
+                    trickle_skip |= t;
+                }
+                Err(_) => {
+                    // RTP already delivered — CLVD miss is not a governor shed.
+                }
+            }
+        }
+
+        if send_dc && !hybrid_clvd {
             let (d, t) = push_clvd().await;
             delivered |= d;
             trickle_skip |= t;
@@ -802,13 +949,17 @@ pub fn governor_frame_shed(fates: &[PushFate]) -> u64 {
     }
 }
 
+/// Default coalesce window for CLVD/viewer-triggered keyframe requests.
+const KEYFRAME_COALESCE_MS: u64 = 750;
+
 fn coalesce_keyframe_request(wanted: &AtomicBool, coalesce_ms: &AtomicU64) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    coalesce_keyframe_request_within(wanted, coalesce_ms, KEYFRAME_COALESCE_MS);
+}
+
+fn coalesce_keyframe_request_within(wanted: &AtomicBool, coalesce_ms: &AtomicU64, min_gap_ms: u64) {
+    let now = now_ms();
     let prev = coalesce_ms.load(Ordering::Relaxed);
-    if now.saturating_sub(prev) < 750 {
+    if now.saturating_sub(prev) < min_gap_ms {
         return;
     }
     if coalesce_ms
@@ -823,17 +974,51 @@ async fn setup_video_channel(
     dc: Arc<RTCDataChannel>,
     keyframe_wanted: Arc<AtomicBool>,
     keyframe_coalesce_ms: Arc<AtomicU64>,
+    present_path: Arc<AtomicU8>,
 ) {
-    dc.on_open(Box::new(move || {
-        info!("video datachannel open (CLVD → browser WebCodecs)");
-        Box::pin(async {})
-    }));
+    {
+        let keyframe_wanted = Arc::clone(&keyframe_wanted);
+        let keyframe_coalesce_ms = Arc::clone(&keyframe_coalesce_ms);
+        let present_path = Arc::clone(&present_path);
+        dc.on_open(Box::new(move || {
+            info!("video datachannel open (CLVD → browser WebCodecs)");
+            let keyframe_wanted = Arc::clone(&keyframe_wanted);
+            let keyframe_coalesce_ms = Arc::clone(&keyframe_coalesce_ms);
+            let present_path = Arc::clone(&present_path);
+            Box::pin(async move {
+                // Hybrid: one soft IDR as soon as CLVD is open so WC can configure
+                // without waiting for the 3s periodic tick. Dual coalesce ≥3s —
+                // never an IDR storm. RTCP PLI still ignored while RTP is live.
+                let (send_rtp, send_dc) = path_flags(present_path.load(Ordering::Relaxed));
+                if send_rtp && send_dc {
+                    coalesce_keyframe_request_within(
+                        &keyframe_wanted,
+                        &keyframe_coalesce_ms,
+                        KEYFRAME_COALESCE_DUAL_MS,
+                    );
+                }
+            })
+        }));
+    }
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
         let keyframe_wanted = Arc::clone(&keyframe_wanted);
         let keyframe_coalesce_ms = Arc::clone(&keyframe_coalesce_ms);
+        let present_path = Arc::clone(&present_path);
         Box::pin(async move {
-            // Any inbound message = viewer lost sync / decoder reset.
             let _ = msg;
+            // Hybrid: RTP is painting. Honor DC PLI only on a long coalesce
+            // (≈ IDR_INTERVAL) so WC can bootstrap one IDR without a storm —
+            // RTCP PLI stays ignored (Chrome loss feedback ≠ WC need).
+            let path = present_path.load(Ordering::Relaxed);
+            let (send_rtp, _) = path_flags(path);
+            if send_rtp {
+                coalesce_keyframe_request_within(
+                    &keyframe_wanted,
+                    &keyframe_coalesce_ms,
+                    KEYFRAME_COALESCE_DUAL_MS,
+                );
+                return;
+            }
             coalesce_keyframe_request(&keyframe_wanted, &keyframe_coalesce_ms);
         })
     }));
@@ -1010,22 +1195,21 @@ mod controller_host_tests {
     }
 
     #[test]
-    fn unknown_path_is_clvd_first_binary_only() {
-        assert_eq!(path_flags(PATH_UNKNOWN), (false, true));
-    }
-
-    #[test]
-    fn webcodecs_path_is_clvd_only_so_push_budget_survives() {
-        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
-    }
-
-    #[test]
-    fn warmup_rescue_keeps_rtp_and_full_clvd() {
+    fn hybrid_paths_keep_full_rtp_and_thin_clvd() {
+        assert_eq!(path_flags(PATH_UNKNOWN), (true, true));
+        // After promote: RTP only — CLVD video off so pad SCTP stays snappy.
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
         assert_eq!(path_flags(PATH_WARMUP), (true, true));
+        assert!(should_send_rtp(false, PATH_UNKNOWN, false));
+        assert!(should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(false, PATH_WARMUP, false));
         assert!(should_send_clvd(true, PATH_WARMUP, 1));
-        assert!(should_send_clvd(false, PATH_WARMUP, 1));
-        assert!(should_send_clvd(false, PATH_UNKNOWN, 1));
-        assert!(should_send_clvd(false, PATH_WEBCODECS, 1));
+        // Warmup: IDR only (no every-2nd P — that iced the pad).
+        assert!(!should_send_clvd(false, PATH_WARMUP, 2));
+        assert!(!should_send_clvd(false, PATH_WARMUP, 1));
+        assert!(!should_send_clvd(false, PATH_UNKNOWN, 1));
+        assert!(!should_send_clvd(false, PATH_WEBCODECS, 2));
+        assert!(!should_send_clvd(true, PATH_WEBCODECS, 1));
     }
 
     #[test]
@@ -1036,7 +1220,12 @@ mod controller_host_tests {
         let queue_ms = cap_bytes * 1000 / bytes_per_sec;
         assert!(
             queue_ms <= 45,
-            "SCTP buffer cap {queue_ms}ms must stay inside S_p50 wow bar"
+            "SCTP P-frame buffer cap {queue_ms}ms must stay inside S_p50 wow bar"
+        );
+        // IDR ceiling must fit several 14 KiB fragments (720p keyframes).
+        assert!(
+            VIDEO_DC_MAX_BUFFERED_IDR >= 4 * 14 * 1024,
+            "IDR SCTP cap must complete a multi-fragment keyframe"
         );
     }
 
@@ -1081,22 +1270,18 @@ mod controller_host_tests {
     }
 
     #[test]
-    fn should_send_rtp_clvd_first_unknown_and_webcodecs() {
-        assert!(!should_send_rtp(true, PATH_WEBCODECS, false));
-        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
-        assert!(!should_send_rtp(true, PATH_UNKNOWN, false));
-        assert!(!should_send_rtp(false, PATH_UNKNOWN, false));
+    fn hybrid_keeps_full_rtp_on_webcodecs_and_unknown() {
+        assert!(should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(true, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(false, PATH_UNKNOWN, false));
         assert!(should_send_rtp(false, PATH_RTP, false));
-        // Stall rescue: IDR RTP only.
-        assert!(!should_send_rtp(false, PATH_WARMUP, false));
-        assert!(should_send_rtp(true, PATH_WARMUP, false));
-        assert!(!should_send_rtp(false, PATH_WEBCODECS, true));
+        assert!(should_send_rtp(false, PATH_WARMUP, false));
     }
 
     #[test]
-    fn skipping_webcodecs_rtp_is_a_path_flag_cut() {
-        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
-        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
+    fn webcodecs_promote_does_not_cut_rtp() {
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
+        assert!(should_send_rtp(false, PATH_WEBCODECS, false));
     }
 
     #[test]
@@ -1109,6 +1294,8 @@ mod controller_host_tests {
         assert_eq!(parse_present_path("webcodecs"), PATH_WEBCODECS);
         assert_eq!(parse_present_path("rtp"), PATH_RTP);
         assert_eq!(parse_present_path("warmup"), PATH_WARMUP);
+        assert_eq!(parse_present_path("clvd"), PATH_UNKNOWN);
+        assert_eq!(parse_present_path("binary"), PATH_UNKNOWN);
     }
 
     #[test]

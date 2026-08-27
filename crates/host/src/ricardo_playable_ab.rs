@@ -21,7 +21,7 @@ pub mod ricardo_playable_a {
     pub const ENCODER_W: u32 = 1280;
     pub const ENCODER_H: u32 = 720;
     pub const ENCODER_FPS: u32 = 60;
-    pub const ENCODER_KBPS: u32 = 5_000;
+    pub const ENCODER_KBPS: u32 = 10_000;
     pub const CAPTURE_MS: f64 = 1.7;
     pub const PAINT_FPS: f64 = 74.0;
     pub const DECODE_FPS: f64 = 82.0;
@@ -55,7 +55,7 @@ mod tests {
     }
 
     #[test]
-    fn a_baseline_encoder_matches_720p60_at_5mbps() {
+    fn a_baseline_encoder_matches_720p60_at_10mbps() {
         let p = playable_preset();
         assert_eq!(p.width, A::ENCODER_W);
         assert_eq!(p.height, A::ENCODER_H);
@@ -64,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn b_bitrate_hold_never_drops_below_playable_5mbps() {
+    fn b_bitrate_hold_never_drops_below_playable_10mbps() {
         for r in rungs_from(&playable_preset()) {
             assert_eq!(
                 r.bitrate_kbps, A::ENCODER_KBPS,
@@ -84,23 +84,24 @@ mod tests {
     }
 
     #[test]
-    fn b_healthy_webcodecs_is_one_path_like_playable_uplink() {
-        // Playable night: push 0.1ms — dual full send cannot stay there on 3 WAN friends.
+    fn b_healthy_hybrid_keeps_full_rtp_for_paint() {
+        // Visible paint = RTP; after promote CLVD video off (pad SCTP free).
+        assert_eq!(path_flags(PATH_WEBCODECS), (true, false));
+        assert!(should_send_rtp(false, PATH_WEBCODECS, false));
+        assert!(should_send_rtp(true, PATH_WEBCODECS, false));
+        // Uplink model still budgets one full encode path (thin CLVD ≈ FEC tax).
         assert_eq!(PATHS_WEBCODECS, 1);
         assert_eq!(
             host_uplink_kbps(A::ENCODER_KBPS, N_FRIENDS, PATHS_WEBCODECS),
-            15_000
+            30_000
         );
-        assert_eq!(path_flags(PATH_WEBCODECS), (false, true));
-        assert!(!should_send_rtp(false, PATH_WEBCODECS, false));
-        assert!(!should_send_rtp(true, PATH_WEBCODECS, false));
     }
 
     #[test]
-    fn b_warmup_keeps_idr_rtp_so_join_is_not_black() {
+    fn b_warmup_keeps_full_rtp_so_canvas_stays_playable() {
         assert_eq!(path_flags(PATH_WARMUP), (true, true));
         assert!(should_send_rtp(true, PATH_WARMUP, false));
-        assert!(!should_send_rtp(false, PATH_WARMUP, false));
+        assert!(should_send_rtp(false, PATH_WARMUP, false));
     }
 
     #[test]

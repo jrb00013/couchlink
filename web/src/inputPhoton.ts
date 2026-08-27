@@ -1,8 +1,9 @@
 /**
- * Input→photon (est.): paint time minus pad send for the frame's input watermark.
+ * Input→photon (est.): visible paint − pad send for a frame's `input_wm`.
  *
- * Requires CLVD v4 `input_wm` from the host. Until then, `inputFreshnessMs` is
- * a client-local lower bound only.
+ * Hybrid (Ricardo canvas night): RTP owns the picture. After promote, CLVD
+ * video is off (pad shares SCTP — H.264 flood = ice-drift). `input_wm` rides
+ * tiny CLWM tips; sample **once per distinct wm** at the next RTP paint.
  */
 
 import { surplusMs } from "./latencyBudget";
@@ -62,8 +63,9 @@ export function notePhotonPaint(paintMs: number, inputWm: number): number | null
   const wm = inputWm >>> 0;
   const hit = [...ring].reverse().find((e) => e.seq === wm);
   if (!hit) return null;
-  const sentAt = hit.clientTsMs ?? hit.perfSent;
-  const ms = Math.max(0, paintMs - sentAt);
+  // Always use full-float perfSent. clientTsMs is u32-truncated for the wire and
+  // must not be the Φ clock (truncation + wrong clock ⇒ bogus 100–300ms S).
+  const ms = Math.max(0, paintMs - hit.perfSent);
   photonSamples.push(ms);
   if (photonSamples.length > 120) photonSamples.shift();
   return ms;

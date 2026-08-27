@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   ClvdAssembler,
   decodeClvdFragment,
+  decodeWmTip,
   VIDEO_HEADER_LEN,
   VIDEO_HEADER_LEN_V2,
   VIDEO_MAGIC,
   VIDEO_MAX_FRAGMENT_PAYLOAD,
   VIDEO_VERSION,
   VIDEO_VERSION_V2,
+  WM_TIP_MAGIC,
   FLAG_KEYFRAME,
 } from "./clvd";
 
@@ -183,5 +185,15 @@ describe("decodeClvdFragment", () => {
     expect(frag.stampUs).toBe(99);
     const au = new ClvdAssembler().push(frag);
     expect(au?.inputWm).toBe(42);
+  });
+
+  it("decodes CLWM watermark tips", () => {
+    const buf = new ArrayBuffer(8);
+    const u8 = new Uint8Array(buf);
+    const view = new DataView(buf);
+    for (let i = 0; i < 4; i++) u8[i] = WM_TIP_MAGIC.charCodeAt(i);
+    view.setUint32(4, 99, true);
+    expect(decodeWmTip(buf)).toBe(99);
+    expect(decodeWmTip(new ArrayBuffer(4))).toBeNull();
   });
 });

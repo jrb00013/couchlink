@@ -35,6 +35,11 @@ describe("inputPhoton", () => {
     expect(photonP50Ms()).toBe(90);
   });
 
+  it("uses perfSent not truncated clientTsMs for Φ", () => {
+    notePadSent(100, 5, 50); // wire ts deliberately wrong/truncated
+    expect(notePhotonPaint(190, 5)).toBe(90);
+  });
+
   it("surplus subtracts RTT from photon p50", () => {
     notePadSent(100, 5);
     notePhotonPaint(190, 5);

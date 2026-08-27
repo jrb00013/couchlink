@@ -226,9 +226,10 @@ impl StreamPreset {
         width: 1280,
         height: 720,
         fps: 60,
-        // 10 Mbps × 3 friends blew the push budget even with IDR-only RTP.
-        // 5 Mbps holds 60 fps on 3-friend WAN; governor climbs back if clean.
-        bitrate_kbps: 5_000,
+        // Moonlight-class bits/frame. 5 Mbps held WAN under dual CLVD but pans
+        // still stuttered; hybrid now drops CLVD video after promote so 10 Mbps
+        // RTP-only is the production default for 720p60 motion.
+        bitrate_kbps: 10_000,
     };
     pub const P720_30: Self = Self {
         width: 1280,

@@ -157,6 +157,17 @@ export class WebCodecsCanvasView {
   /** Resolved once via isConfigSupported — prefer-hardware when the GPU path exists. */
   private hwAccel: HardwareAcceleration | null = null;
   private hwAccelProbe: Promise<HardwareAcceleration> | null = null;
+  /** Hybrid: RTP is visible present; WC only stamps input_wm — never path-flip on stall. */
+  private photonSidecar = false;
+  /**
+   * Bootstrap DC PLIs before first WC paint. Host hybrid coalesces ≥3s; we allow
+   * two spaced attempts so a burned throttle / incomplete IDR does not strand
+   * S_p50 at 0 wm forever. After first paint: never PLI (shared-encoder blacks).
+   */
+  private bootstrapPliAttempts = 0;
+  private static readonly BOOTSTRAP_PLI_MAX = 2;
+  /** Match KEYFRAME_COALESCE_DUAL_MS on host — do not spam shared IDR. */
+  private static readonly BOOTSTRAP_PLI_GAP_MS = 3000;
 
   /** Newest decoded frame waiting for the compositor — older ones are closed. */
   private pending: VideoFrame | null = null;
@@ -185,6 +196,11 @@ export class WebCodecsCanvasView {
   /** Fired when we had picture and then went dark — show the live RTP canvas. */
   setStallHandler(cb: (() => void) | null) {
     this.onStall = cb;
+  }
+
+  /** RTP canvas is the visible present — WC only measures photon (no path thrash). */
+  setPhotonSidecar(on: boolean) {
+    this.photonSidecar = on;
   }
 
   /** Fired on each paint with timestamps for host age_echo. */
@@ -230,6 +246,7 @@ export class WebCodecsCanvasView {
     this.painted = 0;
     this.paintedTotal = 0;
     this.dropped = 0;
+    this.bootstrapPliAttempts = 0;
     this.decodeMsAccum = 0;
     this.lastAgeMs = 0;
     this.lastAgeBand = "ok";
@@ -423,6 +440,10 @@ export class WebCodecsCanvasView {
   }
 
   push(au: VideoAccessUnit, recvMs = performance.now()) {
+    // Photon sidecar after first paint: App stops feeding us; belt-and-suspenders
+    // so a stray push never runs dual decode beside RTP (choppy feel).
+    if (this.photonSidecar && this.paintedTotal > 0) return;
+
     const dec = this.decoder;
     if (!dec || dec.state === "closed") return;
 
@@ -528,9 +549,26 @@ export class WebCodecsCanvasView {
   }
 
   private requestKeyframe() {
+    // Photon sidecar: up to BOOTSTRAP_PLI_MAX spaced PLIs until first paint so
+    // CLVD gets a complete IDR. After paint, never PLI — shared-encoder IDR
+    // blacks every peer's RTP. Do not mark an attempt until we actually send
+    // (old code burned the one-shot on the 200ms throttle).
+    if (this.photonSidecar) {
+      if (this.paintedTotal > 0) return;
+      if (this.bootstrapPliAttempts >= WebCodecsCanvasView.BOOTSTRAP_PLI_MAX) {
+        return;
+      }
+    }
     const now = performance.now();
-    if (now - this.lastPli < 200) return;
+    const minGap = this.photonSidecar
+      ? WebCodecsCanvasView.BOOTSTRAP_PLI_GAP_MS
+      : 200;
+    // First bootstrap may fire immediately (lastPli==0); later ones wait 3s.
+    if (this.lastPli > 0 && now - this.lastPli < minGap) return;
     this.lastPli = now;
+    if (this.photonSidecar) {
+      this.bootstrapPliAttempts += 1;
+    }
     this.onNeedKeyframe?.();
   }
 
@@ -607,17 +645,19 @@ export class WebCodecsCanvasView {
 
   private checkStall() {
     if (!this.running || this.paintedTotal === 0 || this.lastPaintAt === 0) return;
-    // Software decode (headless/WSL) can pause briefly between IDRs without being
-    // dead — a full reset+RTP fallback there thrashes the host into shed cliffs.
-    const budget =
-      this.hwAccel === "prefer-software" || this.hwAccel === "no-preference"
-        ? 5000
-        : WebCodecsCanvasView.STALL_MS;
+    // Hybrid photon sidecar / software: gaps between thinned CLVD IDRs are
+    // normal. Never flip host present_path (that thrashed warmup↔webcodecs in
+    // ~3s and zeroed Joel's input_wm samples while RTP stayed perfect).
+    const soft =
+      this.hwAccel === "prefer-software" ||
+      this.hwAccel === "no-preference" ||
+      this.photonSidecar;
+    const budget = soft ? 5000 : WebCodecsCanvasView.STALL_MS;
     if (performance.now() - this.lastPaintAt < budget) return;
-    if (this.hwAccel === "prefer-software" || this.hwAccel === "no-preference") {
-      cwarn("webcodecs software stall — IDR only (skip full reset)");
+    if (soft) {
+      // Hybrid: RTP canvas is the present. Never PLI — that IDRs the shared
+      // encoder and blacks every friend's RTP picture periodically.
       this.lastPaintAt = performance.now();
-      this.requestKeyframe();
       return;
     }
     cwarn("webcodecs stall — no paint, resetting decoder and showing live RTP");

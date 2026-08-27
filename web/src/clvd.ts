@@ -2,6 +2,9 @@
 
 export const VIDEO_CHANNEL = "video";
 export const VIDEO_MAGIC = "CLVD";
+/** Tiny host→client watermark tip (no H.264) — magic + u32 LE input_wm. */
+export const WM_TIP_MAGIC = "CLWM";
+export const WM_TIP_LEN = 8;
 export const VIDEO_VERSION = 3;
 export const VIDEO_VERSION_V2 = 2;
 export const VIDEO_VERSION_V4 = 4;
@@ -41,6 +44,19 @@ function headerLen(ver: number): number {
   if (ver === VIDEO_VERSION_V4) return VIDEO_HEADER_LEN_V4;
   if (ver === VIDEO_VERSION) return VIDEO_HEADER_LEN;
   return VIDEO_HEADER_LEN_V2;
+}
+
+/** Decode an 8-byte `CLWM` tip → input_wm, or null. */
+export function decodeWmTip(buf: ArrayBuffer | ArrayBufferView): number | null {
+  const u8 =
+    buf instanceof ArrayBuffer
+      ? new Uint8Array(buf)
+      : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  if (u8.byteLength < WM_TIP_LEN) return null;
+  const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+  if (magic !== WM_TIP_MAGIC) return null;
+  const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  return view.getUint32(4, true) >>> 0;
 }
 
 export function decodeClvdFragment(

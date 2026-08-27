@@ -803,8 +803,14 @@ async fn main() -> Result<()> {
             // wobble, and measured buffer grew to ~100ms during motion. Encoding on a
             // metronome makes delivery uniform, which is what lets the buffer stay small.
             _ = cadence.tick() => {
-                if webrtc_peer::take_expedite() {
+                // Expedite skips the Windows encode sleep. Fine for raw/idle wake;
+                // on pre-encoded it destroys CFR (pad@500Hz → encode~87 irregular)
+                // while input already feels 1:1 on its own DC — Ricardo "video choppy,
+                // stick great". Never expedite the GPU metronome.
+                if !capturer.is_preencoded() && webrtc_peer::take_expedite() {
                     capturer.write_expedite();
+                } else {
+                    let _ = webrtc_peer::take_expedite();
                 }
                 // Any viewer that lost sync asks for a keyframe over RTCP.
                 // Answering immediately turns a multi-second glitch into a single
@@ -812,11 +818,17 @@ async fn main() -> Result<()> {
                 // slot requesting one costs already-connected slots a harmless
                 // extra keyframe, not a correctness problem — one shared flag is
                 // enough.
+                // Viewer PLI → IDR. Hybrid dual: one IDR (WC bootstrap); exclusive
+                // CLVD / join paths still use the 3-frame burst below.
+                let mut hybrid_viewer_pli = false;
                 {
                     let guard = slots.lock().await;
                     for (_, conn) in guard.iter() {
                         if conn.host.take_keyframe_request() {
                             force_idr = true;
+                            if conn.host.hybrid_dual() {
+                                hybrid_viewer_pli = true;
+                            }
                         }
                     }
                 }
@@ -836,10 +848,10 @@ async fn main() -> Result<()> {
                                 conn.host.set_video_size(w, h);
                             }
                         }
-                        // One AU per cadence tick — H.264 stays in encode order on
-                        // the wire. Bursting every drained frame stacked host age
-                        // (~58ms p50 live) while the browser is latest-frame-wins;
-                        // the extra P-frames did not improve paint, only SCTP depth.
+                        // Never drop mid-GOP P-frames to "pace" — that desyncs the
+                        // decoder (macroblocks / motion-vector smear until the next
+                        // IDR). Ricardo screenshot 23:31. Cadence belongs on
+                        // win-capture's encode metronome; host forwards in order.
                         let burst_gap = last_push
                             .elapsed()
                             .clamp(Duration::from_millis(1), Duration::from_millis(500));
@@ -1015,9 +1027,10 @@ async fn main() -> Result<()> {
                     }
                 }
                 // A single IDR can be lost before the browser's decoder is ready, which
-                // costs the viewer seconds of black. Send a short burst instead.
+                // costs the viewer seconds of black. Burst-of-3 for exclusive/join;
+                // hybrid viewer PLI is one IDR (extra IDRs black shared RTP paint).
                 if force_idr {
-                    idr_burst = 3;
+                    idr_burst = if hybrid_viewer_pli { 1 } else { 3 };
                     force_idr = false;
                 }
                 // Periodic IDR so late joiners / stalled decoders can resync. This MUST be
