@@ -50,7 +50,15 @@ const DEFAULT_WS =
 
 function preferLegacyVideo(): boolean {
   if (typeof location === "undefined") return false;
-  return new URLSearchParams(location.search).get("legacyVideo") === "1";
+  const q = new URLSearchParams(location.search);
+  if (q.get("legacyVideo") === "1" || q.get("rtpOnly") === "1") return true;
+  // Opera (non-GX) WebCodecs has painted a black stage live while RTP/GX is fine.
+  // Force RTP canvas / <video> present; skip WC photon on that browser.
+  if (typeof navigator !== "undefined") {
+    const ua = navigator.userAgent;
+    if (/OPR\//.test(ua) && !/GX|Gaming|OPX\//i.test(ua)) return true;
+  }
+  return false;
 }
 
 function padDisplayName(kind: string, id: string): string {

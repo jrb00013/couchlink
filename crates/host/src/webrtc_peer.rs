@@ -759,11 +759,18 @@ impl WebRtcHost {
         let mut push_clvd = async || -> (bool, bool) {
             let mut delivered = false;
             let mut trickle_skip = false;
-            if !should_send_clvd(keyframe, path, next_seq) {
-                return (false, false);
-            }
             let dc_open = self.video_dc.ready_state()
                 == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open;
+            // Thin by default; densify to every AU when SCTP is slack so WC/
+            // input_wm (S_p50) can catch RTP — dual-full only when buffer is empty.
+            let thin_ok = should_send_clvd(keyframe, path, next_seq);
+            let slack = dc_open
+                && !keyframe
+                && send_rtp
+                && self.video_dc.buffered_amount().await < VIDEO_DC_MAX_BUFFERED / 2;
+            if !thin_ok && !slack {
+                return (false, false);
+            }
             // P-frames stay inside the 24 KiB wow-bar; IDRs use the larger
             // ceiling so multi-fragment keyframes actually complete on CLVD.
             let congested = dc_open && self.video_dc_congested_for(keyframe).await;
@@ -827,14 +834,8 @@ impl WebRtcHost {
             (delivered, trickle_skip)
         };
 
-        if hybrid_clvd {
-            let (d, t) = push_clvd().await;
-            delivered |= d;
-            trickle_skip |= t;
-        }
-
-        // RTP: every browser can decode this. After CLVD on warmup so WC is fed.
-        // min=max=0 (in 10ms units) = play as soon as a full frame arrives.
+        // Hybrid: RTP FIRST so visible paint never waits on SCTP CLVD sends
+        // (CLVD-before-RTP made Φ/age_p95 ~200ms while RTP fps still looked green).
         if send_rtp && should_send_rtp(keyframe, path, rtp_full_dual()) {
             let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
             self.video
@@ -849,6 +850,12 @@ impl WebRtcHost {
                 })
                 .await?;
             delivered = true;
+        }
+
+        if hybrid_clvd {
+            let (d, t) = push_clvd().await;
+            delivered |= d;
+            trickle_skip |= t;
         }
 
         if send_dc && !hybrid_clvd {
