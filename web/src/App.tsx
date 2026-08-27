@@ -205,6 +205,9 @@ export default function App() {
   const promotedRef = useRef(false);
   /** WC stamps input_wm in the background; RTP stays the visible high-fps present. */
   const softwarePhotonRef = useRef(false);
+  /** Latest CLVD input_wm (+ recv time) — felt Φ is RTP paint vs this wm, not WC decode. */
+  const lastClvdWmRef = useRef(0);
+  const lastClvdWmAtRef = useRef(0);
   const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
@@ -312,6 +315,10 @@ export default function App() {
         promoteWebcodecsPresent();
       });
       wcRef.current.setPaintedHandler((a) => {
+        // Hybrid sidecar: do NOT age_echo or own Φ. WC decode lag (~50ms+) was
+        // poisoning host age_p50 and S_p50 while Ricardo's eyes were on RTP
+        // (present age ~0.2ms). Felt photon = RTP paint + CLVD input_wm below.
+        if (softwarePhotonRef.current) return;
         notePhotonPaint(a.paintMs, a.inputWm);
         playerRef.current?.echoPaintedAge(a);
       });
@@ -460,6 +467,13 @@ export default function App() {
           });
         });
         viewRef.current.setPaintedHandler((a) => {
+          // Felt input→photon: visible RTP paint clock + latest CLVD watermark.
+          // Matches Ricardo's amazing night (canvas present), not WC sidecar lag.
+          const wm = lastClvdWmRef.current;
+          const wmAt = lastClvdWmAtRef.current;
+          if (wm && a.paintMs - wmAt < 100) {
+            notePhotonPaint(a.paintMs, wm);
+          }
           playerRef.current?.echoPaintedAge({
             seq: a.seq,
             stampUs: 0,
@@ -599,6 +613,8 @@ export default function App() {
         webcodecsActiveRef.current = false;
         promotedRef.current = false;
         softwarePhotonRef.current = false;
+        lastClvdWmRef.current = 0;
+        lastClvdWmAtRef.current = 0;
         sawAuRef.current = false;
         stalledRef.current = false;
         resetInputPhoton();
@@ -620,6 +636,10 @@ export default function App() {
     },
     onVideoAccessUnit: (au, recvMs) => {
       sawAuRef.current = true;
+      if (au.inputWm) {
+        lastClvdWmRef.current = au.inputWm >>> 0;
+        lastClvdWmAtRef.current = recvMs;
+      }
       if (!webcodecsActiveRef.current) {
         if (!ensureWebCodecs()) return;
       }

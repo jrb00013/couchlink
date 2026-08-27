@@ -1,8 +1,9 @@
 /**
- * Input→photon (est.): paint time minus pad send for the frame's input watermark.
+ * Input→photon (est.): visible paint time minus pad send for the frame's input watermark.
  *
- * Requires CLVD v4 `input_wm` from the host. Until then, `inputFreshnessMs` is
- * a client-local lower bound only.
+ * Hybrid: CLVD carries `input_wm`; felt Φ is measured at **RTP canvas paint** (what
+ * the friend sees), not WebCodecs sidecar decode — that lagged ~50ms and made
+ * sessions feel worse than Ricardo's canvas night while RTP age was ~0.2ms.
  */
 
 import { surplusMs } from "./latencyBudget";
