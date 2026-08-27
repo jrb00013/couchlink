@@ -842,15 +842,10 @@ async fn main() -> Result<()> {
                                 conn.host.set_video_size(w, h);
                             }
                         }
-                        // LFW + pace to commanded fps. A 2ms poll that forwarded every
-                        // AU sprayed ~90fps into Chrome while target said 60 — JB grew
-                        // on motion and pans felt behind the (already-good) pad.
-                        let min_gap = Duration::from_micros(
-                            1_000_000 / u64::from(commanded_target.fps.max(1)),
-                        );
-                        if !keyframe && last_push.elapsed() < min_gap {
-                            continue;
-                        }
+                        // Never drop mid-GOP P-frames to "pace" — that desyncs the
+                        // decoder (macroblocks / motion-vector smear until the next
+                        // IDR). Ricardo screenshot 23:31. Cadence belongs on
+                        // win-capture's encode metronome; host forwards in order.
                         let burst_gap = last_push
                             .elapsed()
                             .clamp(Duration::from_millis(1), Duration::from_millis(500));

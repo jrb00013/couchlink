@@ -678,11 +678,10 @@ unsafe fn widestring_to_string(p: PWSTR, len: u32) -> String {
     s
 }
 
-/// Keep encode latency low while giving the rate controller enough bits for motion.
+/// Keep encode latency low with a Moonlight-class CBR tune.
 ///
-/// Production gaming tune (Moonlight/Parsec-class): no B-frames, CBR with a
-/// ~1-frame VBV, low-latency mode. Soft B-frames or a fat buffer is what makes
-/// pans hitch while the pad path still feels 1:1.
+/// Do **not** set a 1-frame VBV — NVENC then starves motion frames and the
+/// picture goes full macroblock. B-frames stay off (reorder = lag).
 unsafe fn apply_codec_api_defaults(api: &ICodecAPI, bitrate_bps: u32) {
     let _ = set_codec_u32(api, &CODECAPI_AVLowLatencyMode, 1);
     let _ = set_codec_u32(
@@ -691,16 +690,14 @@ unsafe fn apply_codec_api_defaults(api: &ICodecAPI, bitrate_bps: u32) {
         eAVEncCommonRateControlMode_CBR.0 as u32,
     );
     let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, bitrate_bps);
-    // Peak = mean for true CBR — peak>>mean lets motion frames balloon and hitch.
-    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMaxBitRate, bitrate_bps);
-    // ~1 frame of VBV at 60fps (bits). Fat buffers smooth quality but add delay
-    // and make the picture feel behind the stick.
-    let vbv_bits = (bitrate_bps / 60).max(bitrate_bps / 120);
+    // Slight peak headroom so motion frames are not crushed under strict CBR.
+    let peak = bitrate_bps.saturating_mul(12) / 10;
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMaxBitRate, peak);
+    // ~250ms VBV — enough for motion quality, still low-latency gaming.
+    let vbv_bits = bitrate_bps / 4;
     let _ = set_codec_u32(api, &CODECAPI_AVEncCommonBufferSize, vbv_bits);
-    // Zero B-frames — hierarchical B's reordered = input→photon lag + stutter.
     let _ = set_codec_u32(api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
-    // Prefer speed under motion so encode time does not hitch the metronome.
-    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQualityVsSpeed, 40);
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQualityVsSpeed, 50);
 }
 
 unsafe fn set_codec_u32(api: &ICodecAPI, key: &GUID, value: u32) -> Result<()> {
