@@ -834,8 +834,7 @@ impl WebRtcHost {
             (delivered, trickle_skip)
         };
 
-        // Hybrid: RTP FIRST so visible paint never waits on SCTP CLVD sends
-        // (CLVD-before-RTP made Φ/age_p95 ~200ms while RTP fps still looked green).
+        // Hybrid: RTP FIRST so visible paint never waits on SCTP CLVD sends.
         if send_rtp && should_send_rtp(keyframe, path, rtp_full_dual()) {
             let (min_delay, max_delay) = crate::latency::gaming_playout_delay();
             self.video
@@ -852,10 +851,25 @@ impl WebRtcHost {
             delivered = true;
         }
 
+        // CLVD is best-effort beside RTP. Awaiting SCTP on a slow peer used to
+        // HOL-block join_all → every friend's push aged ~RTT+ (live Φ≈240ms /
+        // age_p95≈225 while paint fps still looked green). Budget CLVD so the
+        // shared cadence never waits on photon sidecar delivery.
         if hybrid_clvd {
-            let (d, t) = push_clvd().await;
-            delivered |= d;
-            trickle_skip |= t;
+            let clvd_budget = if keyframe {
+                Duration::from_millis(48)
+            } else {
+                Duration::from_millis(6)
+            };
+            match tokio::time::timeout(clvd_budget, push_clvd()).await {
+                Ok((d, t)) => {
+                    delivered |= d;
+                    trickle_skip |= t;
+                }
+                Err(_) => {
+                    // RTP already delivered — CLVD miss is not a governor shed.
+                }
+            }
         }
 
         if send_dc && !hybrid_clvd {

@@ -49,6 +49,9 @@ export class LowLatencyCanvasView {
   private onStats: ((s: PresentStats) => void) | null = null;
   private onPainted: ((a: CanvasPaintedAge) => void) | null = null;
   private onPumpDied: (() => void) | null = null;
+  /** MSTC delivered frames but canvas stays ink-black — fall back to <video>. */
+  private onBlackPresent: (() => void) | null = null;
+  private blackStreak = 0;
   /** Bumped by every `start()`/`stop()` so a pump that dies after the caller
    * already moved on (new track, or stopped) does not restart a stale one. */
   private generation = 0;
@@ -69,6 +72,12 @@ export class LowLatencyCanvasView {
    * canvas frozen on its last frame with no page refresh. */
   setPumpDiedHandler(cb: (() => void) | null) {
     this.onPumpDied = cb;
+  }
+
+  /** Fired when the canvas is receiving frames but stays near-black — MSTC
+   * quirk on some Chromium forks. Caller should switch to <video srcObject>. */
+  setBlackPresentHandler(cb: (() => void) | null) {
+    this.onBlackPresent = cb;
   }
 
   async start(track: MediaStreamTrack): Promise<boolean> {
@@ -218,6 +227,11 @@ export class LowLatencyCanvasView {
     if (this.paintSeq % 15 === 1) {
       this.onPainted?.({ seq: this.paintSeq, recvMs, paintMs });
     }
+    // Detect MSTC "frames" that are ink-black while the track is live — seen as
+    // a frozen black stage on some Chromium forks. Fall back to <video>.
+    if (this.paintSeq % 20 === 0 && w >= 32 && h >= 32) {
+      this.sampleBlackPresent(ctx, w, h);
+    }
 
     const now = paintMs;
     if (now - this.windowStart >= 1000) {
@@ -236,10 +250,43 @@ export class LowLatencyCanvasView {
     }
   }
 
+  /** Near-zero luma across a few center samples for several checks ⇒ black present. */
+  private sampleBlackPresent(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number
+  ) {
+    try {
+      const cx = (w / 2) | 0;
+      const cy = (h / 2) | 0;
+      const sample = ctx.getImageData(Math.max(0, cx - 2), Math.max(0, cy - 2), 4, 4);
+      let sum = 0;
+      const n = sample.data.length / 4;
+      for (let i = 0; i < sample.data.length; i += 4) {
+        sum += sample.data[i]! + sample.data[i + 1]! + sample.data[i + 2]!;
+      }
+      const avg = sum / (n * 3);
+      if (avg < 2.5) {
+        this.blackStreak += 1;
+        // ~8 checks × 20 paints ≈ 160 frames (~1–2s at 90–120fps)
+        if (this.blackStreak >= 8) {
+          this.blackStreak = 0;
+          cwarn("low-latency canvas staying black — asking caller for <video> fallback");
+          this.onBlackPresent?.();
+        }
+      } else {
+        this.blackStreak = 0;
+      }
+    } catch {
+      // desynchronized / tainted canvas — cannot sample; leave present alone
+    }
+  }
+
   stop() {
     this.generation += 1;
     this.abort?.abort();
     this.abort = null;
     this.ctx = null;
+    this.blackStreak = 0;
   }
 }

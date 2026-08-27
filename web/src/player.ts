@@ -131,14 +131,7 @@ const PAD_POLL_MS = 2;
 
 function preferLegacyRtp(): boolean {
   if (typeof location === "undefined") return false;
-  const q = new URLSearchParams(location.search);
-  if (q.get("legacyVideo") === "1" || q.get("rtpOnly") === "1") return true;
-  // Match App.tsx: Opera (non-GX) WebCodecs → black stage live.
-  if (typeof navigator !== "undefined") {
-    const ua = navigator.userAgent;
-    if (/OPR\//.test(ua) && !/GX|Gaming|OPX\//i.test(ua)) return true;
-  }
-  return false;
+  return new URLSearchParams(location.search).get("legacyVideo") === "1";
 }
 
 export class CouchlinkPlayer {
