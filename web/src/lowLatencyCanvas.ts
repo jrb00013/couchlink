@@ -92,9 +92,8 @@ export class LowLatencyCanvasView {
   private async startInternal(track: MediaStreamTrack, gen: number): Promise<boolean> {
     try {
       if ("contentHint" in track) {
-        // Prefer spatial detail over pure motion — UI text stays readable on LAN
-        // without adding a present queue (still desynchronized canvas).
-        track.contentHint = "detail";
+        // Motion > spatial detail — "detail" made pans feel behind/stuttery.
+        track.contentHint = "motion";
       }
 
       const ctx = this.canvas.getContext("2d", {
@@ -105,8 +104,8 @@ export class LowLatencyCanvasView {
         cwarn("low-latency canvas: 2d context unavailable");
         return false;
       }
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
+      // Gaming: nearest-neighbor, no HQ scale tax (1206≠1280 was stuttering).
+      ctx.imageSmoothingEnabled = false;
       this.ctx = ctx;
 
       const attrs = (
@@ -222,11 +221,8 @@ export class LowLatencyCanvasView {
     const ageMs = Math.max(0, paintMs - recvMs);
     this.lastAgeMs = ageMs;
     this.paintSeq = (this.paintSeq + 1) >>> 0;
-    // Sample ~4 Hz so pad DC is not flooded (host skips stamp_us=0 for glass age,
-    // but records recv→paint as present-path age).
-    if (this.paintSeq % 15 === 1) {
-      this.onPainted?.({ seq: this.paintSeq, recvMs, paintMs });
-    }
+    // Every paint so CLWM→Φ can sample the next frame (throttled echo is App's job).
+    this.onPainted?.({ seq: this.paintSeq, recvMs, paintMs });
     // Detect MSTC "frames" that are ink-black while the track is live — seen as
     // a frozen black stage on some Chromium forks. Fall back to <video>.
     if (this.paintSeq % 20 === 0 && w >= 32 && h >= 32) {

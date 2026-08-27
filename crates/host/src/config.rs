@@ -30,7 +30,8 @@ pub struct HostArgs {
     /// ~5ms at rest to ~120ms the moment anything moved. Keeping the idle cadence
     /// close to the active one makes arrival near-uniform and the buffer stays small.
     /// Static frames encode to almost nothing, so the cost is CPU, not bandwidth.
-    #[arg(long, default_value = "30")]
+    /// Default 60 matches Ricardo-night encode — 30 left a motion-start JB hitch.
+    #[arg(long, default_value = "60")]
     pub idle_fps: u32,
     #[arg(long, default_value_t = true)]
     pub bluetooth_pad: bool,

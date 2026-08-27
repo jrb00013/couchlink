@@ -473,12 +473,15 @@ export default function App() {
             lastSampledWmRef.current = pending;
             pendingPhotonWmRef.current = 0;
           }
-          playerRef.current?.echoPaintedAge({
-            seq: a.seq,
-            stampUs: 0,
-            recvMs: a.recvMs,
-            paintMs: a.paintMs,
-          });
+          // Throttle age_echo (~4 Hz) — every paint would flood the pad DC.
+          if (a.seq % 15 === 1) {
+            playerRef.current?.echoPaintedAge({
+              seq: a.seq,
+              stampUs: 0,
+              recvMs: a.recvMs,
+              paintMs: a.paintMs,
+            });
+          }
         });
         viewRef.current.setPumpDiedHandler(() => {
           const stream = heldStreamRef.current;
