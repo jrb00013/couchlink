@@ -1,4 +1,16 @@
 import { useEffect, useState } from "react";
+import type { InputPhotonSnapshot } from "./inputPhoton";
+import {
+  handoffWaitPeriods,
+  meanPhaseStackMs,
+  photonStretchMs,
+  photonWowMs,
+  SHM_WAIT_P95_GATE_MS,
+  surplusRttUnits,
+  WOW_SURPLUS_MS,
+  wowSurplusOk,
+} from "./latencyBudget";
+import type { PresentStuckReason } from "./presentPromote";
 import type {
   InboundVideoStats,
   MediaPathStats,
@@ -10,9 +22,19 @@ export type PresentSummary = {
   dropped: number;
   width: number;
   height: number;
-  /** Receive → present age of last painted frame (WebCodecs path). */
+  /** Receive → present age of last painted frame (WebCodecs or canvas). */
   ageMs?: number;
   ageBand?: string;
+  /** Ms since last pad send at paint (client-local lower bound). */
+  inputFreshnessMs?: number;
+  /** Input→photon p50 (est.) — needs CLVD input_wm. */
+  photonP50Ms?: number;
+  /** Surplus p50 = photon − RTT (est.). */
+  surplusP50Ms?: number;
+  /** WebCodecs decode time per frame (local). */
+  decodeMs?: number;
+  /** WebCodecs present diagnosis string. */
+  diagnosis?: string;
 };
 
 export type BottleneckCheck = {
@@ -40,6 +62,8 @@ export function bottleneckChecks(t: {
   video: InboundVideoStats | null;
   padHz: number;
   present: PresentSummary | null;
+  inputPhoton?: InputPhotonSnapshot | null;
+  hostStats?: HostStats | null;
 }): BottleneckCheck[] {
   const checks: BottleneckCheck[] = [];
   const { path } = t;
@@ -130,6 +154,46 @@ export function bottleneckChecks(t: {
     });
   }
 
+  const rtt = t.path?.rttMs ?? 0;
+  const surplus = t.inputPhoton?.surplusP50Ms ?? t.present?.surplusP50Ms;
+  if (surplus != null && rtt > 0) {
+    checks.push({
+      label: `surplus S_p50 ${surplus.toFixed(0)}ms (wow ≤${WOW_SURPLUS_MS}ms)`,
+      ok: wowSurplusOk(surplus),
+      detail: wowSurplusOk(surplus)
+        ? undefined
+        : `input→photon minus RTT exceeds the first wow bar — trim host/client pipeline or network`,
+    });
+    const phi = t.inputPhoton?.photonP50Ms ?? t.present?.photonP50Ms;
+    if (phi != null) {
+      const wow = photonWowMs(rtt);
+      checks.push({
+        label: `photon Φ_p50 ${phi.toFixed(0)}ms (wow ≤${wow.toFixed(0)}ms @ ${rtt}ms RTT)`,
+        ok: phi <= wow,
+      });
+    }
+  }
+
+  if (t.hostStats?.handoff_wait_p95_ms != null && t.hostStats.handoff_wait_p95_ms > 0) {
+    const p95 = t.hostStats.handoff_wait_p95_ms;
+    const fps = t.hostStats.target_fps || 60;
+    const trips = t.hostStats.shm_gate_trips ?? p95 > SHM_WAIT_P95_GATE_MS;
+    checks.push({
+      label: `handoff wait_p95 ${p95.toFixed(2)}ms (${handoffWaitPeriods(p95, fps).toFixed(2)} T_v)`,
+      ok: !trips,
+      detail: trips
+        ? `Hyper-V handoff wait p95 exceeds ${SHM_WAIT_P95_GATE_MS}ms — SHM gate trips`
+        : undefined,
+    });
+  } else if (t.hostStats?.handoff_wait_ms && t.hostStats.handoff_wait_ms > SHM_WAIT_P95_GATE_MS) {
+    const fps = t.hostStats.target_fps || 60;
+    checks.push({
+      label: `handoff wait ${t.hostStats.handoff_wait_ms.toFixed(2)}ms (${handoffWaitPeriods(t.hostStats.handoff_wait_ms, fps).toFixed(2)} T_v)`,
+      ok: false,
+      detail: `Hyper-V handoff wait exceeds ${SHM_WAIT_P95_GATE_MS}ms — SHM gate would trip`,
+    });
+  }
+
   return checks;
 }
 
@@ -186,6 +250,11 @@ export type HostStats = {
   target_bitrate_kbps: number;
   age_p50_ms?: number;
   age_p95_ms?: number;
+  frames_received?: number;
+  handoff_wait_ms?: number;
+  handoff_copy_ms?: number;
+  handoff_wait_p95_ms?: number;
+  shm_gate_trips?: boolean;
 };
 
 /** A pad_info heartbeat older than this reads as "not actually sending
@@ -257,12 +326,39 @@ function ControllerRow({
   );
 }
 
+function fmtMs(v: number | null | undefined, digits = 1): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${v.toFixed(digits)}ms`;
+}
+
+function WowRow({
+  label,
+  value,
+  ok,
+}: {
+  label: string;
+  value: string;
+  ok: boolean | null;
+}) {
+  return (
+    <div className={`dt-row ${ok === false ? "dt-wow-fail" : ok ? "dt-wow-pass" : ""}`}>
+      <span className="dt-label">{label}</span>
+      <span className="dt-value">
+        {ok === true ? "✓ " : ok === false ? "✗ " : ""}
+        {value}
+      </span>
+    </div>
+  );
+}
+
 export default function DebugDrawer({
   telemetry,
   hostStats,
   present,
   streamInfo,
   presentMode,
+  inputPhoton,
+  presentStuck,
   playerPads,
   mySlot,
   myPadName,
@@ -275,6 +371,9 @@ export default function DebugDrawer({
   present: PresentSummary | null;
   streamInfo: string;
   presentMode: string;
+  /** Local input→photon ring snapshot — per-browser only. */
+  inputPhoton?: InputPhotonSnapshot | null;
+  presentStuck?: PresentStuckReason | null;
   playerPads?: Record<number, PlayerPadEntry>;
   mySlot?: number | null;
   myPadName?: string | null;
@@ -282,7 +381,7 @@ export default function DebugDrawer({
   open: boolean;
   onToggle: () => void;
 }) {
-  const [tab, setTab] = useState<"network" | "controller">("network");
+  const [tab, setTab] = useState<"network" | "latency" | "controller">("network");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const t = telemetry;
   const checks = bottleneckChecks({
@@ -290,13 +389,29 @@ export default function DebugDrawer({
     video: t?.video ?? null,
     padHz: t?.padHz ?? 0,
     present,
+    inputPhoton,
+    hostStats,
   });
   const summary = checks.length ? bottleneckSummary(checks) : null;
+  const rtt = t?.path?.rttMs ?? 0;
+  const padHz = myPadHz ?? t?.padHz ?? 0;
+  const videoFps = hostStats?.target_fps ?? t?.video?.framesPerSecond ?? 60;
+  const youLabel = mySlot != null ? `You (P${mySlot + 1})` : "You";
+  const surplus = inputPhoton?.surplusP50Ms ?? present?.surplusP50Ms;
+  const phi = inputPhoton?.photonP50Ms ?? present?.photonP50Ms;
+  const wowSurplusOkFlag = surplus != null ? wowSurplusOk(surplus) : null;
+  const wowPhotonOk =
+    phi != null && rtt > 0 ? phi <= photonWowMs(rtt) : null;
+  const stretchPhoton =
+    rtt > 0 ? photonStretchMs(rtt) : null;
+  const eta =
+    phi != null && rtt > 0 ? surplusRttUnits(phi, rtt) : null;
+  const phaseStack =
+    padHz > 0 ? meanPhaseStackMs(padHz, videoFps, videoFps) : null;
 
-  // Only tick the clock while the drawer is open and on the Controller tab —
-  // this is purely so "Xs ago" keeps counting up live, not a data source.
+  // Tick the clock while open on tabs that show live ages.
   useEffect(() => {
-    if (!open || tab !== "controller") return;
+    if (!open || tab === "network") return;
     const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [open, tab]);
@@ -328,6 +443,15 @@ export default function DebugDrawer({
           <button
             type="button"
             role="tab"
+            aria-selected={tab === "latency"}
+            className={`dt-tab ${tab === "latency" ? "is-active" : ""}`}
+            onClick={() => setTab("latency")}
+          >
+            Latency
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={tab === "controller"}
             className={`dt-tab ${tab === "controller" ? "is-active" : ""}`}
             onClick={() => setTab("controller")}
@@ -335,7 +459,189 @@ export default function DebugDrawer({
             Controller
           </button>
         </div>
-        {tab === "controller" ? (
+        {tab === "latency" ? (
+          <div className="dt-grid">
+            <Group title={`${youLabel} — interactive latency (local)`}>
+              <p className="dt-note">
+                Input→photon and surplus are measured in this browser only. Other
+                players see their own numbers on their device.
+              </p>
+              <Row
+                label="Φ last"
+                value={fmtMs(inputPhoton?.lastPhotonMs ?? null, 0)}
+              />
+              <Row label="Φ p50" value={fmtMs(phi ?? null, 0)} />
+              <Row label="S p50 (Φ−R)" value={fmtMs(surplus ?? null, 0)} />
+              <Row label="RTT (yours)" value={rtt > 0 ? `${rtt}ms` : "—"} />
+              <Row
+                label="Φ* wow bar"
+                value={rtt > 0 ? fmtMs(photonWowMs(rtt), 0) : "—"}
+              />
+              <Row
+                label="Φ* stretch"
+                value={stretchPhoton != null ? fmtMs(stretchPhoton, 0) : "—"}
+              />
+              <Row
+                label="η = S/R"
+                value={eta != null ? eta.toFixed(2) : "—"}
+              />
+              <WowRow
+                label="Wow S_p50"
+                value={
+                  surplus != null
+                    ? `${surplus.toFixed(0)}ms ≤ ${WOW_SURPLUS_MS}ms`
+                    : "waiting for CLVD input_wm samples"
+                }
+                ok={wowSurplusOkFlag}
+              />
+              <WowRow
+                label="Wow Φ_p50"
+                value={
+                  phi != null && rtt > 0
+                    ? `${phi.toFixed(0)}ms ≤ ${photonWowMs(rtt).toFixed(0)}ms`
+                    : "—"
+                }
+                ok={wowPhotonOk}
+              />
+              <Row
+                label="Input freshness"
+                value={fmtMs(inputPhoton?.inputFreshnessMs ?? present?.inputFreshnessMs ?? null, 0)}
+              />
+              <Row
+                label="Watermark ring"
+                value={
+                  inputPhoton
+                    ? `${inputPhoton.sampleCount} samples · ring ${inputPhoton.ringSize}${
+                        inputPhoton.watermarkActive ? " · wm active" : " · wm pending"
+                      }`
+                    : "—"
+                }
+              />
+              <Row
+                label="Mean phase stack"
+                value={
+                  phaseStack != null
+                    ? `${phaseStack.toFixed(1)}ms @ ${padHz}Hz pad / ${videoFps}fps`
+                    : "—"
+                }
+              />
+            </Group>
+            <Group title={`${youLabel} — present path`}>
+              <Row label="Present mode" value={presentMode} />
+              {presentStuck && (
+                <Row label="Present stuck" value={presentStuck} />
+              )}
+              {present && (
+                <>
+                  <Row label="Paint fps" value={`${present.fps}fps`} />
+                  <Row
+                    label="Frame age"
+                    value={
+                      present.ageMs != null
+                        ? `${present.ageMs.toFixed(1)}ms${present.ageBand ? ` (${present.ageBand})` : ""}`
+                        : "—"
+                    }
+                  />
+                  <Row
+                    label="Decode (local)"
+                    value={present.decodeMs != null ? fmtMs(present.decodeMs) : "—"}
+                  />
+                  <Row
+                    label="Resolution"
+                    value={`${present.width}×${present.height}`}
+                  />
+                  {present.dropped > 0 && (
+                    <Row label="Dropped paints" value={String(present.dropped)} />
+                  )}
+                  {present.diagnosis && (
+                    <Row label="Diagnosis" value={present.diagnosis} />
+                  )}
+                </>
+              )}
+            </Group>
+            {t?.path && (
+              <Group title={`${youLabel} — network path`}>
+                <Row label="Path" value={`${t.path.family} ${t.path.local} → ${t.path.remote}`} />
+                <Row label="Relayed" value={t.path.relayed ? "yes (TURN)" : "no"} />
+                <Row label="Round-trip" value={`${t.path.rttMs}ms`} />
+                {t.video && (
+                  <>
+                    <Row label="Jitter buffer" value={fmtMs(t.video.jitterBufferMs)} />
+                    <Row label="Feed loss" value={`${t.video.packetLossPct.toFixed(2)}%`} />
+                    <Row label="Decoder rate" value={`${t.video.decodeFps.toFixed(1)}fps`} />
+                  </>
+                )}
+              </Group>
+            )}
+            {hostStats && (
+              <Group title="Host pipeline (shared — same for all clients)">
+                <Row label="Push rate" value={`${hostStats.fps.toFixed(1)}fps`} />
+                <Row
+                  label="Dropped / shed"
+                  value={`${hostStats.dropped_frames}/${hostStats.frames_out + hostStats.dropped_frames} (${hostStats.drop_pct}%)`}
+                />
+                <Row label="Capture" value={fmtMs(hostStats.capture_ms)} />
+                <Row label="Scale" value={fmtMs(hostStats.scale_ms)} />
+                <Row label="Encode" value={fmtMs(hostStats.encode_ms)} />
+                <Row label="Push" value={fmtMs(hostStats.push_ms)} />
+                <Row label="Bottleneck" value={hostStats.dominant_stage} />
+                <Row
+                  label="Age p50/p95"
+                  value={
+                    hostStats.age_p50_ms || hostStats.age_p95_ms
+                      ? `${(hostStats.age_p50_ms ?? 0).toFixed(0)} / ${(hostStats.age_p95_ms ?? 0).toFixed(0)} ms`
+                      : "—"
+                  }
+                />
+                <Row
+                  label="Frames recv (bridge)"
+                  value={
+                    hostStats.frames_received != null
+                      ? String(hostStats.frames_received)
+                      : "—"
+                  }
+                />
+                <Row
+                  label="Handoff wait/copy"
+                  value={
+                    hostStats.handoff_wait_ms || hostStats.handoff_copy_ms
+                      ? `${fmtMs(hostStats.handoff_wait_ms ?? 0)} / ${fmtMs(hostStats.handoff_copy_ms ?? 0)}`
+                      : "— (not Hyper-V path)"
+                  }
+                />
+                <Row
+                  label="Handoff wait p95"
+                  value={
+                    hostStats.handoff_wait_p95_ms
+                      ? `${fmtMs(hostStats.handoff_wait_p95_ms)}${
+                          hostStats.shm_gate_trips ? " · SHM_GATE_TRIP" : " · SHM_SKIP"
+                        }`
+                      : "—"
+                  }
+                />
+                <Row
+                  label="Encoder target"
+                  value={`${hostStats.target_width}×${hostStats.target_height}@${hostStats.target_fps} ${fmtKbps(hostStats.target_bitrate_kbps)}`}
+                />
+              </Group>
+            )}
+            <Group title="Other players">
+              {Object.entries(playerPads ?? {})
+                .filter(([slot]) => Number(slot) !== mySlot)
+                .sort(([a], [b]) => Number(a) - Number(b))
+                .map(([slot, p]) => (
+                  <Row
+                    key={slot}
+                    label={`P${Number(slot) + 1}`}
+                    value={`${padKindLabel(p.kind, p.id)} — latency metrics local to their browser`}
+                  />
+                ))}
+              {Object.keys(playerPads ?? {}).filter((s) => Number(s) !== mySlot).length === 0 && (
+                <p className="dt-foot">No other players seated.</p>
+              )}
+            </Group>
+          </div>
+        ) : tab === "controller" ? (
           <div className="dt-grid">
             <Group title="Controllers">
               <ControllerRow
@@ -416,6 +722,13 @@ export default function DebugDrawer({
                     : "—"
                 }
               />
+              {(hostStats.frames_received != null ||
+                hostStats.handoff_wait_ms != null) && (
+                <Row
+                  label="Bridge recv / handoff"
+                  value={`${hostStats.frames_received ?? "—"} recv · wait ${fmtMs(hostStats.handoff_wait_ms ?? 0)} copy ${fmtMs(hostStats.handoff_copy_ms ?? 0)}`}
+                />
+              )}
             </Group>
           )}
           <Group title="Input">
@@ -423,23 +736,31 @@ export default function DebugDrawer({
             <Row label="Send rate" value={t && t.padHz > 0 ? `${t.padHz}Hz` : "—"} />
             <Row label="Present mode" value={presentMode} />
             {present && (
-              <Row
-                label="Paint"
-                value={`${present.fps}fps · ${present.width}×${present.height}${
-                  present.ageMs != null
-                    ? ` · ${present.ageMs.toFixed(1)}ms age${present.ageBand ? ` (${present.ageBand})` : ""}`
-                    : ""
-                }${present.dropped > 0 ? ` · ${present.dropped} dropped` : ""}`}
-              />
+              <>
+                <Row
+                  label="Paint"
+                  value={`${present.fps}fps · ${present.width}×${present.height}${
+                    present.ageMs != null
+                      ? ` · ${present.ageMs.toFixed(1)}ms age${present.ageBand ? ` (${present.ageBand})` : ""}`
+                      : ""
+                  }${present.dropped > 0 ? ` · ${present.dropped} dropped` : ""}`}
+                />
+                {(present.photonP50Ms != null || present.surplusP50Ms != null) && (
+                  <Row
+                    label="Photon / S"
+                    value={`Φ ${present.photonP50Ms?.toFixed(0) ?? "—"}ms · S ${present.surplusP50Ms?.toFixed(0) ?? "—"}ms — see Latency tab`}
+                  />
+                )}
+              </>
             )}
             <Row label="Stream info" value={streamInfo} />
           </Group>
         </div>
         )}
-        {tab === "network" && streamInfo && (
+        {(tab === "network" || tab === "latency") && streamInfo && (
           <p className="dt-foot">
-            {streamInfo} · stats tick every 2s · browser & host numbers fuse
-            here to find the slow hop.
+            {streamInfo} · stats tick every 2s · Latency tab = per-browser
+            interactive metrics · host pipeline is shared.
           </p>
         )}
       </div>

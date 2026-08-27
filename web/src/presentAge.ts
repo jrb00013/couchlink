@@ -35,12 +35,32 @@ export function shouldReplacePending(
 /**
  * Decode-queue policy: if the decoder is already backed up, skip this AU
  * (except keyframes, which re-anchor the GOP).
+ *
+ * Default queue 3 — at ~90fps host push a depth of 2 is normal while one
+ * frame decodes; maxQueue=1 was starving paint toward ~30fps (Joel live).
  */
 export function shouldSkipDecode(
   decodeQueueSize: number,
   keyframe: boolean,
-  maxQueue = 1
+  maxQueue = 3
 ): boolean {
   if (keyframe) return false;
   return decodeQueueSize > maxQueue;
+}
+
+/** When decode backlog forces a delta drop, skip without IDR by default.
+ *
+ * Requesting an IDR on CPU backlog reintroduces the skip→IDR→bigger-frame→
+ * more-skip death spiral. Only ask for IDR when the frame is already late
+ * (`ageBand` drop/emergency) — that is network/staleness, not local queue.
+ */
+export function decodeBacklogPolicy(
+  decodeQueueSize: number,
+  keyframe: boolean,
+  age: AgeBand = "ok"
+): "decode" | "skip" | "skip-request-idr" {
+  if (!shouldSkipDecode(decodeQueueSize, keyframe)) return "decode";
+  if (keyframe) return "decode";
+  if (age === "drop" || age === "emergency") return "skip-request-idr";
+  return "skip";
 }

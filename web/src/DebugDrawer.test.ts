@@ -107,6 +107,26 @@ describe("bottleneckChecks", () => {
     });
     expect(checks.find((c) => c.label.includes("paint"))?.ok).toBe(false);
   });
+
+  it("flags surplus over the wow bar", () => {
+    const checks = bottleneckChecks({
+      path: path({ rttMs: 48 }),
+      video: video({}),
+      padHz: 250,
+      present: { fps: 60, dropped: 0, width: 1280, height: 720, surplusP50Ms: 52, photonP50Ms: 100 },
+    });
+    expect(checks.find((c) => c.label.includes("surplus S_p50"))?.ok).toBe(false);
+  });
+
+  it("passes surplus inside the wow bar", () => {
+    const checks = bottleneckChecks({
+      path: path({ rttMs: 48 }),
+      video: video({}),
+      padHz: 250,
+      present: { fps: 60, dropped: 0, width: 1280, height: 720, surplusP50Ms: 40, photonP50Ms: 88 },
+    });
+    expect(checks.find((c) => c.label.includes("surplus S_p50"))?.ok).toBe(true);
+  });
 });
 
 describe("bottleneckSummary", () => {

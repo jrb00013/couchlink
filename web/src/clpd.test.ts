@@ -132,7 +132,7 @@ describe("controller tester — browser Gamepad → CLPD", () => {
     expect(buf[1]).toBe(0x4c); // L
     expect(buf[2]).toBe(0x50); // P
     expect(buf[3]).toBe(0x44); // D
-    expect(buf.length).toBe(31);
+    expect(buf.length).toBe(35);
     // seq little-endian at offset 5
     expect(buf[5]).toBe(9);
   });

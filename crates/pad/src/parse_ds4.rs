@@ -110,6 +110,7 @@ pub fn parse_ds4_input_report(raw: &[u8]) -> Option<PadFrame> {
         touch_active: 0,
         touch_x: 0,
         touch_y: 0,
+        client_ts_ms: 0,
     })
 }
 

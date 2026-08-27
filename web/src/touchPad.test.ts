@@ -79,7 +79,7 @@ describe("touchPad — touch-screen → CLPD", () => {
       new Set(["cross", "r2"])
     );
     const buf = new Uint8Array(encodeClpd(state));
-    expect(buf.length).toBe(31);
+    expect(buf.length).toBe(35);
     expect(buf[0]).toBe(0x43);
     expect(buf[1]).toBe(0x4c);
     expect(buf[2]).toBe(0x50);

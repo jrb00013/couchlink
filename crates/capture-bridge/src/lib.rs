@@ -57,6 +57,26 @@ pub struct EncodeTarget {
     pub bitrate_kbps: u32,
 }
 
+/// Commanded Windows encode fps — shared by host and launch scripts.
+///
+/// WGC may run at `COUCHLINK_CAPTURE_FPS` (e.g. 120) for lower handoff wait,
+/// but the encoder and relay must not exceed this cap or SCTP floods and the
+/// link governor floors bitrate (killing encode ≥ 5000 and S_p50).
+pub fn encode_fps_target(preset_fps: u32) -> u32 {
+    if let Ok(s) = std::env::var("COUCHLINK_ENCODE_FPS") {
+        if let Ok(n) = s.parse::<u32>() {
+            return n.max(1);
+        }
+    }
+    if let Ok(s) = std::env::var("COUCHLINK_CAPTURE_FPS") {
+        if let Ok(n) = s.parse::<u32>() {
+            const AUTO_RAISE_CAP: u32 = 90;
+            return n.max(preset_fps).min(AUTO_RAISE_CAP).max(1);
+        }
+    }
+    preset_fps.max(1)
+}
+
 /// Write a `SET_TARGET` command. The reader side is the peer that owns the
 /// encoder, so this is deliberately the only writer in the capture-bridge crate.
 /// True when `needle` appears in the window title or the owning process name.

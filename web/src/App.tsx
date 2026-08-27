@@ -8,6 +8,15 @@ import {
   canUseWebCodecs,
   WebCodecsCanvasView,
 } from "./webCodecsCanvas";
+import {
+  getInputPhotonSnapshot,
+  inputFreshnessMs,
+  notePhotonPaint,
+  photonP50Ms,
+  resetInputPhoton,
+  surplusP50Ms,
+} from "./inputPhoton";
+import { classifyPresentStuck, type PresentStuckReason } from "./presentPromote";
 import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
 import type { ControllerKind } from "./controllerKind";
 import { seatForRemoteSlot } from "./seat";
@@ -91,6 +100,7 @@ export default function App() {
   const [presentMode, setPresentMode] = useState<"webcodecs" | "canvas" | "video" | "—">("—");
   const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
   const [telemetry, setTelemetry] = useState<PlayerTelemetry | null>(null);
+  const rttRef = useRef(0);
   const [hostStats, setHostStats] = useState<{
     fps: number;
     frames_out: number;
@@ -107,7 +117,13 @@ export default function App() {
     target_bitrate_kbps: number;
     age_p50_ms?: number;
     age_p95_ms?: number;
+    frames_received?: number;
+    handoff_wait_ms?: number;
+    handoff_copy_ms?: number;
+    handoff_wait_p95_ms?: number;
+    shm_gate_trips?: boolean;
   } | null>(null);
+  const [presentStuck, setPresentStuck] = useState<PresentStuckReason | null>(null);
   /** Session occupancy snapshot — "N/4 players connected" (host owns P1). */
   const [playersStatus, setPlayersStatus] = useState<{
     occupied: number;
@@ -124,6 +140,38 @@ export default function App() {
   /** This browser's own player slot, assigned by the session on registration. */
   const [mySlot, setMySlot] = useState<number | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
+
+  function presentPhotonFields() {
+    const rtt = rttRef.current;
+    const photon = photonP50Ms();
+    const surplus = surplusP50Ms(rtt);
+    return {
+      inputFreshnessMs: inputFreshnessMs() ?? undefined,
+      photonP50Ms: photon ?? undefined,
+      surplusP50Ms: surplus ?? undefined,
+    };
+  }
+  /** Headless Ricardo scrape (`regression-latency-live.mjs`) reads this. */
+  useEffect(() => {
+    type RicardoHook = {
+      presentMode: string;
+      rttMs: number;
+      hostStats: typeof hostStats;
+      present: typeof present;
+      inputPhoton: ReturnType<typeof getInputPhotonSnapshot>;
+    };
+    const w = window as Window & { __couchlinkRicardo?: () => RicardoHook };
+    w.__couchlinkRicardo = () => ({
+      presentMode,
+      rttMs: rttRef.current,
+      hostStats,
+      present,
+      inputPhoton: getInputPhotonSnapshot(rttRef.current),
+    });
+    return () => {
+      delete w.__couchlinkRicardo;
+    };
+  }, [presentMode, hostStats, present]);
   const [debugOpen, setDebugOpen] = useState(false);
   const [kbmActive, setKbmActive] = useState(false);
   const [keybindsOpen, setKeybindsOpen] = useState(false);
@@ -149,8 +197,20 @@ export default function App() {
   const viewRef = useRef<LowLatencyCanvasView | null>(null);
   const wcRef = useRef<WebCodecsCanvasView | null>(null);
   const webcodecsActiveRef = useRef(false);
-  /** WebCodecs has painted and owns the visible canvas (RTP no longer on screen). */
+  /** Saw at least one CLVD access unit this session (for stuck taxonomy). */
+  const sawAuRef = useRef(false);
+  /** WebCodecs stalled this session (warmup rescue); cleared on promote. */
+  const stalledRef = useRef(false);
+  /** WebCodecs has painted / photon path live (RTP canvas may still be visible). */
   const promotedRef = useRef(false);
+  /** WC stamps input_wm in the background; RTP stays the visible high-fps present. */
+  const softwarePhotonRef = useRef(false);
+  /**
+   * Felt Φ (Ricardo canvas night): sample once per new CLVD `input_wm` at the
+   * next RTP paint — never reuse one wm across many paints (that blew Φ to 90–280).
+   */
+  const pendingPhotonWmRef = useRef(0);
+  const lastSampledWmRef = useRef(0);
   const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
@@ -180,19 +240,34 @@ export default function App() {
    * empty WebCodecs canvas and keeps the RTP canvas — no re-attach needed. */
   function armWebCodecsFallback() {
     clearRtpFallbackTimer();
+    // Once WC has painted, hybrid keeps RTP visible — don't stamp fallback_timer
+    // and thrash present_path. Photon sidecar recovers via IDR only.
+    if (wcRef.current?.hasPainted() || softwarePhotonRef.current) return;
     rtpFallbackTimer.current = window.setTimeout(() => {
       rtpFallbackTimer.current = null;
       if (!webcodecsActiveRef.current) return;
-      if (wcRef.current?.hasPainted()) return;
-      cwarn("WebCodecs produced no frames — falling back to RTP canvas");
-      webcodecsActiveRef.current = false;
+      if (wcRef.current?.hasPainted() || softwarePhotonRef.current) return;
+      cwarn("WebCodecs produced no frames — falling back to RTP canvas (will retry on next AU)");
+      // Do not resumeWarmup() — hybrid stays on dual; path flips blacked RTP.
       promotedRef.current = false;
-      playerRef.current?.preferRtpPresent();
-      wcRef.current?.stop();
       wcCanvasRef.current?.classList.add("is-hidden");
       canvasRef.current?.classList.remove("is-hidden");
-      setVideoDiag("webcodecs: no frames — RTP fallback");
-    }, 2500);
+      setVideoDiag("webcodecs: no frames yet — RTP safety net (warmup)");
+      const reason = classifyPresentStuck({
+        preferLegacy: preferLegacyVideo(),
+        hasDecoder: typeof VideoDecoder === "function",
+        sawAu: sawAuRef.current,
+        painted: !!wcRef.current?.hasPainted(),
+        stalled: stalledRef.current,
+        fallbackFired: true,
+      });
+      clog("present stuck", {
+        reason,
+        hasDecoder: typeof VideoDecoder === "function",
+        secure: window.isSecureContext,
+      });
+      setPresentStuck(reason);
+    }, 15000);
   }
 
   function ensureWebCodecs(): boolean {
@@ -201,8 +276,25 @@ export default function App() {
       wcRef.current = new WebCodecsCanvasView(wcCanvasRef.current);
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
+        if (!promotedRef.current) {
+          promoteWebcodecsPresent();
+        }
+        const fresh = inputFreshnessMs();
+        const photon = photonP50Ms();
+        if (softwarePhotonRef.current) {
+          setPresentMode("webcodecs");
+          setPresentStuck(null);
+          setVideoDiag(
+            `LIVE RTP+WC · WC ${s.presentFps}fps · photon path live · drop=${s.dropped}${
+              photon != null ? ` · Φ ${photon.toFixed(0)}ms` : fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
+            }`
+          );
+          return;
+        }
         setVideoDiag(
-          `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode · drop=${s.dropped}`
+          `LIVE ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age (${s.ageBand}) · ${s.decodeMs.toFixed(1)}ms decode${
+            photon != null ? ` · photon ${photon.toFixed(0)}ms (est.)` : fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
+          } · drop=${s.dropped}`
         );
         setPresentMode("webcodecs");
         setPresent({
@@ -212,6 +304,9 @@ export default function App() {
           height: s.height,
           ageMs: s.ageMs,
           ageBand: s.ageBand,
+          decodeMs: s.decodeMs,
+          diagnosis: s.diagnosis,
+          ...presentPhotonFields(),
         });
       });
       wcRef.current.setKeyframeHandler(() => {
@@ -222,54 +317,86 @@ export default function App() {
       wcRef.current.setFirstPaintHandler(() => {
         promoteWebcodecsPresent();
       });
-      wcRef.current.setPaintedHandler((a) => {
-        playerRef.current?.echoPaintedAge(a);
+      wcRef.current.setPaintedHandler((_a) => {
+        // Hybrid: WC is bootstrap-only. Age + Φ live on RTP (Ricardo-feel).
+        // Never age_echo from WC — that used to pin age_p50 ~57ms.
       });
       wcRef.current.setStallHandler(() => {
+        // Exclusive-WC stall only (photon sidecar never calls this).
+        // Still: do not path-flip — RTP canvas is already visible in hybrid.
         promotedRef.current = false;
-        playerRef.current?.resumeWarmup();
+        stalledRef.current = true;
         wcCanvasRef.current?.classList.add("is-hidden");
-        // RTP never stopped decoding — just show the canvas that was
-        // already painting under the WebCodecs layer.
         canvasRef.current?.classList.remove("is-hidden");
         videoRef.current?.classList.remove("is-hidden");
-        setVideoDiag("webcodecs stalled — showing live RTP");
+        setVideoDiag("webcodecs stalled — showing live RTP (decoder kept warm)");
+        const reason = classifyPresentStuck({
+          preferLegacy: preferLegacyVideo(),
+          hasDecoder: typeof VideoDecoder === "function",
+          sawAu: sawAuRef.current,
+          painted: false,
+          stalled: true,
+          fallbackFired: false,
+        });
+        clog("present stuck", {
+          reason,
+          hasDecoder: typeof VideoDecoder === "function",
+          secure: window.isSecureContext,
+        });
+        setPresentStuck(reason);
       });
     }
     // Don't tear down a live decoder on every callback.
     if (!wcRef.current.isRunning() && !wcRef.current.start()) return false;
     webcodecsActiveRef.current = true;
-    clog("webcodecs decoder warming — RTP stays live until first paint");
+    // Hybrid: RTP canvas visible; mark sidecar so stall never path-flips.
+    wcRef.current.setPhotonSidecar(true);
+    clog("webcodecs warming — RTP canvas visible, CLVD photon sidecar", {
+      accel: wcRef.current.hardwareAcceleration(),
+    });
     armWebCodecsFallback();
     return true;
   }
 
-  /** WebCodecs painted — show it, but keep RTP decoding on the hidden canvas. */
+  /**
+   * WebCodecs painted — photon/`input_wm` path is live.
+   *
+   * Hybrid (v25 feel + S_p50): keep RTP canvas visible for high paint fps;
+   * WC runs in background for watermarks. Never hide RTP / go exclusive binary
+   * (that killed responsiveness and left fallback at 1fps).
+   */
   function promoteWebcodecsPresent() {
     if (promotedRef.current) return;
     promotedRef.current = true;
+    stalledRef.current = false;
+    softwarePhotonRef.current = true;
     clearRtpFallbackTimer();
-    // Do not stop the RTP renderer or null the <video> — a lost CLVD
-    // IDR used to freeze the last picture because nothing else was live.
-    canvasRef.current?.classList.add("is-hidden");
-    videoRef.current?.classList.add("is-hidden");
-    wcCanvasRef.current?.classList.remove("is-hidden");
+    // RTP canvas stays on screen. WC canvas stays hidden (photon sidecar).
+    wcCanvasRef.current?.classList.add("is-hidden");
+    canvasRef.current?.classList.remove("is-hidden");
+    videoRef.current?.classList.remove("is-hidden");
     setPresentMode("webcodecs");
-    clog("present mode: WebCodecs + CLVD (RTP stays live, hidden)");
+    setPresentStuck(null);
+    clog(
+      "present mode: RTP canvas + WC photon sidecar (full RTP stays on host)"
+    );
     playerRef.current?.promoteWebcodecs();
   }
 
   function attachStream(stream: MediaStream) {
     heldStreamRef.current = stream;
-    // WebCodecs is on screen once promoted, but the RTP renderer stays
-    // started — a stall just unhides that canvas. During warm-up RTP is
-    // the visible safety net.
-    if (promotedRef.current) {
+    // Hybrid: RTP is always the visible present. Never skip attaching just
+    // because WC photon has promoted — that left paint fps stuck / black.
+    if (promotedRef.current && !softwarePhotonRef.current) {
       if (heldLoggedRef.current !== stream) {
         heldLoggedRef.current = stream;
         clog("RTP stream held for fallback — WebCodecs present active");
       }
       return;
+    }
+    if (softwarePhotonRef.current && heldLoggedRef.current !== stream) {
+      heldLoggedRef.current = stream;
+      clog("RTP stream live — WC photon sidecar active");
     }
     clearRtpFallbackTimer();
     // Don't tear down a warming WebCodecs decoder — this is the safety-net
@@ -284,16 +411,96 @@ export default function App() {
     if (wantCanvas && track && canvasRef.current) {
       if (!viewRef.current) {
         viewRef.current = new LowLatencyCanvasView(canvasRef.current);
+        // Self-heal net: the view already retries internally a few times.
+        // If it still can't revive (e.g. the underlying track itself went
+        // bad), re-attach the held RTP stream fresh rather than leaving the
+        // canvas frozen until someone reloads the page.
+        viewRef.current.setPumpDiedHandler(() => {
+          const stream = heldStreamRef.current;
+          if (!stream) return;
+          cwarn("low-latency canvas pump died — re-attaching RTP stream");
+          attachStream(stream);
+        });
         viewRef.current.setStatsHandler((s) => {
+          // Hybrid: RTP canvas owns paint fps; WC photon sidecar owns S_p50.
+          if (softwarePhotonRef.current) {
+            const fresh = inputFreshnessMs();
+            const photon = photonP50Ms();
+            setPresentMode("webcodecs");
+            setVideoDiag(
+              `LIVE RTP+WC · paint ${s.presentFps}fps · photon path live · drop=${s.dropped}${
+                photon != null
+                  ? ` · Φ ${photon.toFixed(0)}ms`
+                  : fresh != null
+                    ? ` · input ${fresh.toFixed(0)}ms`
+                    : ""
+              }`
+            );
+            setPresent({
+              fps: s.presentFps,
+              dropped: s.dropped,
+              width: s.width,
+              height: s.height,
+              ageMs: s.ageMs,
+              ageBand: s.ageMs <= 25 ? "ok" : s.ageMs <= 40 ? "warn" : "drop",
+              ...presentPhotonFields(),
+            });
+            return;
+          }
+          if (promotedRef.current) return;
+          const fresh = inputFreshnessMs();
           setVideoDiag(
-            `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps drop=${s.dropped}`
+            `canvas: ${s.width}×${s.height} @ ${s.presentFps}fps · ${s.ageMs.toFixed(1)}ms age${
+              fresh != null ? ` · input ${fresh.toFixed(0)}ms` : ""
+            } drop=${s.dropped}`
           );
           setPresentMode("canvas");
-          setPresent({ fps: s.presentFps, dropped: s.dropped, width: s.width, height: s.height });
+          setPresent({
+            fps: s.presentFps,
+            dropped: s.dropped,
+            width: s.width,
+            height: s.height,
+            ageMs: s.ageMs,
+            ageBand: s.ageMs <= 25 ? "ok" : s.ageMs <= 40 ? "warn" : "drop",
+            ...presentPhotonFields(),
+          });
+        });
+        viewRef.current.setPaintedHandler((a) => {
+          // Once per distinct wm — consume pending so Φ cannot climb with paint fps.
+          const pending = pendingPhotonWmRef.current;
+          if (pending) {
+            notePhotonPaint(a.paintMs, pending);
+            lastSampledWmRef.current = pending;
+            pendingPhotonWmRef.current = 0;
+          }
+          // Throttle age_echo (~4 Hz) — every paint would flood the pad DC.
+          if (a.seq % 15 === 1) {
+            playerRef.current?.echoPaintedAge({
+              seq: a.seq,
+              stampUs: 0,
+              recvMs: a.recvMs,
+              paintMs: a.paintMs,
+            });
+          }
+        });
+        viewRef.current.setPumpDiedHandler(() => {
+          const stream = heldStreamRef.current;
+          if (!stream) return;
+          cwarn("RTP canvas pump dead — reattaching stream (no page refresh)");
+          attachStream(stream);
+        });
+        viewRef.current.setBlackPresentHandler(() => {
+          const stream = heldStreamRef.current;
+          if (!stream) return;
+          cwarn(
+            "RTP canvas painting black (MSTC) — falling back to <video>; WC photon kept"
+          );
+          attachVideoFallback(stream);
         });
       }
       void viewRef.current.start(track).then((ok) => {
         if (ok) {
+          if (promotedRef.current) return;
           clog("present mode: low-latency canvas");
           setPresentMode("canvas");
           if (videoRef.current) {
@@ -407,13 +614,19 @@ export default function App() {
         wcRef.current?.stop();
         webcodecsActiveRef.current = false;
         promotedRef.current = false;
+        softwarePhotonRef.current = false;
+        pendingPhotonWmRef.current = 0;
+        lastSampledWmRef.current = 0;
+        sawAuRef.current = false;
+        stalledRef.current = false;
+        resetInputPhoton();
         setPresent(null);
       }
     },
     onVideo: (stream) => attachStream(stream),
     onPresentPath: (path, detail) => {
       clog("present path", path, detail ?? "");
-      if (path === "webcodecs") {
+      if (path === "webcodecs" || path === "clvd") {
         if (!ensureWebCodecs()) {
           cwarn("WebCodecs present failed to start — waiting for RTP fallback");
           webcodecsActiveRef.current = false;
@@ -424,10 +637,26 @@ export default function App() {
       setCtxHint(secureContextHint());
     },
     onVideoAccessUnit: (au, recvMs) => {
+      sawAuRef.current = true;
+      if (au.inputWm) {
+        const wm = au.inputWm >>> 0;
+        if (wm && wm !== lastSampledWmRef.current && wm !== pendingPhotonWmRef.current) {
+          pendingPhotonWmRef.current = wm;
+        }
+      }
+      // After promote: stop WC decode — dual decode was the choppy regression.
+      if (softwarePhotonRef.current) return;
       if (!webcodecsActiveRef.current) {
         if (!ensureWebCodecs()) return;
       }
       wcRef.current?.push(au, recvMs);
+    },
+    onInputWm: (wm) => {
+      // Post-promote CLWM tips — once-per-wm at next RTP paint (felt Φ).
+      const w = wm >>> 0;
+      if (w && w !== lastSampledWmRef.current && w !== pendingPhotonWmRef.current) {
+        pendingPhotonWmRef.current = w;
+      }
     },
     onStreamInfo: (info) => {
       setStreamMeta(`${info.width}×${info.height}@${info.fps} ${info.codec}`);
@@ -440,7 +669,10 @@ export default function App() {
     onPadStats: (hz, name) => {
       setPadMeta(`${hz} Hz · ${name}`);
     },
-    onTelemetry: (t) => setTelemetry(t),
+    onTelemetry: (t) => {
+      rttRef.current = t.path?.rttMs ?? 0;
+      setTelemetry(t);
+    },
     onHostStats: (s) => setHostStats(s),
     onRegistered: (slot) => setMySlot(slot),
     onPlayersStatus: (occupied, max) => setPlayersStatus({ occupied, max }),
@@ -889,6 +1121,8 @@ export default function App() {
         present={present}
         streamInfo={streamMeta}
         presentMode={presentMode}
+        inputPhoton={getInputPhotonSnapshot(rttRef.current)}
+        presentStuck={presentStuck}
         playerPads={playerPads}
         mySlot={mySlot}
         myPadName={telemetry?.padName ?? null}

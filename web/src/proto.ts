@@ -45,7 +45,7 @@ export type SignalMessage =
    * host can stop writing the path nobody is painting from. "warmup" means
    * WebCodecs is starting on the DataChannel — keep both paths live as a
    * safety net until it paints, then it reports "webcodecs". */
-  | { type: "present_path"; path: "webcodecs" | "rtp" | "warmup" }
+  | { type: "present_path"; path: "webcodecs" | "rtp" | "warmup" | "clvd" }
   | {
       type: "stream_info";
       width: number;
@@ -72,6 +72,11 @@ export type SignalMessage =
       target_bitrate_kbps: number;
       age_p50_ms?: number;
       age_p95_ms?: number;
+      frames_received?: number;
+      handoff_wait_ms?: number;
+      handoff_copy_ms?: number;
+      handoff_wait_p95_ms?: number;
+      shm_gate_trips?: boolean;
     };
 
 export function send(ws: WebSocket, msg: SignalMessage) {

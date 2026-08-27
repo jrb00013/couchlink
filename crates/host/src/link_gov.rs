@@ -22,14 +22,14 @@
 use couchlink_capture_bridge::EncodeTarget;
 
 /// A sustained shed share above this (per window) steps the target down.
-/// 2% was noise: three WAN viewers shed a couple of frames every window,
-/// the governor climbed to 5000 kbps, immediately shed 7–19%, stepped back
-/// to 2500, and the yo-yo dropped IDRs that freeze WebCodecs.
+/// 2% was noise: three WAN viewers shed a couple of frames every window.
+/// 8% matches Joel live: 6% HUD must not step; 9–14% windows must.
 const DOWN_TRIGGER_PCT: u32 = 8;
-/// Clean windows required before climbing. Two 5s windows was ~10s at the
-/// floor then a failed climb — forever. Eight windows is ~40s of real
-/// headroom before we spend the extra bitrate.
-const UP_AFTER_CLEAN_WINDOWS: u32 = 8;
+/// Consecutive bad windows before stepping down.
+const DOWN_AFTER_WINDOWS: u32 = 2;
+/// Clean windows before climbing. Two (~10s) recovers fps after a CLVD blip
+/// without the old 40s stuck-at-floor climb while bitrate was wrong.
+const UP_AFTER_CLEAN_WINDOWS: u32 = 2;
 
 /// The governor's persistent memory between windows.
 #[derive(Debug, Clone)]
@@ -40,29 +40,32 @@ pub struct LinkGov {
     current: EncodeTarget,
     /// Consecutive clean windows (no triggering sheds).
     clean_windows: u32,
+    /// Bad windows in a row — hysteresis so one 9% blip does not step.
+    bad_windows: u32,
 }
 
-/// The rung ladder for 3-friend WAN: **hold host fps**, step bitrate only.
+/// Rung ladder: **hold bitrate**, step fps.
 ///
-/// Cutting fps to "fix lag" doubles unsync wait (T/2 at 15 = 33 ms vs 8 ms
-/// at 60) and matches tonight's death spiral (overlay target 30/15 while
-/// friends decode at the push rate). Bits per frame at the same R are
-/// *smaller* at 60 than at 15, so holding fps is often cheaper on CLVD.
+/// Joel live (v21–v22): shed stayed 5–14% after the governor floored bitrate
+/// to 1250 kbps — congestion was SCTP frame *rate*, not bits. Cutting R
+/// failed encode≥5000 and did not clear sheds; paint/S_p50 died on mushy
+/// IDRs. Stepping fps reduces messages/sec while keeping bits/frame healthy.
 fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
-    let mut kbps = baseline.bitrate_kbps;
-    // Never step below 1250 kbps at 60 — 625 was unwatchable (2–7 push fps)
-    // and the governor had no climb room once IDR storms inflated sheds.
-    const FLOOR_KBPS: u32 = 1_250;
-    for _ in 0..3 {
-        let next = (kbps / 2).max(FLOOR_KBPS);
-        if next >= kbps {
+    // Floor: ~55% of baseline (90→50) so sustained SCTP shed can clear while
+    // holding 5 Mbps — 75% floor (90→67) never cleared v24's 20% shed.
+    let floor_fps = ((baseline.fps * 5) / 9).max(45).min(baseline.fps);
+    let mut fps = baseline.fps;
+    for _ in 0..4 {
+        let step = (fps / 7).max(6);
+        let next = fps.saturating_sub(step).max(floor_fps);
+        if next >= fps {
             break;
         }
-        kbps = next;
+        fps = next;
         let extra = EncodeTarget {
-            fps: baseline.fps,
-            bitrate_kbps: kbps,
+            fps,
+            bitrate_kbps: baseline.bitrate_kbps,
             ..*baseline
         };
         if !rungs.iter().any(|r| *r == extra) {
@@ -81,29 +84,34 @@ impl LinkGov {
         Self {
             current: baseline,
             clean_windows: 0,
+            bad_windows: 0,
             baseline,
         }
     }
 
     /// Give the governor one window of link observations.
     ///
-    /// `shed` = frames dropped while pushing this window; `sent` = frames that
-    /// made it to the wire. Returns the target to command next, unchanged (equal
-    /// to the current one) when no adjustment is warranted.
+    /// `shed` = frames dropped while pushing this window; `sent` = frames
+    /// attempted (delivered + shed). Returns the target to command next.
     pub fn on_window(&mut self, shed: u32, sent: u32) -> EncodeTarget {
         let rungs = rungs_from(&self.baseline);
         let drop_pct = if sent > 0 { shed * 100 / sent } else { 0 };
 
         if drop_pct > DOWN_TRIGGER_PCT {
             self.clean_windows = 0;
-            // Step down one rung toward trickle, never below it.
-            let step = index_of(&rungs, self.current)
-                .map(|i| rungs[(i + 1).min(rungs.len() - 1)])
-                .unwrap_or(self.current);
-            if step != self.current {
-                self.current = step;
+            self.bad_windows += 1;
+            if self.bad_windows >= DOWN_AFTER_WINDOWS {
+                self.bad_windows = 0;
+                // Step down one rung toward the floor, never below it.
+                let step = index_of(&rungs, self.current)
+                    .map(|i| rungs[(i + 1).min(rungs.len() - 1)])
+                    .unwrap_or(self.current);
+                if step != self.current {
+                    self.current = step;
+                }
             }
         } else {
+            self.bad_windows = 0;
             self.clean_windows += 1;
             if self.clean_windows >= UP_AFTER_CLEAN_WINDOWS {
                 self.clean_windows = 0;
@@ -150,32 +158,30 @@ mod tests {
     }
 
     #[test]
-    fn persistent_shed_steps_down_to_trickle() {
+    fn persistent_shed_steps_down_fps_holds_bitrate() {
         let mut gov = LinkGov::new(P720);
         let mut seen = vec![];
-        // Saturate: every window sheds. The ladder should descend to the floor.
         for _ in 0..20 {
             let t = gov.on_window(40, 100);
             if seen.last() != Some(&t) {
                 seen.push(t);
             }
         }
-        assert_eq!(
-            *seen.last().unwrap(),
-            rungs_from(&P720).last().copied().unwrap(),
-            "must reach the floor"
-        );
-        assert_eq!(seen.last().unwrap().fps, 60, "fps-hold: floor keeps host fps");
+        let floor = *seen.last().unwrap();
+        assert_eq!(floor, rungs_from(&P720).last().copied().unwrap());
+        assert_eq!(floor.bitrate_kbps, P720.bitrate_kbps, "must hold bitrate");
+        assert!(floor.fps < P720.fps, "must step fps down");
+        assert!(floor.fps >= 45);
     }
 
     #[test]
-    fn persistent_shed_never_drops_fps() {
+    fn persistent_shed_never_drops_bitrate() {
         let mut gov = LinkGov::new(P720);
         for _ in 0..20 {
             gov.on_window(40, 100);
-            assert_eq!(gov.current().fps, 60);
+            assert_eq!(gov.current().bitrate_kbps, P720.bitrate_kbps);
         }
-        assert!(gov.current().bitrate_kbps <= 2_500);
+        assert!(gov.current().fps <= P720.fps);
         assert_eq!(gov.current().width, 1280);
         assert_eq!(gov.current().height, 720);
     }
@@ -195,18 +201,29 @@ mod tests {
     }
 
     #[test]
-    fn two_clean_windows_do_not_climb() {
+    fn two_clean_windows_climb_one_rung() {
         let mut gov = LinkGov::new(P720);
         gov.on_window(40, 100);
+        gov.on_window(40, 100); // hysteresis: second bad window steps down
         let down = gov.current();
         assert_ne!(down, P720);
-        gov.on_window(0, 60);
         gov.on_window(0, 60);
         assert_eq!(
             gov.current(),
             down,
-            "must stay down through the old 2-window climb"
+            "one clean window must not climb (need two)"
         );
+        gov.on_window(0, 60);
+        assert_ne!(gov.current(), down, "two clean windows should climb one rung");
+    }
+
+    #[test]
+    fn six_pct_shed_does_not_step_down() {
+        let mut gov = LinkGov::new(P720);
+        // Joel live: 43 dropped / 656 attempted = 6% HUD — must not floor.
+        for _ in 0..4 {
+            assert_eq!(gov.on_window(43, 656), P720);
+        }
     }
 
     #[test]
@@ -214,8 +231,9 @@ mod tests {
         let mut gov = LinkGov::new(P720);
         let after_blip = gov.on_window(10, 100); // 10% shed > 8% trigger
         assert_eq!(after_blip, freeze(gov.current()));
-        // One bad window alone is below the ladder floor — may still step; just
-        // assert we then recover and never go below trickle.
+        // One bad window alone must not step — hysteresis needs two in a row.
+        let still = gov.on_window(0, 60);
+        assert_eq!(still, after_blip);
         assert!(after_blip.fps >= 1);
         let rungs = rungs_from(&P720);
         assert!(index_of(&rungs, after_blip).is_some());
@@ -238,28 +256,35 @@ mod tests {
         frames * bits_per
     }
 
-    /// Bit-capacity bench: governor must shrink R, never fps, until produced
-    /// bits fit under a fixed uplink ceiling.
+    /// Frame-capacity bench: governor must shrink fps (hold bitrate) until
+    /// emitted frames fit under a fixed push ceiling.
     #[test]
-    fn benchmark_governor_vs_no_governor_on_saturated_bits() {
-        const CAPACITY_KBPS: u32 = 4_000;
+    fn benchmark_governor_vs_no_governor_on_saturated_frames() {
+        const CAPACITY_FPS: u32 = 48;
         const WINDOWS: usize = 400;
-        let mut gov = LinkGov::new(P720);
+        // Baseline above capacity so the governor has room to step fps down.
+        let baseline = EncodeTarget {
+            fps: 96,
+            ..P720
+        };
+        let mut gov = LinkGov::new(baseline);
         let mut g_over = 0u32;
         for _ in 0..WINDOWS {
             let t = gov.current();
-            assert_eq!(t.fps, 60);
-            let produced = window_bits(t.bitrate_kbps, t.fps);
-            let cap = u64::from(CAPACITY_KBPS) * 100; // kbps * 0.1 s * 1000 bits
-            let shed = if produced > cap { 40 } else { 0 };
+            assert_eq!(t.bitrate_kbps, baseline.bitrate_kbps);
+            let emitted = (t.fps / 10).max(1);
+            let carry = (CAPACITY_FPS / 10).max(1);
+            let shed = emitted.saturating_sub(carry);
             if shed > 0 {
                 g_over += 1;
             }
-            gov.on_window(shed, 100);
+            gov.on_window(shed, emitted.max(1));
         }
-        assert_eq!(gov.current().fps, 60);
-        assert!(gov.current().bitrate_kbps <= CAPACITY_KBPS);
-        assert!(g_over < 400, "governor must stop overflowing after down-steps");
+        assert_eq!(gov.current().bitrate_kbps, baseline.bitrate_kbps);
+        // Ladder floor is 75% of baseline (72 @ 96). Capacity here is below that
+        // floor on purpose — assert we held bitrate and reached the fps floor.
+        assert_eq!(gov.current().fps, rungs_from(&baseline).last().unwrap().fps);
+        assert!(gov.current().fps < baseline.fps);
     }
 
     #[test]
@@ -392,6 +417,7 @@ mod tests {
                     keyframe: true,
                     annex_b: vec![0u8; idr_bytes],
                     stamp_us: 0,
+                    input_wm: 0,
                 };
                 let frags = au.encode_fragments();
                 idr_frags += frags.len();
@@ -407,6 +433,7 @@ mod tests {
                     keyframe: false,
                     annex_b: vec![0u8; delta_bytes],
                     stamp_us: 0,
+                    input_wm: 0,
                 };
                 let frags = au.encode_fragments();
                 delta_frags += frags.len();

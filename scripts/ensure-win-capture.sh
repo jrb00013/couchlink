@@ -93,6 +93,13 @@ bitrate_kbps="${COUCHLINK_BITRATE_KBPS:-$bitrate_kbps}"
 # wait, so halving it halves that half. The cost is double the encode and
 # roughly double the bitrate's worth of frames, so it is opt-in.
 capture_fps="${COUCHLINK_CAPTURE_FPS:-60}"
+# Encode metronome: Ricardo's amazing night was 5Mbps@~60. Auto-raising to 90
+# at the same bitrate halved bits/frame and made motion feel behind/stuttery.
+# Capture may still run 120 (handoff wait); encode stays 60 unless overridden.
+if [[ -z "${COUCHLINK_ENCODE_FPS:-}" ]]; then
+  export COUCHLINK_ENCODE_FPS=60
+fi
+encode_fps="${COUCHLINK_ENCODE_FPS:-$capture_fps}"
 source_mode="${COUCHLINK_CAPTURE_SOURCE:-picker}"
 window_title="${COUCHLINK_CAPTURE_WINDOW:-}"
 if [[ -n "$window_title" ]]; then
@@ -118,8 +125,45 @@ if [[ "${COUCHLINK_SKIP_WIN_CAPTURE_BUILD:-0}" != "1" ]]; then
   fi
 fi
 
+# Serialize launches — host maybe_respawn and start-host both call this and
+# used to race into two win-capture.exe fighting over Hyper-V.
+_LOCK=/tmp/couchlink-win-capture.lock
+_COOL=/tmp/couchlink-win-capture.cooling
+exec 9>"$_LOCK"
+if ! flock -n 9; then
+  echo "==> Windows capture launch already in progress — waiting"
+  flock 9
+fi
+
+# Recent launch still settling (Start-Process is async) — do not stack another.
+# FORCE respawn skips cooling: we intentionally just killed a stuck process.
+_force="${COUCHLINK_WIN_CAPTURE_FORCE:-0}"
+if [[ "$_force" != "1" && -f "$_COOL" ]]; then
+  _cool_age=$(( $(date +%s) - $(stat -c %Y "$_COOL" 2>/dev/null || echo 0) ))
+  if [[ "$_cool_age" -lt 20 ]]; then
+    echo "==> Windows capture launched ${_cool_age}s ago — leaving it alone"
+    exit 0
+  fi
+fi
+
+# One healthy capture is enough. >1 means a race — kill and relaunch one.
+# FORCE=1 (host maybe_respawn): the process may be alive but stuck on a
+# half-open Hyper-V client, so "already running" would leave the host dark.
+if command -v tasklist.exe >/dev/null 2>&1; then
+  _cap_n=$(tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
+    | grep -ci couchlink-win-capture || true)
+  if [[ "$_force" != "1" && "$_cap_n" -eq 1 ]]; then
+    echo "==> Windows capture already running (source=$source_mode) — leaving it alone"
+    exit 0
+  fi
+  if [[ "$_force" == "1" && "$_cap_n" -ge 1 ]]; then
+    echo "==> force-respawn: killing stuck win-capture ($_cap_n process(es))"
+  fi
+fi
+
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
+  sleep 0.5
 fi
 
 # The picker UI lives on the capture exe, not this wrapper. Keep the
@@ -156,48 +200,47 @@ task_name="couchlink-win-capture"
 _ps_style="Hidden"
 [[ "$source_mode" == "picker" ]] && _ps_style="Normal"
 psw -Command "
-  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$capture_fps','-BitrateKbps','$bitrate_kbps')
+  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$encode_fps','-BitrateKbps','$bitrate_kbps')
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
-  \$quoted = (\$argList | ForEach-Object { if (\$_ -match '\s') { '\"' + \$_ + '\"' } else { \$_ } }) -join ' '
+  # Start-Process flattens -ArgumentList arrays WITHOUT quoting, so a window
+  # title like 'Marvel - Ultimate Alliance' becomes argv tokens
+  # ('Marvel','-','Ultimate','Alliance') and clap dies on unexpected '-'.
+  # One quoted command string keeps the title intact.
+  \$quoted = (\$argList | ForEach-Object { if (\$_ -match '\s') { '\"' + (\$_ -replace '\"','\"\"') + '\"' } else { \$_ } }) -join ' '
   \$localDir = Join-Path \$env:LOCALAPPDATA 'couchlink\bin'
   New-Item -ItemType Directory -Force -Path \$localDir | Out-Null
-  \$launcher = Join-Path \$localDir 'run-capture.ps1'
-  \$utf8 = New-Object System.Text.UTF8Encoding \$false
-  [System.IO.File]::WriteAllText(\$launcher, \"powershell.exe -NoProfile -WindowStyle $_ps_style -ExecutionPolicy Bypass \$quoted\", \$utf8)
-  if ('$source_mode' -eq 'picker') {
-    # Interactive first launch: show the picker on the desktop now.
-    Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$argList
-  } else {
-    schtasks.exe /Delete /TN '$task_name' /F 2>\$null | Out-Null
-    \$created = schtasks.exe /Create /TN '$task_name' /SC ONCE /ST 00:00 /RL LIMITED /IT /F \`
-      /TR \"powershell.exe -NoProfile -WindowStyle $_ps_style -ExecutionPolicy Bypass -File \$launcher\" 2>&1
-    if (\$LASTEXITCODE -ne 0) {
-      Write-Host \"schtasks create failed, falling back to Start-Process: \$created\"
-      Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$argList
-    } else {
-      schtasks.exe /Run /TN '$task_name' | Out-Null
-    }
-  }
+  \$launcher = Join-Path \$localDir 'run-capture.cmd'
+  \$lines = @('@echo off', ('powershell.exe -NoProfile -WindowStyle $_ps_style -ExecutionPolicy Bypass ' + \$quoted))
+  Set-Content -Path \$launcher -Value \$lines -Encoding ASCII
+  Start-Process -WindowStyle $_ps_style powershell.exe -ArgumentList \$quoted
 " >/dev/null
 
-echo "==> Windows capture launched (source=$source_mode — choose a window in the picker if it appears)"
+# Hold off concurrent ensure/respawn until the exe is visible (or we give up).
+touch "$_COOL"
+
+if [[ "$source_mode" == "window" && -n "$window_title" ]]; then
+  echo "==> Windows capture launched (source=window, title~='$window_title')"
+else
+  echo "==> Windows capture launched (source=$source_mode — choose a window in the picker if it appears)"
+fi
 # Confirm the capture process actually came up. schtasks /Run can succeed while
 # the task's PowerShell exits immediately (bad args, missing exe), and the host
 # then sits without video — or, before the non-blocking connect fix, blocked
 # forever waiting for a socket that never appears.
 if command -v tasklist.exe >/dev/null 2>&1; then
   for _ in $(seq 1 25); do
-    if tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
-      | grep -qi couchlink-win-capture; then
+    _cap_n=$(tasklist.exe /FI "IMAGENAME eq couchlink-win-capture.exe" 2>/dev/null \
+      | grep -ci couchlink-win-capture || true)
+    if [[ "$_cap_n" -eq 1 ]]; then
       exit 0
     fi
-    # Window-mode launcher is the PowerShell retry loop until the title exists;
-    # that still counts as "capture is starting" for the picker/desktop case we
-    # care about here.
-    if tasklist.exe /FI "IMAGENAME eq powershell.exe" 2>/dev/null \
-      | grep -qi powershell; then
-      # Can't tell which powershell — keep waiting briefly for the exe.
-      :
+    if [[ "$_cap_n" -gt 1 ]]; then
+      # Race leftover — keep the newest by killing all and failing closed;
+      # next respawn (20s) will start a single instance under the lock.
+      taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
+      rm -f "$_COOL"
+      echo "warning: multiple win-capture.exe detected — cleared; will retry on next respawn" >&2
+      exit 0
     fi
     sleep 0.2
   done

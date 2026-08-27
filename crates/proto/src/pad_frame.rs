@@ -9,9 +9,11 @@ pub const PAD_CHANNEL: &str = "pad";
 /// ASCII magic.
 pub const PAD_MAGIC: &[u8; 4] = b"CLPD";
 pub const PAD_VERSION: u8 = 1;
-/// Packed frame size (header + body).
+pub const PAD_VERSION_V2: u8 = 2;
 /// magic(4)+ver(1)+seq(4)+buttons(4)+sticks/triggers(6)+gyro(6)+touch(5)+reserved(1)
 pub const PAD_FRAME_LEN: usize = 31;
+/// v2 adds client_ts_ms (u32 LE) after the v1 body.
+pub const PAD_FRAME_LEN_V2: usize = 35;
 
 #[derive(Debug, Error)]
 pub enum PadCodecError {
@@ -41,6 +43,8 @@ pub struct PadFrame {
     pub touch_active: u8,
     pub touch_x: u16,
     pub touch_y: u16,
+    /// Browser `performance.now()` at send (ms, u32 wrap ok). 0 = v1 / unknown.
+    pub client_ts_ms: u32,
 }
 
 /// Host → player haptic / lightbar / adaptive-trigger feedback (JSON on same channel).
@@ -92,9 +96,9 @@ pub mod buttons {
 
 impl PadFrame {
     pub fn encode(&self, out: &mut BytesMut) {
-        out.reserve(PAD_FRAME_LEN);
+        out.reserve(PAD_FRAME_LEN_V2);
         out.put_slice(PAD_MAGIC);
-        out.put_u8(PAD_VERSION);
+        out.put_u8(PAD_VERSION_V2);
         out.put_u32_le(self.seq);
         out.put_u32_le(self.buttons);
         out.put_u8(self.lx);
@@ -109,8 +113,8 @@ impl PadFrame {
         out.put_u8(self.touch_active);
         out.put_u16_le(self.touch_x);
         out.put_u16_le(self.touch_y);
-        // pad to fixed size with reserved
         out.put_u8(0);
+        out.put_u32_le(self.client_ts_ms);
     }
 
     pub fn decode(mut buf: &[u8]) -> Result<Self, PadCodecError> {
@@ -123,10 +127,7 @@ impl PadFrame {
             return Err(PadCodecError::BadMagic);
         }
         let ver = buf.get_u8();
-        if ver != PAD_VERSION {
-            return Err(PadCodecError::BadVersion(ver));
-        }
-        Ok(Self {
+        let frame = PadFrame {
             seq: buf.get_u32_le(),
             buttons: buf.get_u32_le(),
             lx: buf.get_u8(),
@@ -141,7 +142,26 @@ impl PadFrame {
             touch_active: buf.get_u8(),
             touch_x: buf.get_u16_le(),
             touch_y: buf.get_u16_le(),
-        })
+            client_ts_ms: 0,
+        };
+        match ver {
+            PAD_VERSION => {
+                let _reserved = buf.get_u8();
+                Ok(frame)
+            }
+            PAD_VERSION_V2 => {
+                if buf.len() < 5 {
+                    return Err(PadCodecError::Short);
+                }
+                let _reserved = buf.get_u8();
+                let client_ts_ms = buf.get_u32_le();
+                Ok(PadFrame {
+                    client_ts_ms,
+                    ..frame
+                })
+            }
+            v => Err(PadCodecError::BadVersion(v)),
+        }
     }
 
     pub fn neutral() -> Self {
@@ -152,5 +172,57 @@ impl PadFrame {
             ry: 128,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+
+    #[test]
+    fn v1_31_byte_frame_decodes_with_zero_client_ts() {
+        let mut legacy = BytesMut::new();
+        legacy.put_slice(PAD_MAGIC);
+        legacy.put_u8(PAD_VERSION);
+        let f = PadFrame {
+            seq: 7,
+            buttons: buttons::CROSS,
+            ..PadFrame::neutral()
+        };
+        legacy.put_u32_le(f.seq);
+        legacy.put_u32_le(f.buttons);
+        legacy.put_u8(f.lx);
+        legacy.put_u8(f.ly);
+        legacy.put_u8(f.rx);
+        legacy.put_u8(f.ry);
+        legacy.put_u8(f.l2);
+        legacy.put_u8(f.r2);
+        legacy.put_i16_le(f.gx);
+        legacy.put_i16_le(f.gy);
+        legacy.put_i16_le(f.gz);
+        legacy.put_u8(f.touch_active);
+        legacy.put_u16_le(f.touch_x);
+        legacy.put_u16_le(f.touch_y);
+        legacy.put_u8(0);
+        assert_eq!(legacy.len(), PAD_FRAME_LEN);
+        let back = PadFrame::decode(&legacy).unwrap();
+        assert_eq!(back.seq, 7);
+        assert_eq!(back.client_ts_ms, 0);
+    }
+
+    #[test]
+    fn v2_round_trips_client_ts_ms() {
+        let f = PadFrame {
+            seq: 9,
+            client_ts_ms: 1_234_567,
+            ..PadFrame::neutral()
+        };
+        let mut buf = BytesMut::new();
+        f.encode(&mut buf);
+        assert_eq!(buf.len(), PAD_FRAME_LEN_V2);
+        let back = PadFrame::decode(&buf).unwrap();
+        assert_eq!(back.client_ts_ms, 1_234_567);
+        assert_eq!(back.seq, 9);
     }
 }

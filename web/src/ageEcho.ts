@@ -23,9 +23,9 @@ export function encodeAgeEcho(e: AgeEcho): string {
   });
 }
 
-/** Once per access-unit seq. stampUs 0 is v2 / unknown — skip. */
+/** Once per access-unit / paint seq. stampUs 0 = present-path (recv→paint) age. */
 export function echoAgeOnce(e: AgeEcho, send: (json: string) => void): boolean {
-  if (!e.stampUs || echoed.has(e.seq)) return false;
+  if (echoed.has(e.seq)) return false;
   echoed.add(e.seq);
   if (echoed.size > 256) {
     const first = echoed.values().next().value;

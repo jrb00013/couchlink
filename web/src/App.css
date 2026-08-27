@@ -799,6 +799,21 @@ button.ghost {
   line-height: 1.4;
 }
 
+.dt-note {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.dt-wow-pass .dt-value {
+  color: #3d9a6a;
+}
+
+.dt-wow-fail .dt-value {
+  color: #c45c5c;
+}
+
 .is-fullscreen .join,
 .is-fullscreen .top {
   display: none;

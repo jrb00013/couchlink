@@ -175,6 +175,21 @@ pub enum SignalMessage {
         age_p50_ms: f64,
         #[serde(default)]
         age_p95_ms: f64,
+        /// Frames received from win-capture / Hyper-V bridge in the last window.
+        #[serde(default)]
+        frames_received: u64,
+        /// Hyper-V handoff wait (ms) averaged over the window. Zero on TCP/local.
+        #[serde(default)]
+        handoff_wait_ms: f64,
+        /// Hyper-V handoff copy (ms) averaged over the window.
+        #[serde(default)]
+        handoff_copy_ms: f64,
+        /// Hyper-V handoff wait p95 (ms) — SHM gate input.
+        #[serde(default)]
+        handoff_wait_p95_ms: f64,
+        /// True when `shm_gate_trips(handoff_wait_p95_ms)`.
+        #[serde(default)]
+        shm_gate_trips: bool,
     },
 }
 
@@ -211,9 +226,10 @@ impl StreamPreset {
         width: 1280,
         height: 720,
         fps: 60,
-        // 10 Mbps × 3 friends blew the push budget even with IDR-only RTP.
-        // 5 Mbps holds 60 fps on 3-friend WAN; governor climbs back if clean.
-        bitrate_kbps: 5_000,
+        // Moonlight-class bits/frame. 5 Mbps held WAN under dual CLVD but pans
+        // still stuttered; hybrid now drops CLVD video after promote so 10 Mbps
+        // RTP-only is the production default for 720p60 motion.
+        bitrate_kbps: 10_000,
     };
     pub const P720_30: Self = Self {
         width: 1280,

@@ -12,6 +12,7 @@ export function usePlayerCallbacks(handlers: {
   onState: (s: ConnectionState, detail?: string) => void;
   onVideo: (stream: MediaStream) => void;
   onVideoAccessUnit?: (au: VideoAccessUnit, recvMs: number) => void;
+  onInputWm?: (wm: number, recvMs: number) => void;
   onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: PlayerCallbacks["onStreamInfo"];
   onHostStats?: PlayerCallbacks["onHostStats"];
@@ -32,6 +33,7 @@ export function usePlayerCallbacks(handlers: {
       onVideo: (stream) => handlersRef.current.onVideo(stream),
       onVideoAccessUnit: (au, recvMs) =>
         handlersRef.current.onVideoAccessUnit?.(au, recvMs),
+      onInputWm: (wm, recvMs) => handlersRef.current.onInputWm?.(wm, recvMs),
       onPresentPath: (path, detail) =>
         handlersRef.current.onPresentPath?.(path, detail),
       onStreamInfo: (info) => handlersRef.current.onStreamInfo?.(info),

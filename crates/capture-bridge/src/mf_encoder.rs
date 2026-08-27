@@ -678,9 +678,11 @@ unsafe fn widestring_to_string(p: PWSTR, len: u32) -> String {
     s
 }
 
-/// Keep encode latency low while giving the rate controller enough bits for UI text.
+/// Keep encode latency low with a Moonlight-class CBR tune.
+///
+/// Do **not** set a 1-frame VBV — NVENC then starves motion frames and the
+/// picture goes full macroblock. B-frames stay off (reorder = lag).
 unsafe fn apply_codec_api_defaults(api: &ICodecAPI, bitrate_bps: u32) {
-    // Low-latency mode must stay on — quality bumps must not reintroduce encoder delay.
     let _ = set_codec_u32(api, &CODECAPI_AVLowLatencyMode, 1);
     let _ = set_codec_u32(
         api,
@@ -688,9 +690,14 @@ unsafe fn apply_codec_api_defaults(api: &ICodecAPI, bitrate_bps: u32) {
         eAVEncCommonRateControlMode_CBR.0 as u32,
     );
     let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, bitrate_bps);
-    // 0 = fastest/worst, 100 = slowest/best. Mid-high keeps text readable without
-    // a big latency cliff on NVENC/QuickSync.
-    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQualityVsSpeed, 60);
+    // Slight peak headroom so motion frames are not crushed under strict CBR.
+    let peak = bitrate_bps.saturating_mul(12) / 10;
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMaxBitRate, peak);
+    // ~250ms VBV — enough for motion quality, still low-latency gaming.
+    let vbv_bits = bitrate_bps / 4;
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonBufferSize, vbv_bits);
+    let _ = set_codec_u32(api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+    let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQualityVsSpeed, 50);
 }
 
 unsafe fn set_codec_u32(api: &ICodecAPI, key: &GUID, value: u32) -> Result<()> {
