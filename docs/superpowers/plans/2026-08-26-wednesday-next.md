@@ -1,10 +1,22 @@
 # Wednesday 2026-08-26 — what’s next
 
 **Branch:** `fix/hybrid-clvd-idr-photon` (PR #50 → PR #48 `feat/amazing-interactive-latency`)  
-**HEAD at leaveoff:** `3c4f229`  
-**Written:** 2026-08-24  
+**HEAD:** `bd992be`  
+**Written:** 2026-08-24 · **live update:** 2026-08-26  
 
 **Mission Wednesday:** One clean live Chrome scrape that **beats Ricardo on all axes** and **clears beat-self** — especially **S_p50 ≤ 5** — without blackouts and without walking back hybrid RTP + thin CLVD.
+
+### Live night (2026-08-26) — root causes, not band-aids
+
+Scrape held greens (push~120, paint~116, shed 0%, 5 Mbps, wm live) but **Φ≈240 / S≈190** and one friend saw a **black stage**.
+
+| Symptom | Root cause | Fix landed |
+|---------|------------|------------|
+| Φ≈240 / age_p95≈225 while fps green | CLVD SCTP `await` inside `join_all` HOL-blocked every peer | RTP-first + **CLVD budget** (P 6ms / IDR 48ms); densify on slack |
+| Black stage | MSTC delivered ink-black frames; canvas stayed up | Runtime black-luma detect → `<video>` fallback |
+| Opera UA skip | Band-aid | **Removed** in `bd992be` — fix the path |
+
+Hard-refresh after redeploy; re-scrape for beat-self S≤5.
 
 ---
 
@@ -27,6 +39,8 @@ Authority: real Chrome `window.__couchlinkRicardo()` — not Playwright.
 
 | Commit | Why it matters |
 |--------|----------------|
+| `bd992be` | CLVD HOL-block budget + MSTC black→video (no UA hardcode) |
+| `ee2295e` | RTP-first + densify CLVD + honest Φ clock (`perfSent`) |
 | `bd21765` | CLVD IDR 256 KiB + hybrid bootstrap PLI (fixes RTP-green / 0 wm) |
 | `3656bbc` | Bootstrap PLI no longer burns on throttle; hybrid PLI = 1 IDR |
 | `3c4f229` | DC-open soft IDR + incomplete-IDR dual retry; `joel-prep.sh` |
