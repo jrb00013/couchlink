@@ -761,14 +761,11 @@ impl WebRtcHost {
             let mut trickle_skip = false;
             let dc_open = self.video_dc.ready_state()
                 == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open;
-            // Thin by default; densify to every AU when SCTP is slack so WC/
-            // input_wm (S_p50) can catch RTP — dual-full only when buffer is empty.
+            // Thin CLVD (IDR + every 2nd) — densify-on-slack flooded SCTP and,
+            // with WC still decoding, made sessions choppy vs Ricardo's RTP night.
+            // input_wm samples once-per-wm on the client; thin rate is enough.
             let thin_ok = should_send_clvd(keyframe, path, next_seq);
-            let slack = dc_open
-                && !keyframe
-                && send_rtp
-                && self.video_dc.buffered_amount().await < VIDEO_DC_MAX_BUFFERED / 2;
-            if !thin_ok && !slack {
+            if !thin_ok {
                 return (false, false);
             }
             // P-frames stay inside the 24 KiB wow-bar; IDRs use the larger

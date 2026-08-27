@@ -1,9 +1,9 @@
 /**
- * Input→photon (est.): visible paint time minus pad send for the frame's input watermark.
+ * Input→photon (est.): visible paint − pad send for a frame's `input_wm`.
  *
- * Hybrid: CLVD carries `input_wm`; felt Φ is measured at **RTP canvas paint** (what
- * the friend sees), not WebCodecs sidecar decode — that lagged ~50ms and made
- * sessions feel worse than Ricardo's canvas night while RTP age was ~0.2ms.
+ * Hybrid (Ricardo canvas night): RTP owns the picture; CLVD only carries wm.
+ * Sample **once per distinct wm** at the next RTP paint — never reuse one wm
+ * across many paints (that inflated Φ with paint fps). WC does not own Φ/age.
  */
 
 import { surplusMs } from "./latencyBudget";

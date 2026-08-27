@@ -205,9 +205,12 @@ export default function App() {
   const promotedRef = useRef(false);
   /** WC stamps input_wm in the background; RTP stays the visible high-fps present. */
   const softwarePhotonRef = useRef(false);
-  /** Latest CLVD input_wm (+ recv time) — felt Φ is RTP paint vs this wm, not WC decode. */
-  const lastClvdWmRef = useRef(0);
-  const lastClvdWmAtRef = useRef(0);
+  /**
+   * Felt Φ (Ricardo canvas night): sample once per new CLVD `input_wm` at the
+   * next RTP paint — never reuse one wm across many paints (that blew Φ to 90–280).
+   */
+  const pendingPhotonWmRef = useRef(0);
+  const lastSampledWmRef = useRef(0);
   const rtpFallbackTimer = useRef<number | null>(null);
   const autoStarted = useRef(false);
   const pendingStreamRef = useRef<MediaStream | null>(null);
@@ -314,13 +317,9 @@ export default function App() {
       wcRef.current.setFirstPaintHandler(() => {
         promoteWebcodecsPresent();
       });
-      wcRef.current.setPaintedHandler((a) => {
-        // Hybrid sidecar: do NOT age_echo or own Φ. WC decode lag (~50ms+) was
-        // poisoning host age_p50 and S_p50 while Ricardo's eyes were on RTP
-        // (present age ~0.2ms). Felt photon = RTP paint + CLVD input_wm below.
-        if (softwarePhotonRef.current) return;
-        notePhotonPaint(a.paintMs, a.inputWm);
-        playerRef.current?.echoPaintedAge(a);
+      wcRef.current.setPaintedHandler((_a) => {
+        // Hybrid: WC is bootstrap-only. Age + Φ live on RTP (Ricardo-feel).
+        // Never age_echo from WC — that used to pin age_p50 ~57ms.
       });
       wcRef.current.setStallHandler(() => {
         // Exclusive-WC stall only (photon sidecar never calls this).
@@ -467,12 +466,12 @@ export default function App() {
           });
         });
         viewRef.current.setPaintedHandler((a) => {
-          // Felt input→photon: visible RTP paint clock + latest CLVD watermark.
-          // Matches Ricardo's amazing night (canvas present), not WC sidecar lag.
-          const wm = lastClvdWmRef.current;
-          const wmAt = lastClvdWmAtRef.current;
-          if (wm && a.paintMs - wmAt < 100) {
-            notePhotonPaint(a.paintMs, wm);
+          // Once per distinct wm — consume pending so Φ cannot climb with paint fps.
+          const pending = pendingPhotonWmRef.current;
+          if (pending) {
+            notePhotonPaint(a.paintMs, pending);
+            lastSampledWmRef.current = pending;
+            pendingPhotonWmRef.current = 0;
           }
           playerRef.current?.echoPaintedAge({
             seq: a.seq,
@@ -613,8 +612,8 @@ export default function App() {
         webcodecsActiveRef.current = false;
         promotedRef.current = false;
         softwarePhotonRef.current = false;
-        lastClvdWmRef.current = 0;
-        lastClvdWmAtRef.current = 0;
+        pendingPhotonWmRef.current = 0;
+        lastSampledWmRef.current = 0;
         sawAuRef.current = false;
         stalledRef.current = false;
         resetInputPhoton();
@@ -637,9 +636,15 @@ export default function App() {
     onVideoAccessUnit: (au, recvMs) => {
       sawAuRef.current = true;
       if (au.inputWm) {
-        lastClvdWmRef.current = au.inputWm >>> 0;
-        lastClvdWmAtRef.current = recvMs;
+        const wm = au.inputWm >>> 0;
+        // Queue one sample for the next RTP paint (felt path). Skip duplicates.
+        if (wm && wm !== lastSampledWmRef.current && wm !== pendingPhotonWmRef.current) {
+          pendingPhotonWmRef.current = wm;
+        }
       }
+      // After promote: stop WC decode — dual decode was the choppy regression.
+      // CLVD still delivers input_wm above; RTP owns paint (amazing night).
+      if (softwarePhotonRef.current) return;
       if (!webcodecsActiveRef.current) {
         if (!ensureWebCodecs()) return;
       }

@@ -440,6 +440,10 @@ export class WebCodecsCanvasView {
   }
 
   push(au: VideoAccessUnit, recvMs = performance.now()) {
+    // Photon sidecar after first paint: App stops feeding us; belt-and-suspenders
+    // so a stray push never runs dual decode beside RTP (choppy feel).
+    if (this.photonSidecar && this.paintedTotal > 0) return;
+
     const dec = this.decoder;
     if (!dec || dec.state === "closed") return;
 
