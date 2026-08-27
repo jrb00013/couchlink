@@ -803,8 +803,14 @@ async fn main() -> Result<()> {
             // wobble, and measured buffer grew to ~100ms during motion. Encoding on a
             // metronome makes delivery uniform, which is what lets the buffer stay small.
             _ = cadence.tick() => {
-                if webrtc_peer::take_expedite() {
+                // Expedite skips the Windows encode sleep. Fine for raw/idle wake;
+                // on pre-encoded it destroys CFR (pad@500Hz → encode~87 irregular)
+                // while input already feels 1:1 on its own DC — Ricardo "video choppy,
+                // stick great". Never expedite the GPU metronome.
+                if !capturer.is_preencoded() && webrtc_peer::take_expedite() {
                     capturer.write_expedite();
+                } else {
+                    let _ = webrtc_peer::take_expedite();
                 }
                 // Any viewer that lost sync asks for a keyframe over RTCP.
                 // Answering immediately turns a multi-second glitch into a single
