@@ -538,11 +538,13 @@ export class CouchlinkPlayer {
     if (this.mediaRecoverTimer || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (this.mediaHealthy) {
+    const isBlip = this.mediaHealthy && reason.includes("disconnected");
+    if (isBlip) {
       clog("ICE blip while video healthy — waiting before recover", reason);
+    } else {
+      this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     }
     cwarn("scheduling media recover", reason);
-    this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     this.mediaRecoverTimer = window.setTimeout(() => {
       this.mediaRecoverTimer = null;
       this.mediaHealthy = false;
@@ -643,6 +645,9 @@ export class CouchlinkPlayer {
           clearTimeout(this.mediaRecoverTimer);
           this.mediaRecoverTimer = null;
         }
+        if (this.gotVideoTrack || this.webcodecsPath) {
+          this.cb.onState("connected");
+        }
       } else if (pc.connectionState === "disconnected") {
         // Transient loss — schedule a recover with the full grace period.
         // If ICE self-heals the timer will be cancelled before it fires.
@@ -662,6 +667,9 @@ export class CouchlinkPlayer {
           clog("ICE reconnected — cancelling media recover timer");
           clearTimeout(this.mediaRecoverTimer);
           this.mediaRecoverTimer = null;
+        }
+        if (this.gotVideoTrack || this.webcodecsPath) {
+          this.cb.onState("connected");
         }
       } else if (pc.iceConnectionState === "disconnected") {
         cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
