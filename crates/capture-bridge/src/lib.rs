@@ -15,6 +15,8 @@ pub mod mf_encoder;
 #[cfg(windows)]
 pub mod hyperv;
 
+pub mod audio;
+
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
 
