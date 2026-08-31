@@ -885,6 +885,7 @@ dependencies = [
  "tracing-subscriber",
  "windows 0.62.2",
  "windows-capture",
+ "x11rb",
 ]
 
 [[package]]
