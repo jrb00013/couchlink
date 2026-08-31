@@ -899,7 +899,11 @@ pub fn bgra_to_nv12(bgra: &[u8], width: usize, height: usize, out: &mut Vec<u8>)
             let b = px[0] as i32;
             let g = px[1] as i32;
             let r = px[2] as i32;
-            *out = ((54 * r + 183 * g + 18 * b + 128) >> 8).clamp(0, 255) as u8;
+            // Coefficients must sum to 256 (the >> 8 scale) or pure white
+            // undershoots 255 by the shortfall. 54+183+18=255 was a real bug
+            // here — bumped blue (least visually sensitive channel) to 19 to
+            // close the gap.
+            *out = ((54 * r + 183 * g + 19 * b + 128) >> 8).clamp(0, 255) as u8;
         }
         if y % 2 != 0 {
             continue;
