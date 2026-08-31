@@ -16,6 +16,7 @@ import { send, type SignalMessage } from "./proto";
 import { canUseWebCodecs } from "./webCodecsCanvas";
 import { echoAgeOnce, type AgeEcho } from "./ageEcho";
 import { notePadSent } from "./inputPhoton";
+import { attachAudioTrack, pinAudioJitterBuffer } from "./audio";
 
 export type ConnectionState =
   | "disconnected"
@@ -705,6 +706,36 @@ export class CouchlinkPlayer {
 
     pc.ontrack = (ev) => {
       const track = ev.track;
+      // Audio is a separate RTP pipe — attach immediately, pin its jitter buffer,
+      // and do NOT touch video present path / gotVideoTrack.
+      if (track.kind === "audio") {
+        const audioReceiver = ev.receiver as RTCRtpReceiver & {
+          jitterBufferTarget?: number | null;
+          playoutDelayHint?: number | null;
+        };
+        pinAudioJitterBuffer(audioReceiver);
+        const audioEl = (window as unknown as { __couchlinkAudioEl?: HTMLAudioElement }).__couchlinkAudioEl;
+        if (audioEl) {
+          attachAudioTrack(track, audioEl);
+        } else {
+          // No element yet (App not mounted) — store stream for App to pick up;
+          // still log so we can probe in chrome://webrtc-internals.
+          clog("audio track received — no audio element yet, holding stream", { id: track.id });
+          (this as unknown as { pendingAudioTrack?: MediaStreamTrack }).pendingAudioTrack = track;
+        }
+        // Ensure autoplay after next user gesture if blocked.
+        const once = () => {
+          const el = (window as unknown as { __couchlinkAudioEl?: HTMLAudioElement }).__couchlinkAudioEl;
+          if (el && el.srcObject) el.play().catch(() => {});
+          window.removeEventListener("click", once);
+          window.removeEventListener("touchstart", once);
+          window.removeEventListener("keydown", once);
+        };
+        window.addEventListener("click", once, { once: true });
+        window.addEventListener("touchstart", once, { once: true });
+        window.addEventListener("keydown", once, { once: true });
+        return;
+      }
       // Chrome buffers received video before playing it — typically 100-200ms of
       // pure added input lag that no host-side measurement can see. For a co-play
       // stream, being a frame behind beats being smooth and late, so ask for the

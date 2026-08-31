@@ -245,6 +245,30 @@ async fn push_to_all(
     (any, webrtc_peer::governor_frame_shed(&fates))
 }
 
+/// Push one Opus frame to every slot on the separate RTP audio pipe.
+///
+/// Fire-and-forget: 10 ms peer budget, never `request_keyframe`, never
+/// `dropped_frames` / `link_gov`. Fan-out is concurrent so one slow peer
+/// cannot HOL-block the others.
+async fn push_audio_to_all(
+    slots: &Arc<Mutex<HashMap<u8, PlayerConn>>>,
+    opus: Vec<u8>,
+    duration: Duration,
+) {
+    let guard = slots.lock().await;
+    if guard.is_empty() {
+        return;
+    }
+    let futs = guard.iter().map(|(_, conn)| {
+        let data = opus.clone();
+        let host = Arc::clone(&conn.host);
+        async move {
+            let _timed_out = host.push_opus(data, duration).await;
+        }
+    });
+    futures_util::future::join_all(futs).await;
+}
+
 /// Drain a rejoin burst from the inbound queue. One reload (or a double-tab /
 /// rapid reload) can enqueue several `PeerJoined`s back-to-back; rebuild once
 /// per slot for the newest epoch, and keep every non-join message that arrived
@@ -958,6 +982,11 @@ async fn main() -> Result<()> {
                             capture_ok_announced = Some(true);
                             let _ = signal_out.send(stream_info_message(&preset, Some(true), None));
                         }
+                        // Separate audio pipe — drain any pending Opus without blocking video cadence.
+                        // Never touches dropped_frames / link_gov.
+                        if let Some(opus) = capturer.try_take_audio() {
+                            push_audio_to_all(&slots, opus, Duration::from_millis(20)).await;
+                        }
                         continue;
                     }
                     capture::Captured::Bgra(b) => b,
@@ -1139,6 +1168,10 @@ async fn main() -> Result<()> {
                             idle_frames = 0;
                             dropped_frames = 0;
                         }
+                    }
+                    // Separate audio pipe — one Opus drain per cadence tick, isolated from video governor.
+                    if let Some(opus) = capturer.try_take_audio() {
+                        push_audio_to_all(&slots, opus, Duration::from_millis(20)).await;
                     }
                 }
             }
