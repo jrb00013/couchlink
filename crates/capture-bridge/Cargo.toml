@@ -11,11 +11,22 @@ path = "src/lib.rs"
 name = "couchlink-win-capture"
 path = "src/bin/win_capture.rs"
 
+[[bin]]
+name = "couchlink-capture-bridge-linux"
+path = "src/bin/linux_record.rs"
+required-features = []
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[target.'cfg(not(windows))'.dependencies]
+# Reuses the same x11rb crate crates/host already links (see
+# crates/host/src/capture/cursor_x11.rs) so this only needs one real X11
+# connection implementation across the workspace.
+x11rb = { version = "0.13", default-features = true, features = ["shm"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-capture = "2.0.0"
