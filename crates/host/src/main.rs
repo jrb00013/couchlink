@@ -10,6 +10,7 @@ mod latency;
 mod latency_live_sim;
 mod link_gov;
 mod motion;
+mod nat_punch;
 mod ricardo_playable_ab;
 mod scale;
 mod signaling_client;
@@ -520,6 +521,31 @@ async fn main() -> Result<()> {
             .filter(|p| p.is_file())
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|c| c.contains("[Peer]") && c.contains("Endpoint"))
+    };
+    // Opt-in: ask the NAT itself what public endpoint the WireGuard socket
+    // actually gets, instead of trusting the static config's Endpoint (which
+    // setup-wireguard.sh can only guess at ahead of time — see nat_punch.rs).
+    // Off by default so nobody's working static-endpoint setup changes
+    // behavior without asking; falls straight back to the static conf on any
+    // failure (symmetric NAT, no route to a STUN server, unparseable config).
+    let wg_conf = if std::env::var("COUCHLINK_WG_PUNCH").as_deref() == Ok("1") {
+        wg_conf.map(|conf| {
+            let port = nat_punch::endpoint_port_from_conf(&conf).unwrap_or(51820);
+            match nat_punch::discover_and_rewrite(&conf, port, &nat_punch::DEFAULT_STUN_SERVERS) {
+                Some(rewritten) => {
+                    tracing::info!("WireGuard endpoint discovered via STUN for invite");
+                    rewritten
+                }
+                None => {
+                    tracing::warn!(
+                        "STUN endpoint discovery failed or NAT is symmetric — using static wg0-player.conf Endpoint"
+                    );
+                    conf
+                }
+            }
+        })
+    } else {
+        wg_conf
     };
     let join = invite::player_invite_url(
         &public_http,
