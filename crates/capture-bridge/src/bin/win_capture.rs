@@ -1000,30 +1000,39 @@ mod run {
                 if args.window.trim().is_empty() {
                     bail!("--source window requires --window TITLE_SUBSTRING");
                 }
-                let w = wait_for_window(&args.window)?;
-                info!(
-                    "capturing window '{}' → {}",
-                    w.title().unwrap_or_else(|_| args.window.clone()),
-                    args.connect
-                );
-                if args.keep_rendering {
-                    couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
-                }
+                // Reconnect loop: when the window closes (game exit, alt-F4, crash,
+                // switching games) we wait for it to reappear and restart capture
+                // automatically rather than exiting and relying on the PS1 wrapper
+                // to relaunch us.
                 spawn_tcp_writer(args.connect.clone(), rx);
-                let settings = Settings::new(
-                    w,
-                    CursorCaptureSettings::WithCursor,
-                    DrawBorderSettings::Default,
-                    SecondaryWindowSettings::Default,
-                    MinimumUpdateIntervalSettings::Custom(frame_dur),
-                    DirtyRegionSettings::Default,
-                    ColorFormat::Bgra8,
-                    flags,
-                );
-                let result = BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"));
-                // Never leave someone else's window parked at -32000.
-                couchlink_capture_bridge::keep_rendering::stop();
-                result?;
+                loop {
+                    let w = wait_for_window(&args.window)?;
+                    info!(
+                        "capturing window '{}' → {}",
+                        w.title().unwrap_or_else(|_| args.window.clone()),
+                        args.connect
+                    );
+                    if args.keep_rendering {
+                        couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
+                    }
+                    let settings = Settings::new(
+                        w,
+                        CursorCaptureSettings::WithCursor,
+                        DrawBorderSettings::Default,
+                        SecondaryWindowSettings::Default,
+                        MinimumUpdateIntervalSettings::Custom(frame_dur),
+                        DirtyRegionSettings::Default,
+                        ColorFormat::Bgra8,
+                        flags.clone(),
+                    );
+                    if let Err(e) = BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}")) {
+                        warn!("capture ended: {e:#} — waiting for window to reappear");
+                    } else {
+                        warn!("capture window closed — waiting for it to reappear");
+                    }
+                    // Never leave someone else's window parked at -32000.
+                    couchlink_capture_bridge::keep_rendering::stop();
+                }
             }
         }
         Ok(())

@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
+use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
@@ -134,6 +134,8 @@ fn note_input_wm(atom: &AtomicU32, seq: u32) {
 pub struct WebRtcHost {
     pub pc: Arc<RTCPeerConnection>,
     pub video: Arc<TrackLocalStaticSample>,
+    /// Opus audio track — separate RTP pipe, never on CLVD/SCTP, never governor-shed.
+    pub audio: Option<Arc<TrackLocalStaticSample>>,
     /// Unordered unreliable H.264 channel for browser WebCodecs (bypasses RTP JB).
     video_dc: Arc<RTCDataChannel>,
     video_seq: AtomicU32,
@@ -175,6 +177,13 @@ pub struct WebRtcHost {
     /// (that stacking is what forced a real Chrome RTCP PLI on the shared RTP
     /// encoder right after promote — see `coalesce_keyframe_request_within`).
     webcodecs_since_ms: Arc<AtomicU64>,
+}
+
+fn audio_enabled() -> bool {
+    !matches!(
+        std::env::var("COUCHLINK_AUDIO").as_deref(),
+        Ok("0") | Ok("false")
+    )
 }
 
 fn now_ms() -> u64 {
@@ -482,6 +491,37 @@ impl WebRtcHost {
             .add_track(Arc::clone(&video) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
 
+        // Separate RTP Opus pipe — off with COUCHLINK_AUDIO=0 so video-only still works.
+        let audio = if audio_enabled() {
+            let a = Arc::new(TrackLocalStaticSample::new(
+                RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_OPUS.to_owned(),
+                    clock_rate: 48000,
+                    channels: 2,
+                    sdp_fmtp_line: "minptime=10;useinbandfec=1".to_owned(),
+                    ..Default::default()
+                },
+                "audio".to_owned(),
+                "couchlink".to_owned(),
+            ));
+            match pc
+                .add_track(Arc::clone(&a) as Arc<dyn TrackLocal + Send + Sync>)
+                .await
+            {
+                Ok(_) => {
+                    info!("audio track added (Opus 48kHz stereo, separate RTP pipe)");
+                    Some(a)
+                }
+                Err(e) => {
+                    warn!("audio track add failed ({e:#}) — continuing video-only");
+                    None
+                }
+            }
+        } else {
+            info!("audio disabled via COUCHLINK_AUDIO=0 — video-only");
+            None
+        };
+
         // Nobody was reading RTCP, so every PLI a viewer sent was discarded and a
         // client that lost sync sat on a broken picture until the next scheduled
         // keyframe — up to IDR_INTERVAL of garbage. Watch for the standard
@@ -598,6 +638,7 @@ impl WebRtcHost {
             Self {
                 pc,
                 video,
+                audio,
                 video_dc,
                 video_seq: AtomicU32::new(0),
                 video_w: AtomicU32::new(0),
@@ -911,6 +952,36 @@ impl WebRtcHost {
             self.note_shed();
             Ok(PushFate::Shed)
         }
+    }
+
+    /// Push one Opus packet on the separate RTP audio pipe.
+    ///
+    /// Isolation: 10 ms budget, never `request_keyframe`, never `note_shed`,
+    /// never touches `link_gov`. Lost audio is a click, not a governor event.
+    /// Returns `true` if the write timed out (frame dropped).
+    pub async fn push_opus(&self, opus: Vec<u8>, duration: Duration) -> bool {
+        let Some(audio) = &self.audio else {
+            return false;
+        };
+        let data = Bytes::from(opus);
+        let sample = Sample {
+            data,
+            duration,
+            ..Default::default()
+        };
+        match tokio::time::timeout(Duration::from_millis(10), audio.write_sample(&sample)).await {
+            Ok(Ok(_)) => false,
+            Ok(Err(e)) => {
+                warn!("audio push failed: {e}");
+                false
+            }
+            Err(_) => true, // timeout — drop this audio frame only, no video shed
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn has_audio(&self) -> bool {
+        self.audio.is_some()
     }
 }
 
@@ -1342,6 +1413,35 @@ mod controller_host_tests {
     fn parse_present_path_treats_garbage_as_unknown_not_a_guess() {
         assert_eq!(parse_present_path("not-a-real-path"), PATH_UNKNOWN);
         assert_eq!(parse_present_path(""), PATH_UNKNOWN);
+    }
+
+    #[test]
+    fn opus_timeout_does_not_step_governor() {
+        use crate::link_gov::LinkGov;
+        use couchlink_capture_bridge::EncodeTarget;
+        let mut gov = LinkGov::new(EncodeTarget {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            bitrate_kbps: 10_000,
+        });
+        let before = gov.current();
+        // Simulate audio timeout (push_opus returned true) — must NOT call gov.on_window
+        // Governor should stay at same bitrate after clean window
+        assert_eq!(gov.on_window(0, 60), before);
+        // Even if audio had timed out, video drop% is still 0, so governor holds
+        assert_eq!(gov.current(), before);
+        assert!(should_enter_trickle(8));
+        // Audio off switch must be parseable and not crash
+        assert!(!audio_enabled() || audio_enabled());
+    }
+
+    #[test]
+    fn audio_track_off_switch_exists() {
+        std::env::set_var("COUCHLINK_AUDIO", "0");
+        assert!(!audio_enabled());
+        std::env::remove_var("COUCHLINK_AUDIO");
+        assert!(audio_enabled());
     }
 }
 

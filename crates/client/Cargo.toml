@@ -36,3 +36,18 @@ arboard = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["fs"] }
+
+[dependencies.cpal]
+version = "0.15"
+optional = true
+
+[dependencies.opus]
+version = "0.3"
+optional = true
+
+[dependencies.scopeguard]
+version = "1"
+
+[features]
+default = []
+audio = ["cpal", "opus"]

@@ -6,6 +6,7 @@
 //! frame as H.264 is tens of kilobytes and costs the host nothing but a relay — so
 //! the format is negotiated per frame rather than assumed.
 
+pub mod color;
 #[cfg(windows)]
 pub mod keep_rendering;
 #[cfg(windows)]
@@ -14,6 +15,10 @@ pub mod gpu_convert;
 pub mod mf_encoder;
 #[cfg(windows)]
 pub mod hyperv;
+#[cfg(not(windows))]
+pub mod linux_capture;
+
+pub mod audio;
 
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
