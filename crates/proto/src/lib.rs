@@ -4,12 +4,14 @@
 //! for WebSocket signaling; media stays peer-to-peer. Pad state uses a compact
 //! binary frame (`CLPD`) on the WebRTC DataChannel named `pad`.
 
+pub mod age;
 pub mod pad_frame;
 pub mod video_frame;
 pub mod host_events;
 pub mod stun;
 pub mod signal;
 
+pub use age::{age_ms, parse_age_echo_json, AgeEcho};
 pub use pad_frame::{PadFeedback, PadFrame, PAD_CHANNEL, PAD_MAGIC};
 pub use video_frame::{
     annex_b_is_keyframe, VideoAccessUnit, VideoFragment, VIDEO_CHANNEL, VIDEO_MAGIC,
@@ -39,7 +41,7 @@ mod tests {
     fn answer_without_epoch_deserializes_as_zero() {
         let back = SignalMessage::from_json(r#"{"type":"answer","sdp":"v=0"}"#).unwrap();
         match back {
-            SignalMessage::Answer { sdp, epoch } => {
+            SignalMessage::Answer { sdp, epoch, .. } => {
                 assert_eq!(sdp, "v=0");
                 assert_eq!(epoch, 0);
             }
@@ -52,6 +54,7 @@ mod tests {
         let msg = SignalMessage::Answer {
             sdp: "v=0".into(),
             epoch: 7,
+            slot: 0,
         };
         let back = SignalMessage::from_json(&msg.to_json().unwrap()).unwrap();
         match back {

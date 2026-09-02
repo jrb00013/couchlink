@@ -4,7 +4,29 @@ use couchlink_proto::{Role, SignalMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
+
+/// Relay a player's message to the host. The slot in the message is the
+/// connection's *registered* slot — a client-supplied slot is never trusted,
+/// so one player can't spoof messages for another player's slot.
+fn relay_to_host(store: &SessionStore, session_id: &str, msg: &SignalMessage) {
+    if let Some(host_tx) = store.peer_tx(session_id, Role::Host) {
+        if let Ok(json) = msg.to_json() {
+            let _ = host_tx.send(json);
+        }
+    }
+}
+
+/// Broadcast the current occupancy (`PlayersStatus`) to the host and every
+/// connected player, so each client can render "N/3 players connected".
+fn broadcast_status(store: &SessionStore, session_id: &str) {
+    if let Some((occupied, max)) = store.players_status(session_id) {
+        let msg = SignalMessage::PlayersStatus { occupied, max }
+            .to_json()
+            .unwrap_or_default();
+        store.broadcast(session_id, &msg);
+    }
+}
 
 pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
     store.inc_conn();
@@ -24,6 +46,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
 
     let mut session_id: Option<String> = None;
     let mut role: Option<Role> = None;
+    let mut player_slot: Option<u8> = None;
 
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
@@ -77,11 +100,34 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 let _ = tx.send(
                     SignalMessage::Registered {
                         role: Role::Host,
-                        session_id: sid,
+                        session_id: sid.clone(),
+                        slot: 0,
                     }
                     .to_json()
                     .unwrap(),
                 );
+                // A reconnecting host may be coming back to players already seated.
+                broadcast_status(&store, &sid);
+                for (slot, epoch) in store.seated_for_host_replay(&sid) {
+                    if let Some(host_tx) = store.peer_tx(&sid, Role::Host) {
+                        let delivered = host_tx
+                            .send(
+                                SignalMessage::PeerJoined {
+                                    role: Role::Player,
+                                    epoch,
+                                    slot,
+                                }
+                                .to_json()
+                                .unwrap(),
+                            )
+                            .is_ok();
+                        if delivered {
+                            info!(
+                                "re-offering seated player session {sid} (slot {slot}, epoch {epoch})"
+                            );
+                        }
+                    }
+                }
                 info!("host registered for session {}", session_id.as_deref().unwrap_or("?"));
             }
             SignalMessage::RegisterPlayer {
@@ -90,13 +136,15 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 player_name: _,
             } => {
                 match store.register_player(sid.clone(), pin, tx.clone()) {
-                    Ok(player_epoch) => {
+                    Ok((slot, epoch)) => {
                         session_id = Some(sid.clone());
                         role = Some(Role::Player);
+                        player_slot = Some(slot);
                         let _ = tx.send(
                             SignalMessage::Registered {
                                 role: Role::Player,
                                 session_id: sid.clone(),
+                                slot,
                             }
                             .to_json()
                             .unwrap(),
@@ -110,14 +158,15 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                                     .send(
                                         SignalMessage::PeerJoined {
                                             role: Role::Player,
-                                            epoch: player_epoch,
+                                            epoch,
+                                            slot,
                                         }
                                         .to_json()
                                         .unwrap(),
                                     )
                                     .is_ok();
                                 if delivered {
-                                    info!("player joined session {sid} (epoch {player_epoch})");
+                                    info!("player joined session {sid} (slot {slot}, epoch {epoch})");
                                 } else {
                                     // The slot holds a sender whose receiver is gone,
                                     // so the host socket is already dead and nobody
@@ -132,6 +181,14 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                                 "player joined session {sid} with no host registered — \
                                  it will wait for an offer that cannot come"
                             ),
+                        }
+                        broadcast_status(&store, &sid);
+                        if let Some((kind, id)) = store.host_pad(&sid) {
+                            let _ = tx.send(
+                                SignalMessage::PlayerPadInfo { slot: 0, kind, id }
+                                    .to_json()
+                                    .unwrap(),
+                            );
                         }
                     }
                     Err(e) => {
@@ -152,19 +209,94 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                     store.touch(sid);
                 }
             }
-            SignalMessage::RequestOffer => {
-                if let (Some(sid), Some(r)) = (&session_id, role) {
-                    store.relay(sid, r, &text);
+            // --- player → host: stamp the connection's own slot, then relay ---
+            SignalMessage::Answer { sdp, epoch, .. } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(&store, sid, &SignalMessage::Answer { sdp, epoch, slot });
                 }
             }
-            SignalMessage::Offer { .. }
-            | SignalMessage::Answer { .. }
-            | SignalMessage::IceCandidate { .. }
-            | SignalMessage::StreamInfo { .. }
-            | SignalMessage::PadInfo { .. }
-            | SignalMessage::PresentPath { .. } => {
-                if let (Some(sid), Some(r)) = (&session_id, role) {
-                    store.relay(sid, r, &text);
+            SignalMessage::IceCandidate {
+                candidate,
+                sdp_mid,
+                sdp_mline_index,
+                slot,
+            } => match role {
+                // player → host: stamp the connection's own slot, never trust the payload.
+                Some(Role::Player) => {
+                    if let (Some(sid), Some(my_slot)) = (session_id.as_deref(), player_slot) {
+                        relay_to_host(
+                            &store,
+                            sid,
+                            &SignalMessage::IceCandidate {
+                                candidate,
+                                sdp_mid,
+                                sdp_mline_index,
+                                slot: my_slot,
+                            },
+                        );
+                    }
+                }
+                // host → player: route by the slot the host stamped.
+                Some(Role::Host) => {
+                    if let Some(sid) = session_id.as_deref() {
+                        match store.player_tx(sid, slot) {
+                            Some(player_tx) => {
+                                let _ = player_tx.send(text.clone());
+                            }
+                            None => {
+                                warn!("ice candidate for unknown slot {slot} dropped (session {sid})")
+                            }
+                        }
+                    }
+                }
+                None => {}
+            },
+            SignalMessage::PadInfo { kind, id, .. } => {
+                if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
+                    store.set_host_pad(sid, kind.clone(), id.clone());
+                    if let Ok(json) = (SignalMessage::PlayerPadInfo {
+                        slot: 0,
+                        kind,
+                        id,
+                    })
+                    .to_json()
+                    {
+                        store.broadcast(sid, &json);
+                    }
+                } else if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(&store, sid, &SignalMessage::PadInfo { kind: kind.clone(), id: id.clone(), slot });
+                    // Every player also gets to see it — a controller debug
+                    // view needs every seated player's pad, not just its own.
+                    if let Ok(json) = (SignalMessage::PlayerPadInfo { slot, kind, id }).to_json() {
+                        store.broadcast(sid, &json);
+                    }
+                }
+            }
+            SignalMessage::PresentPath { path, .. } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(&store, sid, &SignalMessage::PresentPath { path, slot });
+                }
+            }
+            SignalMessage::RequestOffer { .. } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(&store, sid, &SignalMessage::RequestOffer { slot });
+                }
+            }
+            // --- host → player: route by the slot the host stamped ---
+            SignalMessage::Offer { slot, .. } => {
+                if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
+                    match store.player_tx(sid, slot) {
+                        Some(player_tx) => {
+                            let _ = player_tx.send(text.clone());
+                        }
+                        None => warn!("offer for unknown slot {slot} dropped (session {sid})"),
+                    }
+                }
+            }
+            // Shared stream telemetry fans out to every connected player.
+            SignalMessage::StreamInfo { .. } | SignalMessage::HostStats { .. } => {
+                if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
+                    store.broadcast_to_players(sid, &text);
                 }
             }
             _ => {}
@@ -172,7 +304,11 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
     }
 
     if let (Some(sid), Some(r)) = (session_id, role) {
+        let was_player = r == Role::Player;
         store.unregister(&sid, r, Some(&tx));
+        if was_player {
+            broadcast_status(&store, &sid);
+        }
     }
     store.dec_conn();
     forward.abort();

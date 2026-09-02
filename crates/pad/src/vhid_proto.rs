@@ -1,12 +1,17 @@
 //! DualSense VHID framing between couchlink-host and the Windows companion.
 //!
-//! Host → companion (input):  `DSVH` + ver + 64-byte USB input report  
+//! Host → companion (input):  `DSVH` + ver + 64-byte USB input report
 //! Companion → host (output): `DSVO` + ver + u16le len + HID output bytes
+//! Host → companion (hello):  `DSVS` + ver + 1-byte slot — sent once, first,
+//! right after connecting, so the companion routes this connection's frames
+//! into that slot's own pre-existing virtual controller (see module docs on
+//! the companion side for why this can't be inferred from connection order).
 
 use thiserror::Error;
 
 pub const DSVH_MAGIC: &[u8; 4] = b"DSVH";
 pub const DSVO_MAGIC: &[u8; 4] = b"DSVO";
+pub const DSVS_MAGIC: &[u8; 4] = b"DSVS";
 pub const VHID_VERSION: u8 = 1;
 pub const DS_USB_INPUT_LEN: usize = 64;
 /// Default TCP port so WSL hosts can reach the Windows companion via localhost.
@@ -21,6 +26,27 @@ pub enum VhidCodecError {
     BadMagic,
     #[error("unsupported version {0}")]
     BadVersion(u8),
+}
+
+pub fn encode_slot_hello(slot: u8) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(6);
+    buf.extend_from_slice(DSVS_MAGIC);
+    buf.push(VHID_VERSION);
+    buf.push(slot);
+    buf
+}
+
+pub fn decode_slot_hello(buf: &[u8]) -> Result<u8, VhidCodecError> {
+    if buf.len() < 6 {
+        return Err(VhidCodecError::Short);
+    }
+    if &buf[0..4] != DSVS_MAGIC {
+        return Err(VhidCodecError::BadMagic);
+    }
+    if buf[4] != VHID_VERSION {
+        return Err(VhidCodecError::BadVersion(buf[4]));
+    }
+    Ok(buf[5])
 }
 
 pub fn encode_input(report: &[u8; DS_USB_INPUT_LEN]) -> Vec<u8> {
@@ -119,5 +145,24 @@ mod tests {
         assert_eq!(take_output_frame(&mut buf).unwrap(), report);
         assert_eq!(take_output_frame(&mut buf).unwrap(), vec![9, 9]);
         assert!(take_output_frame(&mut buf).is_none());
+    }
+
+    #[test]
+    fn slot_hello_roundtrip() {
+        let enc = encode_slot_hello(2);
+        assert_eq!(decode_slot_hello(&enc).unwrap(), 2);
+    }
+
+    #[test]
+    fn slot_hello_rejects_short_buffer() {
+        assert_eq!(decode_slot_hello(&[1, 2, 3]), Err(VhidCodecError::Short));
+    }
+
+    #[test]
+    fn slot_hello_rejects_wrong_magic() {
+        assert_eq!(
+            decode_slot_hello(b"DSVHxx"),
+            Err(VhidCodecError::BadMagic)
+        );
     }
 }

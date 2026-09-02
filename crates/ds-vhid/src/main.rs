@@ -67,11 +67,8 @@ fn main() -> Result<()> {
 fn run_windows(args: Args) -> Result<()> {
     use anyhow::Context;
     use std::net::TcpListener;
-    use std::sync::Arc;
     use tracing::{info, warn};
 
-    let hub = session::OutputHub::new();
-    let backend = backend::create(args.backend, hub.clone())?;
     info!(
         "DualSense VHID companion ready (backend={:?}). TCP={}:{} pipe={}",
         args.backend,
@@ -79,11 +76,30 @@ fn run_windows(args: Args) -> Result<()> {
         args.port,
         couchlink_pad::vhid_proto::VHID_PIPE_NAME
     );
-    info!("Emulator: P1 = host DualSense; P2 = this virtual pad");
+    info!(
+        "Emulator: P1 = host's own pad; remote P2–P4 are pre-allocated ViGEm seats (stable XInput indices)"
+    );
 
-    let tcp_backend = Arc::clone(&backend);
-    let tcp_hub = hub.clone();
+    let tcp_backend_kind = args.backend;
+    let registry = session::SlotRegistry::new();
+    // Default ON: create all remote seats at start so a late join is not a
+    // Windows device hotplug. Opt out with COUCHLINK_DS_VHID_PREALLOCATE=0
+    // (old lazy-on-first-connect behaviour).
+    let preallocate = std::env::var("COUCHLINK_DS_VHID_PREALLOCATE")
+        .map(|v| {
+            let t = v.trim();
+            !(t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("off"))
+        })
+        .unwrap_or(true);
+    if preallocate {
+        if let Err(e) = registry.preallocate(args.backend) {
+            warn!("pre-allocate virtual pads failed ({e:#}) — falling back to lazy create on connect");
+        }
+    } else {
+        info!("COUCHLINK_DS_VHID_PREALLOCATE=0 — pads created on first slot connect only");
+    }
     let bind = format!("{}:{}", args.bind, args.port);
+    let tcp_registry = registry.clone();
     std::thread::spawn(move || {
         let listener = match TcpListener::bind(&bind) {
             Ok(l) => l,
@@ -96,10 +112,9 @@ fn run_windows(args: Args) -> Result<()> {
         for conn in listener.incoming() {
             match conn {
                 Ok(stream) => {
-                    let backend = Arc::clone(&tcp_backend);
-                    let hub = tcp_hub.clone();
+                    let registry = tcp_registry.clone();
                     std::thread::spawn(move || {
-                        if let Err(e) = session::serve_tcp(stream, backend, hub) {
+                        if let Err(e) = session::serve_tcp(stream, registry, tcp_backend_kind) {
                             warn!("TCP session: {e:#}");
                         }
                     });
@@ -109,8 +124,7 @@ fn run_windows(args: Args) -> Result<()> {
         }
     });
 
-    let pipe_backend = Arc::clone(&backend);
-    pipe_win::serve_pipe(pipe_backend, hub).context("named pipe server")?;
+    pipe_win::serve_pipe(registry, args.backend).context("named pipe server")?;
     Ok(())
 }
 

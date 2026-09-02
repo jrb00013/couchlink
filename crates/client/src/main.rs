@@ -2,6 +2,8 @@ mod decode;
 mod dualsense_reader;
 mod feedback_apply;
 mod keyboard_input;
+mod steam_reader;
+mod switch_reader;
 mod xbox_reader;
 mod config_file;
 mod invite;
@@ -183,7 +185,7 @@ fn main() -> Result<()> {
     }
 
     // Windowed: skip the OS dialog — the waiting screen has an editable join field.
-    let mut join_prefill = cli
+    let join_prefill = cli
         .join_url
         .clone()
         .or(cli.positional_join.clone())
@@ -192,29 +194,27 @@ fn main() -> Result<()> {
         .or_else(config_file::read_join_url_from_config)
         .unwrap_or_default();
 
-    loop {
-        let resolved = if join_prefill.trim().is_empty() {
-            None
-        } else {
-            match resolve_join_string(&join_prefill, &cli) {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    warn!("join prefill invalid ({e}) — edit the waiting-screen field");
-                    None
-                }
+    let resolved = if join_prefill.trim().is_empty() {
+        None
+    } else {
+        match resolve_join_string(&join_prefill, &cli) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                warn!("join prefill invalid ({e}) — edit the waiting-screen field");
+                None
             }
-        };
-        match run_windowed(resolved, join_prefill.clone())? {
-            view::ViewResult::Closed => return Ok(()),
-            view::ViewResult::Rejoin(url) => {
-                let _ = config_file::write_join_url(&url);
-                // winit allows exactly one EventLoop per process, so looping
-                // back into run_windowed fails with "EventLoop can't be
-                // recreated" and silently drops to headless — which renders no
-                // video at all, so the user sees the app do nothing. Re-exec
-                // instead: a fresh process gets a fresh EventLoop.
-                return rejoin_via_reexec(&url);
-            }
+        }
+    };
+    match run_windowed(resolved, join_prefill.clone())? {
+        view::ViewResult::Closed => Ok(()),
+        view::ViewResult::Rejoin(url) => {
+            let _ = config_file::write_join_url(&url);
+            // winit allows exactly one EventLoop per process, so looping back
+            // into run_windowed fails with "EventLoop can't be recreated" and
+            // silently drops to headless — which renders no video at all, so
+            // the user sees the app do nothing. Re-exec instead: a fresh
+            // process gets a fresh EventLoop.
+            rejoin_via_reexec(&url)
         }
     }
 }
@@ -449,16 +449,35 @@ async fn async_main(
     } else {
         None
     };
-    if dualsense.is_some() {
-        info!("DualSense/DualShock 4 controller connected");
+    let mut switch = if args.send_pad {
+        switch_reader::SwitchReader::open_first().ok()
+    } else {
+        None
+    };
+    let mut steam = if args.send_pad {
+        steam_reader::SteamReader::open_first().ok()
+    } else {
+        None
+    };
+    let pad = if dualsense.is_some() {
+        "DualSense/DualShock 4 controller connected"
     } else if xbox.is_some() {
-        info!("Xbox controller connected");
+        "Xbox controller connected"
+    } else if switch.is_some() {
+        "Nintendo Switch controller connected"
+    } else if steam.is_some() {
+        "Steam Controller connected"
     } else if args.send_pad {
         if keyboard.is_some() {
-            info!("no DualSense/DS4/Xbox controller found — keyboard input is still available in windowed mode");
+            "no DualSense/Xbox/Switch/Steam controller found — keyboard input is still available in windowed mode"
         } else {
-            warn!("no DualSense/DS4/Xbox controller found and no keyboard available (headless mode) — no pad input will be sent");
+            "no DualSense/Xbox/Switch/Steam controller found and no keyboard available (headless mode) — no pad input will be sent"
         }
+    } else {
+        ""
+    };
+    if !pad.is_empty() {
+        info!("{pad}");
     }
 
     let mut feedback_rx = player.take_feedback_rx().await;
@@ -482,17 +501,25 @@ async fn async_main(
         tokio::select! {
             msg = signaling.inbound.recv() => {
                 match msg {
-                    Some(SignalMessage::Offer { sdp, epoch }) => {
+                    Some(SignalMessage::Offer { sdp, epoch, .. }) => {
                         info!("got offer");
                         player.handle_offer(sdp, epoch, &signal_out).await?;
                     }
-                    Some(SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index }) => {
+                    Some(SignalMessage::IceCandidate {
+                        candidate,
+                        sdp_mid,
+                        sdp_mline_index,
+                        ..
+                    }) => {
                         let _ = player.add_ice(candidate, sdp_mid, sdp_mline_index).await;
                     }
                     Some(SignalMessage::StreamInfo { width, height, fps, codec, .. }) => {
                         info!("stream {width}x{height}@{fps} {codec}");
                     }
-                    Some(SignalMessage::PeerLeft) => warn!("host left"),
+                    Some(SignalMessage::PlayersStatus { occupied, max }) => {
+                        info!("players: {occupied}/{max} connected");
+                    }
+                    Some(SignalMessage::PeerLeft { .. }) => warn!("host left"),
                     None => break,
                     _ => {}
                 }
@@ -542,7 +569,23 @@ async fn async_main(
                 } else {
                     None
                 };
-                let frame = match ds_frame.or(xb_frame) {
+                let sw_frame = if ds_frame.is_none() && xb_frame.is_none() {
+                    match switch.as_mut() {
+                        Some(r) => r.read_frame().ok().flatten(),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let sc_frame = if ds_frame.is_none() && xb_frame.is_none() && sw_frame.is_none() {
+                    match steam.as_mut() {
+                        Some(r) => r.read_frame().ok().flatten(),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let frame = match ds_frame.or(xb_frame).or(sw_frame).or(sc_frame) {
                     Some(f) => Some(f),
                     None => keyboard.as_ref().and_then(|(kp, _)| {
                         let kp = kp.lock().unwrap();

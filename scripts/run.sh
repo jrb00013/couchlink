@@ -24,17 +24,22 @@ source "$ROOT/scripts/lib-mesh.sh"
 
 usage() {
   cat <<EOF
-usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall]
+usage: $0 [host|client] [--local|--online] [--verbose] [--unblock-firewall] [--force-cloudflare] [--mesh-first]
 
-  host    start signaling + (optional TURN) + couchlink-host
+  host    one command: signaling + TURN + couchlink-host + (online) cloudflared
+          + (WSL) Windows capture — builds missing binaries/UI first.
   client  start couchlink-client (friend/player)
 
   --local   LAN only (default). Host: LAN join URL. Client: TURN optional.
-  --online  Internet. Host prefers Headscale / Tailscale / WireGuard (PRIME mesh)
-            when up; else public IP + TURN + UPnP; on WSL also firewall + WSL
-            portproxy; then Cloudflare HTTPS + IPv6 / bore if the router blocks UPnP.
-            Client: prompts for the host join URL if unset; auto-joins Headscale
-            when the invite has hs= + tskey=.
+  --online  Internet host (default): full stack — cloudflared HTTPS invite,
+            TURN, win-capture, release build + web/dist as needed. No separate
+            install step. Client: paste host join URL; Headscale auto-join when
+            invite has hs= + tskey=.
+  --mesh-first
+            Host --online: try Headscale / Tailscale / WireGuard + UPnP before
+            cloudflared (legacy path). Default online host skips mesh/UPnP.
+  --force-cloudflare
+            Alias for host --online (kept for scripts). Requires --online.
   --verbose
             Chatty bring-up logs, QR code, TRACE-level-ish Rust logs (RUST_LOG).
             Default is quiet — join URL is still printed.
@@ -52,12 +57,16 @@ EOF
 ROLE="host"
 MODE="local"
 UNBLOCK_FIREWALL=0
+FORCE_CLOUDFLARE=0
+MESH_FIRST=0
 COUCHLINK_VERBOSE="${COUCHLINK_VERBOSE:-0}"
 for arg in "$@"; do
   case "$arg" in
     host|client) ROLE="$arg" ;;
     --local) MODE="local" ;;
     --online) MODE="online" ;;
+    --force-cloudflare) FORCE_CLOUDFLARE=1 ;;
+    --mesh-first) MESH_FIRST=1 ;;
     --verbose|-v) COUCHLINK_VERBOSE=1 ;;
     --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -69,6 +78,21 @@ for arg in "$@"; do
   esac
 done
 export COUCHLINK_VERBOSE
+
+if [[ "$FORCE_CLOUDFLARE" == "1" && "$MODE" != "online" ]]; then
+  echo "error: --force-cloudflare requires --online" >&2
+  usage >&2
+  exit 1
+fi
+# Host --online: full internet stack by default (cloudflared + TURN + capture).
+# Opt into mesh/UPnP-first with --mesh-first.
+if [[ "$ROLE" == "host" && "$MODE" == "online" && "$MESH_FIRST" != "1" ]]; then
+  FORCE_CLOUDFLARE=1
+fi
+if [[ "$FORCE_CLOUDFLARE" == "1" ]]; then
+  couchlink_say "==> online host: full stack (cloudflared HTTPS + TURN + capture; skip mesh/UPnP)"
+  export COUCHLINK_FORCE_CLOUDFLARE=1 COUCHLINK_SKIP_MESH=1 COUCHLINK_SKIP_UPNP=1
+fi
 
 # Quiet Rust crates unless the user opted in or already set RUST_LOG.
 if ! couchlink_verbose && [[ -z "${RUST_LOG:-}" ]]; then
@@ -87,12 +111,27 @@ if [[ "$ROLE" == "host" && "$PLATFORM" == "macos" ]]; then
 fi
 
 [[ -f .env.couchlink ]] || cp .env.example .env.couchlink
+# Preserve capture overrides from the parent shell across .env.couchlink — otherwise
+# a pinned COUCHLINK_CAPTURE_WINDOW=PCSX2 silently forces window mode and the
+# picker never appears (and win-capture waits forever for a closed emulator).
+_HAS_CAPTURE_SOURCE=0
+_HAS_CAPTURE_WINDOW=0
+[[ -v COUCHLINK_CAPTURE_SOURCE ]] && _HAS_CAPTURE_SOURCE=1
+[[ -v COUCHLINK_CAPTURE_WINDOW ]] && _HAS_CAPTURE_WINDOW=1
+_KEEP_CAPTURE_SOURCE="${COUCHLINK_CAPTURE_SOURCE:-}"
+_KEEP_CAPTURE_WINDOW="${COUCHLINK_CAPTURE_WINDOW:-}"
 # shellcheck disable=SC1091
 # set -a: .env.couchlink assigns without `export`, and these settings have to
 # reach child scripts (ensure-win-capture.sh reads COUCHLINK_PRESET itself).
 set -a
 source .env.couchlink
 set +a
+if [[ "$_HAS_CAPTURE_SOURCE" == "1" ]]; then
+  export COUCHLINK_CAPTURE_SOURCE="$_KEEP_CAPTURE_SOURCE"
+fi
+if [[ "$_HAS_CAPTURE_WINDOW" == "1" ]]; then
+  export COUCHLINK_CAPTURE_WINDOW="$_KEEP_CAPTURE_WINDOW"
+fi
 
 # Drop a persisted ICE address this machine no longer holds.
 #
@@ -135,6 +174,7 @@ COUCHLINK_USING_MESH=0
 # Scheduled Task; else COUCHLINK_ALLOW_UAC=1.
 couchlink_try_upnp_online() {
   [[ "${COUCHLINK_SKIP_UPNP_PREP:-}" == "1" ]] && return 0
+  [[ "${COUCHLINK_FORCE_CLOUDFLARE:-0}" == "1" ]] && return 1
   local ok=0
   if [[ "$PLATFORM" == "wsl" || "$PLATFORM" == "windows" ]] && command -v powershell.exe >/dev/null 2>&1; then
     couchlink_vlog "==> --online: Windows prep (Helper / task / firewall + WSL portproxy + UPnP)"
@@ -380,9 +420,20 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "$ROLE" == "host" ]]; then
+  bash "$ROOT/scripts/ensure-host-stack.sh"
   ./scripts/start-signaling.sh &
   PIDS+=($!)
-  sleep 1
+  # Wait until signaling actually accepts TCP — a fixed sleep races the host's
+  # first dial (connection refused) and leaves friends on "Waiting for host"
+  # until a later retry catches up. Prefer ready over hopeful.
+  _sig_port="${COUCHLINK_BIND:-0.0.0.0:8443}"
+  _sig_port="${_sig_port##*:}"
+  for _ in $(seq 1 50); do
+    if timeout 0.2 bash -c "echo >/dev/tcp/127.0.0.1/${_sig_port}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
   # Mesh on native Linux/macOS: skip TURN. WSL mesh: keep TURN (UDP via portproxy).
   if [[ "$MODE" == "online" ]]; then
     if [[ "$COUCHLINK_USING_MESH" != "1" || "${COUCHLINK_MESH_NEED_TURN:-0}" == "1" ]]; then

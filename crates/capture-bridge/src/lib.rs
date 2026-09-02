@@ -12,6 +12,8 @@ pub mod keep_rendering;
 pub mod gpu_convert;
 #[cfg(windows)]
 pub mod mf_encoder;
+#[cfg(windows)]
+pub mod hyperv;
 
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
@@ -26,6 +28,80 @@ const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 /// plain TCP stream, so the reverse direction is free — and without it a player
 /// joining mid-session waits for the encoder's own keyframe interval.
 pub const REQUEST_IDR: u8 = b'I';
+
+/// Skip one `next_submit` wait — pad arrived, encode the next AU now.
+pub const EXPEDITE: u8 = b'X';
+
+/// Sent by the host back up the capture socket to command the encode target.
+///
+/// Without this the Windows encoder is *detached from the link*: it encodes the
+/// captured window at its native size using whatever `--max-width/--max-height`
+/// arguments it happened to launch with, while the host's stream preset says
+/// something entirely different. The join only "worked" when the launch script
+/// happened to pass matching values — a direct host launch (or a stale
+/// win-capture) silently streamed the wrong resolution at the wrong bitrate.
+///
+/// The command carries the whole target so the encoder matches the preset
+/// (or a later bandwidth decision) without a restart: width, height, fps, and
+/// bitrate in kbps, each `u32` LE. A fresh win-capture gets its defaults from
+/// CLI args and adopts the commanded target the moment the host connects.
+pub const SET_TARGET: u8 = b'T';
+
+/// Encode target a host commands win-capture to use. Mirrors `StreamPreset`
+/// (minus the name) on purpose — the host should say exactly what it sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodeTarget {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
+/// Commanded Windows encode fps — shared by host and launch scripts.
+///
+/// WGC may run at `COUCHLINK_CAPTURE_FPS` (e.g. 120) for lower handoff wait,
+/// but the encoder and relay must not exceed this cap or SCTP floods and the
+/// link governor floors bitrate (killing encode ≥ 5000 and S_p50).
+pub fn encode_fps_target(preset_fps: u32) -> u32 {
+    if let Ok(s) = std::env::var("COUCHLINK_ENCODE_FPS") {
+        if let Ok(n) = s.parse::<u32>() {
+            return n.max(1);
+        }
+    }
+    if let Ok(s) = std::env::var("COUCHLINK_CAPTURE_FPS") {
+        if let Ok(n) = s.parse::<u32>() {
+            const AUTO_RAISE_CAP: u32 = 90;
+            return n.max(preset_fps).min(AUTO_RAISE_CAP).max(1);
+        }
+    }
+    preset_fps.max(1)
+}
+
+/// Write a `SET_TARGET` command. The reader side is the peer that owns the
+/// encoder, so this is deliberately the only writer in the capture-bridge crate.
+/// True when `needle` appears in the window title or the owning process name.
+///
+/// PCSX2 (and other emulators) replace the window title with the game name
+/// once a title is running, so title-only matching silently misses the window
+/// we actually want to stream.
+pub fn window_matches(needle: &str, title: &str, process: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    let needle = needle.to_ascii_lowercase();
+    title.to_ascii_lowercase().contains(&needle) || process.to_ascii_lowercase().contains(&needle)
+}
+
+pub fn write_set_target(w: &mut impl Write, target: EncodeTarget) -> Result<()> {
+    w.write_all(&[SET_TARGET])?;
+    w.write_all(&target.width.to_le_bytes())?;
+    w.write_all(&target.height.to_le_bytes())?;
+    w.write_all(&target.fps.to_le_bytes())?;
+    w.write_all(&target.bitrate_kbps.to_le_bytes())?;
+    w.flush()?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameFormat {
@@ -219,5 +295,47 @@ mod tests {
         wire.extend_from_slice(&[0u8; 16]);
         let mut buf = Vec::new();
         assert!(read_frame_sync(&mut Cursor::new(&wire), &mut buf).is_err());
+    }
+
+    #[test]
+    fn set_target_command_writes_opcode_and_fields() {
+        let target = EncodeTarget {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            bitrate_kbps: 10_000,
+        };
+        let mut wire = Vec::new();
+        write_set_target(&mut wire, target).unwrap();
+        assert_eq!(wire[0], SET_TARGET);
+        assert_eq!(u32::from_le_bytes(wire[1..5].try_into().unwrap()), 1280);
+        assert_eq!(u32::from_le_bytes(wire[5..9].try_into().unwrap()), 720);
+        assert_eq!(u32::from_le_bytes(wire[9..13].try_into().unwrap()), 60);
+        assert_eq!(u32::from_le_bytes(wire[13..17].try_into().unwrap()), 10_000);
+        assert_eq!(wire.len(), 17);
+    }
+
+    /// SET_TARGET and REQUEST_IDR are distinct commands on the same stream; the
+    /// reader must not confuse the opcode byte with the IDR byte.
+    #[test]
+    fn set_target_opcode_is_distinct_from_idr() {
+        assert_ne!(SET_TARGET, REQUEST_IDR);
+        assert_ne!(EXPEDITE, REQUEST_IDR);
+        assert_ne!(EXPEDITE, SET_TARGET);
+    }
+
+    /// Live 2026-08-22: PCSX2's window title becomes the game name
+    /// ("Marvel - Ultimate Alliance") once a title is running, so matching
+    /// only "PCSX2" attached to nothing. Process name still says pcsx2-qt.
+    #[test]
+    fn pcsx2_needle_matches_the_running_game_window_by_process() {
+        assert!(window_matches(
+            "PCSX2",
+            "Marvel - Ultimate Alliance",
+            "pcsx2-qt"
+        ));
+        assert!(window_matches("PCSX2", "PCSX2", "pcsx2-qt"));
+        assert!(!window_matches("PCSX2", "Discord", "Discord"));
+        assert!(!window_matches("", "PCSX2", "pcsx2-qt"));
     }
 }

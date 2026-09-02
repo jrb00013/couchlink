@@ -73,13 +73,14 @@ describe("clvd fragments", () => {
   }): ArrayBuffer {
     const buf = new ArrayBuffer(VIDEO_HEADER_LEN + opts.payload.length);
     const u8 = new Uint8Array(buf);
-    u8.set([0x43, 0x4c, 0x56, 0x44, 2, opts.keyframe ? 1 : 0]);
+    u8.set([0x43, 0x4c, 0x56, 0x44, 3, opts.keyframe ? 1 : 0]);
     const view = new DataView(buf);
     view.setUint16(6, 1280, true);
     view.setUint16(8, 720, true);
     view.setUint32(10, opts.seq, true);
     view.setUint16(14, opts.fragIdx, true);
     view.setUint16(16, opts.fragCount, true);
+    view.setBigUint64(18, 0n, true);
     u8.set(opts.payload, VIDEO_HEADER_LEN);
     return buf;
   }

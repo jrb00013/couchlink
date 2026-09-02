@@ -1,7 +1,6 @@
 //! Named pipe server for native Windows hosts (`\\.\pipe\couchlink-ds-vhid`).
 
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -21,8 +20,7 @@ use windows::Win32::System::Pipes::{
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 
-use crate::backend::PadBackend;
-use crate::session::{self, OutputHub};
+use crate::session;
 
 const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
 
@@ -69,9 +67,7 @@ impl Drop for PipeSd {
     }
 }
 
-type DynBackend = Arc<std::sync::Mutex<dyn PadBackend>>;
-
-pub fn serve_pipe(backend: DynBackend, hub: OutputHub) -> Result<()> {
+pub fn serve_pipe(registry: session::SlotRegistry, backend_kind: crate::BackendKind) -> Result<()> {
     let name = wide(VHID_PIPE_NAME);
     let pipe_sd = PipeSd::new()?;
     info!("listening named pipe {VHID_PIPE_NAME}");
@@ -109,12 +105,24 @@ pub fn serve_pipe(backend: DynBackend, hub: OutputHub) -> Result<()> {
         }
 
         info!("pipe client connected");
-        let backend = Arc::clone(&backend);
-        let hub = hub.clone();
         // Move HANDLE into a std File for Read/Write.
-        let file = unsafe {
+        let mut file = unsafe {
             let owned = OwnedHandle::from_raw_handle(handle.0 as *mut _);
             std::fs::File::from(owned)
+        };
+        let slot = match session::read_slot_hello(&mut file) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("pipe client: slot hello failed: {e:#}");
+                continue;
+            }
+        };
+        let (backend, hub) = match registry.get_or_create(slot, backend_kind) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("slot {slot}: virtual pad create failed: {e:#}");
+                continue;
+            }
         };
         std::thread::spawn(move || {
             let reader = match file.try_clone() {
@@ -125,8 +133,8 @@ pub fn serve_pipe(backend: DynBackend, hub: OutputHub) -> Result<()> {
                 }
             };
             let writer = file;
-            if let Err(e) = session::serve_duplex(reader, writer, backend, hub) {
-                warn!("pipe session: {e:#}");
+            if let Err(e) = session::serve_duplex(reader, writer, backend, hub, slot) {
+                warn!("pipe session (slot {slot}): {e:#}");
             }
             // File drop closes the pipe instance; parent loop creates the next one.
         });

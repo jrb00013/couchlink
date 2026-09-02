@@ -43,6 +43,15 @@ impl KeyboardPad {
         !self.held.is_empty()
     }
 
+    /// Release every held key.
+    ///
+    /// The window losing focus (alt-tab, clicking another app) means no key-up
+    /// will ever arrive for whatever was held — without this, a movement key
+    /// held during a focus switch stays "pressed" in the emulator forever.
+    pub fn clear_all(&mut self) {
+        self.held.clear();
+    }
+
     pub fn to_pad_frame(&self, seq: u32) -> PadFrame {
         let h = &self.held;
         let mut buttons_mask = 0u32;
@@ -136,5 +145,20 @@ mod tests {
         kp.set_key(KeyCode::Space, false);
         let f = kp.to_pad_frame(1);
         assert_eq!(f.buttons & buttons::CROSS, 0);
+    }
+
+    #[test]
+    fn clear_all_releases_every_held_key_on_focus_loss() {
+        let mut kp = KeyboardPad::new();
+        kp.set_key(KeyCode::KeyW, true);
+        kp.set_key(KeyCode::Space, true);
+        assert!(kp.any_key_active());
+
+        kp.clear_all();
+
+        assert!(!kp.any_key_active());
+        let f = kp.to_pad_frame(1);
+        assert_eq!(f.buttons, 0);
+        assert_eq!(f.ly, NEUTRAL);
     }
 }

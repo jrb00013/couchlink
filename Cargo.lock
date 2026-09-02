@@ -944,6 +944,7 @@ dependencies = [
  "couchlink-proto",
  "futures-util",
  "interceptor",
+ "nix 0.29.0",
  "openh264",
  "qrcode",
  "rand 0.8.7",
@@ -958,6 +959,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "vsock",
  "webrtc",
  "x11rb",
 ]
@@ -2456,6 +2458,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "metal"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2620,7 +2631,7 @@ dependencies = [
  "bitflags 1.3.2",
  "cfg-if 1.0.4",
  "libc",
- "memoffset",
+ "memoffset 0.7.1",
  "pin-utils",
 ]
 
@@ -2634,6 +2645,20 @@ dependencies = [
  "cfg-if 1.0.4",
  "cfg_aliases 0.2.2",
  "libc",
+ "memoffset 0.9.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if 1.0.4",
+ "cfg_aliases 0.2.2",
+ "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -4885,6 +4910,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vsock"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba782755fc073877e567c2253c0be48e4aa9a254c232d36d3985dfae0bd5205"
+dependencies = [
+ "libc",
+ "nix 0.31.3",
+]
+
+[[package]]
 name = "waitgroup"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5180,8 +5215,6 @@ dependencies = [
 [[package]]
 name = "webrtc-ice"
 version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b7fd30f52e6fda8664779b84b7904b2553b76fee24d9ca665e774ae32b13f53"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5231,8 +5264,6 @@ dependencies = [
 [[package]]
 name = "webrtc-sctp"
 version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c4b637f0d8eb96d900ac0f79b3060ddd21ca88dfefa467e96e67ab0016f2574"
 dependencies = [
  "arc-swap",
  "async-trait",

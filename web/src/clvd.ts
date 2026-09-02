@@ -2,9 +2,16 @@
 
 export const VIDEO_CHANNEL = "video";
 export const VIDEO_MAGIC = "CLVD";
-export const VIDEO_VERSION = 2;
+/** Tiny host→client watermark tip (no H.264) — magic + u32 LE input_wm. */
+export const WM_TIP_MAGIC = "CLWM";
+export const WM_TIP_LEN = 8;
+export const VIDEO_VERSION = 3;
+export const VIDEO_VERSION_V2 = 2;
+export const VIDEO_VERSION_V4 = 4;
 export const FLAG_KEYFRAME = 1 << 0;
-export const VIDEO_HEADER_LEN = 18;
+export const VIDEO_HEADER_LEN_V2 = 18;
+export const VIDEO_HEADER_LEN = 26;
+export const VIDEO_HEADER_LEN_V4 = 30;
 
 export type VideoAccessUnit = {
   seq: number;
@@ -12,6 +19,8 @@ export type VideoAccessUnit = {
   height: number;
   keyframe: boolean;
   annexB: Uint8Array;
+  stampUs: number;
+  inputWm: number;
 };
 
 export type VideoFragment = {
@@ -21,6 +30,8 @@ export type VideoFragment = {
   keyframe: boolean;
   fragIdx: number;
   fragCount: number;
+  stampUs: number;
+  inputWm: number;
   payload: Uint8Array;
 };
 
@@ -29,6 +40,25 @@ const FEC_LEN_PREFIX = 2;
 /** Must match `VIDEO_MAX_FRAGMENT_PAYLOAD` in crates/proto/src/video_frame.rs. */
 export const VIDEO_MAX_FRAGMENT_PAYLOAD = 14_000;
 
+function headerLen(ver: number): number {
+  if (ver === VIDEO_VERSION_V4) return VIDEO_HEADER_LEN_V4;
+  if (ver === VIDEO_VERSION) return VIDEO_HEADER_LEN;
+  return VIDEO_HEADER_LEN_V2;
+}
+
+/** Decode an 8-byte `CLWM` tip → input_wm, or null. */
+export function decodeWmTip(buf: ArrayBuffer | ArrayBufferView): number | null {
+  const u8 =
+    buf instanceof ArrayBuffer
+      ? new Uint8Array(buf)
+      : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  if (u8.byteLength < WM_TIP_LEN) return null;
+  const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+  if (magic !== WM_TIP_MAGIC) return null;
+  const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  return view.getUint32(4, true) >>> 0;
+}
+
 export function decodeClvdFragment(
   buf: ArrayBuffer | ArrayBufferView
 ): VideoFragment | null {
@@ -36,10 +66,15 @@ export function decodeClvdFragment(
     buf instanceof ArrayBuffer
       ? new Uint8Array(buf)
       : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-  if (u8.byteLength < VIDEO_HEADER_LEN) return null;
+  if (u8.byteLength < VIDEO_HEADER_LEN_V2) return null;
   const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
   if (magic !== VIDEO_MAGIC) return null;
-  if (u8[4] !== VIDEO_VERSION) return null;
+  const ver = u8[4];
+  if (ver !== VIDEO_VERSION && ver !== VIDEO_VERSION_V2 && ver !== VIDEO_VERSION_V4) {
+    return null;
+  }
+  const hlen = headerLen(ver);
+  if (u8.byteLength < hlen) return null;
   const flags = u8[5];
   const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   const width = view.getUint16(6, true);
@@ -47,8 +82,14 @@ export function decodeClvdFragment(
   const seq = view.getUint32(10, true);
   const fragIdx = view.getUint16(14, true);
   const fragCount = view.getUint16(16, true);
-  // fragIdx === fragCount is legal — it marks the FEC parity fragment, one
-  // slot past the last data index. Only fragIdx > fragCount is malformed.
+  let stampUs = 0;
+  let inputWm = 0;
+  if (ver === VIDEO_VERSION_V4) {
+    stampUs = Number(view.getBigUint64(18, true));
+    inputWm = view.getUint32(26, true);
+  } else if (ver === VIDEO_VERSION) {
+    stampUs = Number(view.getBigUint64(18, true));
+  }
   if (fragCount === 0 || fragIdx > fragCount) return null;
   return {
     seq,
@@ -57,19 +98,12 @@ export function decodeClvdFragment(
     keyframe: (flags & FLAG_KEYFRAME) !== 0,
     fragIdx,
     fragCount,
-    payload: u8.subarray(VIDEO_HEADER_LEN),
+    stampUs,
+    inputWm,
+    payload: u8.subarray(hlen),
   };
 }
 
-/**
- * Reconstruct the fragment at `missing` from the rest plus parity.
- *
- * Mirrors `recover_fragment` in crates/proto/src/video_frame.rs — keep them
- * in lockstep, the wire format is shared. XOR-ing every present fragment
- * (zero-padded to VIDEO_MAX_FRAGMENT_PAYLOAD) against the parity XOR leaves
- * exactly the missing fragment, padded the same way; only the last fragment
- * in an access unit can be short, so its length travels in the parity payload.
- */
 function recoverFragment(
   parts: (Uint8Array | null)[],
   missing: number,
@@ -92,21 +126,14 @@ function recoverFragment(
   return acc.subarray(0, wantLen);
 }
 
-/**
- * Reassemble unordered CLVD fragments into a full access unit.
- *
- * Recovers one missing data fragment via XOR parity when the host sent one
- * (see `encode_fragments_with_fec` in crates/proto/src/video_frame.rs) — a
- * dropped fragment on this unordered, unreliable channel otherwise costs a
- * full keyframe round trip. Two or more losses in one access unit still need
- * that keyframe; this only removes it as the response to a single loss.
- */
 export class ClvdAssembler {
   private seq: number | null = null;
   private width = 0;
   private height = 0;
   private keyframe = false;
   private fragCount = 0;
+  private stampUs = 0;
+  private inputWm = 0;
   private parts: (Uint8Array | null)[] = [];
   private parity: Uint8Array | null = null;
 
@@ -117,6 +144,8 @@ export class ClvdAssembler {
       this.height = frag.height;
       this.keyframe = frag.keyframe;
       this.fragCount = frag.fragCount;
+      this.stampUs = frag.stampUs;
+      this.inputWm = frag.inputWm;
       this.parts = Array.from({ length: frag.fragCount }, () => null);
       this.parity = null;
     }
@@ -155,6 +184,8 @@ export class ClvdAssembler {
       height: this.height,
       keyframe: this.keyframe,
       annexB,
+      stampUs: this.stampUs,
+      inputWm: this.inputWm,
     };
     this.seq = null;
     this.parts = [];

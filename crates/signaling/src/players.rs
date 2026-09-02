@@ -8,9 +8,10 @@
 
 use crate::session::WsSender;
 
-/// RPCS3 and PCSX2 both expose four controller ports, and ViGEmBus supports
-/// four X360 pads without extra configuration.
-pub const MAX_PLAYERS: u8 = 4;
+/// Three remote slots + the host's own pad = 4 controllers total, matching the
+/// four controller ports RPCS3 and PCSX2 expose. Remote slot `s` is emulator
+/// port `s + 1`; the host owns P1.
+pub const MAX_PLAYERS: u8 = 3;
 
 /// Emulator player number for a couchlink slot.
 pub fn emulator_player_for(slot: u8) -> u8 {
@@ -34,6 +35,16 @@ impl PlayerTable {
         self.slots[idx] = Some(tx);
         self.epoch = self.epoch.saturating_add(1);
         Some((idx as u8 + 1, self.epoch))
+    }
+
+    /// Re-register a socket that already holds a slot (a duplicate `RegisterPlayer`
+    /// on the same connection). Keeps the slot instead of consuming a second one —
+    /// otherwise the old slot would never be vacated (the socket's close only
+    /// releases its *current* slot) and would leak.
+    pub fn reassert(&mut self, tx: &WsSender) -> Option<(u8, u64)> {
+        let slot = self.slot_of(tx)?;
+        self.epoch = self.epoch.saturating_add(1);
+        Some((slot, self.epoch))
     }
 
     /// Release a slot, but only for the socket that currently owns it.
@@ -64,6 +75,20 @@ impl PlayerTable {
             .iter()
             .position(|s| matches!(s, Some(e) if e.same_channel(tx)))
             .map(|i| i as u8 + 1)
+    }
+
+    /// Bump the table epoch once per seated slot and return `(slot, epoch)`
+    /// so a reconnecting host is told to re-offer. Same epoch for every slot
+    /// would make the host ignore the 2nd and 3rd as stale.
+    pub fn replay_for_host(&mut self) -> Vec<(u8, u64)> {
+        let mut out = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if slot.is_some() {
+                self.epoch = self.epoch.saturating_add(1);
+                out.push((i as u8 + 1, self.epoch));
+            }
+        }
+        out
     }
 
     pub fn occupied(&self) -> u8 {
@@ -162,6 +187,16 @@ mod tests {
     }
 
     #[test]
+    fn replay_for_host_skips_empty_slots_and_bumps_epoch() {
+        let mut t = PlayerTable::default();
+        t.assign(tx()).unwrap();
+        t.assign(tx()).unwrap();
+        let replay = t.replay_for_host();
+        assert_eq!(replay.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(replay[1].1 > replay[0].1);
+    }
+
+    #[test]
     fn iter_yields_only_occupied_slots() {
         let mut t = PlayerTable::default();
         let a = tx();
@@ -178,6 +213,7 @@ mod tests {
         assert_eq!(emulator_player_for(1), 2);
         assert_eq!(emulator_player_for(2), 3);
         assert_eq!(emulator_player_for(3), 4);
-        assert_eq!(emulator_player_for(MAX_PLAYERS), 5);
+        // The host's pad + MAX_PLAYERS remote pads exactly fills 4 emulator ports.
+        assert_eq!(emulator_player_for(MAX_PLAYERS), 4);
     }
 }

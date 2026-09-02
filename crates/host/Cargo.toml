@@ -34,4 +34,8 @@ rand = "0.8"
 qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
+# Non-blocking AF_VSOCK connect so a missing win-capture cannot wedge the host
+# event loop (friends stuck on "Waiting for host offer").
+nix = { version = "0.29", default-features = false, features = ["socket", "poll"] }
 x11rb = { version = "0.13", default-features = true, features = ["xfixes", "randr"] }

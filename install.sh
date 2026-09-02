@@ -12,37 +12,131 @@ UNBLOCK_FIREWALL=0
 # Default = friend/player. Gaming PC uses --host.
 INSTALL_ROLE="${COUCHLINK_INSTALL_ROLE:-client}"
 INSTALL_MESH="${COUCHLINK_INSTALL_MESH:-1}"
+FORCE_CLOUDFLARE=0
+TAILSCALE_CLOUD=0
+# Flags forwarded to ./scripts/run.sh when --run / --online / --local is used.
+RUN_PASS_ARGS=()
+
+# Bare `./install.sh` with no flags on an interactive terminal: walk through
+# the same choices as an argument in a small wizard instead of silently
+# defaulting to "client / local / build only". Any flag at all (including
+# -h) skips this and goes straight to the flag-driven path above/below.
+if [[ $# -eq 0 && -t 0 && -t 1 ]]; then
+  BOLD=""; DIM=""; CYAN=""; GREEN=""; RESET=""
+  if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
+    BOLD="$(tput bold)"; DIM="$(tput dim)"; CYAN="$(tput setaf 6)"; GREEN="$(tput setaf 2)"; RESET="$(tput sgr0)"
+  fi
+
+  couchlink_ask() {
+    # couchlink_ask "Question" "1) label" "2) label" ... -> sets REPLY_IDX (1-based)
+    local question="$1"; shift
+    echo
+    echo "${BOLD}${CYAN}${question}${RESET}"
+    local i=1 opt
+    for opt in "$@"; do
+      echo "  ${GREEN}${i})${RESET} ${opt}"
+      i=$((i + 1))
+    done
+    local n=$#
+    local choice
+    while true; do
+      read -r -p "  ${DIM}choice [1-${n}, default 1]:${RESET} " choice
+      choice="${choice:-1}"
+      if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+        REPLY_IDX="$choice"
+        return 0
+      fi
+      echo "  please enter a number between 1 and ${n}"
+    done
+  }
+
+  echo "${BOLD}== couchlink setup ==${RESET}"
+  echo "${DIM}(pass any flag, e.g. --help, to skip this wizard)${RESET}"
+
+  # 1) Role first — it decides what gets built (host needs coturn/uinput/UI).
+  couchlink_ask "Is this device the host (the gaming PC) or a client (a friend / player)?" \
+    "Host — this PC shares its screen/input" \
+    "Client — this PC connects to a friend's host"
+  [[ "$REPLY_IDX" == "1" ]] && INSTALL_ROLE="host" || INSTALL_ROLE="client"
+
+  # 2) Network mode next — same LAN, or over the internet (mesh/TURN/etc).
+  couchlink_ask "Will you play on the same network (local) or over the internet (online)?" \
+    "Local — same Wi-Fi / LAN" \
+    "Online — over the internet (mesh + TURN fallback)"
+  [[ "$REPLY_IDX" == "1" ]] && RUN_MODE="local" || RUN_MODE="online"
+
+  # 3) Firewall unblock only makes sense for online mode.
+  if [[ "$RUN_MODE" == "online" ]]; then
+    couchlink_ask "Open the local OS firewall for mesh/TURN now?" \
+      "No — leave firewall as-is" \
+      "Yes — unblock (may prompt for admin/UAC)"
+    [[ "$REPLY_IDX" == "2" ]] && UNBLOCK_FIREWALL=1
+  fi
+
+  # 3b) Host + online: which internet-reachability path to use. This is the
+  # question that decides whether Cloudflare gets involved.
+  if [[ "$INSTALL_ROLE" == "host" && "$RUN_MODE" == "online" ]]; then
+    couchlink_ask "How should friends reach this host over the internet?" \
+      "Automatic (recommended) — Headscale/WireGuard mesh, then public IP + UPnP, falling back to a Cloudflare tunnel (trycloudflare.com) only if needed" \
+      "Always use a Cloudflare tunnel — skip mesh/UPnP, force cloudflared HTTPS (--force-cloudflare)" \
+      "Also install Tailscale Inc's cloud client as an extra fallback (needs a Tailscale login; not self-hosted)"
+    case "$REPLY_IDX" in
+      2) FORCE_CLOUDFLARE=1 ;;
+      3) TAILSCALE_CLOUD=1 ;;
+    esac
+  fi
+
+  # 4) Start couchlink immediately after install finishes?
+  couchlink_ask "Start couchlink right after install finishes?" \
+    "Yes — install then run" \
+    "No — just install, I'll run it myself later"
+  [[ "$REPLY_IDX" == "1" ]] && RUN_AFTER=1
+
+  echo
+  echo "${BOLD}==> ${INSTALL_ROLE} / ${RUN_MODE}$( [[ "$RUN_AFTER" == "1" ]] && echo " / run after install" )$( [[ "$UNBLOCK_FIREWALL" == "1" ]] && echo " / unblock firewall" )$( [[ "$FORCE_CLOUDFLARE" == "1" ]] && echo " / force cloudflare tunnel" )$( [[ "$TAILSCALE_CLOUD" == "1" ]] && echo " / +Tailscale Inc cloud" )${RESET}"
+  echo
+fi
+
 for arg in "$@"; do
   case "$arg" in
     --run) RUN_AFTER=1 ;;
-    --online) RUN_MODE="online"; RUN_AFTER=1 ;;
-    --local) RUN_MODE="local"; RUN_AFTER=1 ;;
+    --online) RUN_MODE="online"; RUN_AFTER=1; RUN_PASS_ARGS+=(--online) ;;
+    --local) RUN_MODE="local"; RUN_AFTER=1; RUN_PASS_ARGS+=(--local) ;;
     --host) INSTALL_ROLE="host" ;;
     --client|--player) INSTALL_ROLE="client" ;; # legacy aliases; default is already client
     --mesh) INSTALL_MESH=1 ;;
     --no-mesh) INSTALL_MESH=0 ;;
-    --unblock-firewall) UNBLOCK_FIREWALL=1 ;;
+    --unblock-firewall) UNBLOCK_FIREWALL=1; RUN_PASS_ARGS+=(--unblock-firewall) ;;
+    --force-cloudflare) FORCE_CLOUDFLARE=1; RUN_PASS_ARGS+=(--force-cloudflare) ;;
+    --mesh-first) RUN_PASS_ARGS+=(--mesh-first) ;;
+    --verbose|-v) RUN_PASS_ARGS+=(--verbose) ;;
+    host|client) RUN_PASS_ARGS+=("$arg") ;;
     -h|--help)
       cat <<EOF
-usage: ./install.sh [--host] [--run|--online|--local] [--mesh|--no-mesh] [--unblock-firewall]
+usage: ./install.sh [--host] [--run] [--online|--local] [run.sh flags…] [--mesh|--no-mesh]
 
   Default (friend / player):
     ./install.sh              build player (Headscale-ready; no Tailscale Inc popup)
-    ./install.sh --run        then start client --local (paste host join URL)
-    ./install.sh --online     then start client --online (paste host join URL;
-                              auto-joins Headscale when invite has hs= + tskey=)
-    ./install.sh --online --unblock-firewall
-                              also open local OS firewall for mesh/TURN
+    ./install.sh --run        install then ./scripts/run.sh client --local
+    ./install.sh --online     install then ./scripts/run.sh client --online
+    ./install.sh --run --online --unblock-firewall
+                              same — all run.sh flags pass through after --run
 
   Host (gaming PC):
     ./install.sh --host                 build host + Headscale + WireGuard
-    ./install.sh --host --online        then host --online (Headscale PRIME mesh)
-    ./install.sh --host --local|--run   then host --local
+    ./install.sh --host --online        install then full online host stack
+    ./install.sh --host --run --online --force-cloudflare --verbose
+    ./install.sh --host --run --online --mesh-first   # legacy mesh-first path
 
   --mesh / --no-mesh   mesh tooling; default on
   Opt-in Tailscale Inc cloud install: COUCHLINK_INSTALL_TAILSCALE_CLOUD=1
 EOF
       exit 0
+      ;;
+    *)
+      echo "unknown install argument: $arg" >&2
+      echo "run ./install.sh --help" >&2
+      exit 1
       ;;
   esac
 done
@@ -50,6 +144,9 @@ done
 COUCHLINK_INSTALL_MESH="$INSTALL_MESH"
 COUCHLINK_INSTALL_ROLE="$INSTALL_ROLE"
 export COUCHLINK_INSTALL_MESH COUCHLINK_INSTALL_ROLE
+if [[ "$TAILSCALE_CLOUD" == "1" ]]; then
+  export COUCHLINK_INSTALL_TAILSCALE_CLOUD=1
+fi
 
 echo "==> couchlink install ($INSTALL_ROLE)"
 
@@ -273,10 +370,25 @@ if [[ "$INSTALL_ROLE" == "host" && "$PLATFORM" == "wsl" ]]; then
     bash "$ROOT/scripts/enable-wsl-mirrored.sh" ||       echo "warning: mirrored networking not configured — Cloudflare tunnel stays the fallback"
   fi
 
-  echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
+  # docs/INCIDENT-2026-08-19-terminals-died.md: on a default Windows 11
+  # install every console couchlink spawns (including the non-interactive
+  # ones this installer itself runs) attaches into the user's interactive
+  # Windows Terminal, and a crash there can take the whole terminal — and any
+  # game session running under it — down with it. Fix it at install time,
+  # not just on first game session.
   if command -v powershell.exe >/dev/null 2>&1; then
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
-      "$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
+      "$(wslpath -w "$ROOT/scripts/windows/fix-default-terminal.ps1")" || \
+      echo "warning: could not set default terminal app — Windows Terminal stays a crash risk for spawned consoles"
+  fi
+
+  echo "==> building Windows capture bridge (auto for WSL → Windows desktop/window)"
+  if command -v powershell.exe >/dev/null 2>&1; then
+    if ! powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+      "$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"; then
+      echo "warning: couchlink-win-capture.exe build failed — host will stream video only"
+      echo "         install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1"
+    fi
   else
     echo "warning: powershell.exe missing — cannot build couchlink-win-capture.exe"
   fi
@@ -413,9 +525,24 @@ fi
 echo ""
 
 if [[ "$RUN_AFTER" == "1" ]]; then
-  RUN_ARGS=("$INSTALL_ROLE" "--${RUN_MODE}")
-  if [[ "$UNBLOCK_FIREWALL" == "1" ]]; then
-    RUN_ARGS+=(--unblock-firewall)
+  RUN_ARGS=()
+  if [[ ${#RUN_PASS_ARGS[@]} -gt 0 ]]; then
+    # User passed explicit run.sh flags (--online, host, --verbose, …).
+    _has_role=0
+    for _a in "${RUN_PASS_ARGS[@]}"; do
+      [[ "$_a" == "host" || "$_a" == "client" ]] && _has_role=1
+    done
+    if [[ "$_has_role" == "1" ]]; then
+      RUN_ARGS=("${RUN_PASS_ARGS[@]}")
+    else
+      RUN_ARGS=("$INSTALL_ROLE" "${RUN_PASS_ARGS[@]}")
+    fi
+    unset _has_role _a
+  else
+    # Wizard or bare --run: role + mode from install choices.
+    RUN_ARGS=("$INSTALL_ROLE" "--${RUN_MODE}")
+    [[ "$UNBLOCK_FIREWALL" == "1" ]] && RUN_ARGS+=(--unblock-firewall)
+    [[ "$FORCE_CLOUDFLARE" == "1" ]] && RUN_ARGS+=(--force-cloudflare)
   fi
   echo "==> starting ./scripts/run.sh ${RUN_ARGS[*]}"
   exec bash "$ROOT/scripts/run.sh" "${RUN_ARGS[@]}"

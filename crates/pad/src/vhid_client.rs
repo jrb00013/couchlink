@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use tracing::info;
 
 use crate::map_frame::pad_frame_to_dualsense_usb_report;
-use crate::vhid_proto::{encode_input, take_output_frame, VHID_TCP_PORT};
+use crate::vhid_proto::{encode_input, encode_slot_hello, take_output_frame, VHID_TCP_PORT};
 #[cfg(windows)]
 use crate::vhid_proto::VHID_PIPE_NAME;
 use couchlink_proto::PadFeedback;
@@ -77,9 +77,18 @@ impl<T: Read + Write + Send> VhidIo for T {}
 
 impl VhidClient {
     /// Auto: TCP localhost, then the Windows host from WSL, then named pipe.
-    pub fn connect() -> Result<Self> {
+    ///
+    /// `slot` is this couchlink player slot (1-based; the host's own physical
+    /// pad never goes through the companion, so 0 is never a real caller
+    /// here). Announced to the companion immediately as the very first frame
+    /// so it can route this connection into that slot's own pre-existing
+    /// virtual controller — see `crate::vhid_proto` for why this can't be
+    /// inferred from connection arrival order (a reconnect after a network
+    /// blip would otherwise land on whatever slot happens to be next in
+    /// line, silently taking over a different player's controller).
+    pub fn connect(slot: u8) -> Result<Self> {
         for host in vhid_tcp_hosts() {
-            match Self::connect_tcp(&host, VHID_TCP_PORT) {
+            match Self::connect_tcp(&host, VHID_TCP_PORT, slot) {
                 Ok(c) => return Ok(c),
                 Err(e) => {
                     tracing::debug!("VHID TCP {host} unavailable: {e:#}");
@@ -88,7 +97,7 @@ impl VhidClient {
         }
         #[cfg(windows)]
         {
-            if let Ok(c) = Self::connect_pipe() {
+            if let Ok(c) = Self::connect_pipe(slot) {
                 return Ok(c);
             }
         }
@@ -98,9 +107,9 @@ impl VhidClient {
         )
     }
 
-    pub fn connect_tcp(host: &str, port: u16) -> Result<Self> {
+    pub fn connect_tcp(host: &str, port: u16, slot: u8) -> Result<Self> {
         let addr = format!("{host}:{port}");
-        let stream = TcpStream::connect_timeout(
+        let mut stream = TcpStream::connect_timeout(
             &addr
                 .parse()
                 .with_context(|| format!("parse DualSense VHID addr {addr}"))?,
@@ -108,9 +117,12 @@ impl VhidClient {
         )
         .with_context(|| format!("connect DualSense VHID TCP {addr}"))?;
         stream.set_nodelay(true)?;
+        stream
+            .write_all(&encode_slot_hello(slot))
+            .with_context(|| format!("send slot hello (slot {slot}) to {addr}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(1)))?;
         stream.set_nonblocking(true)?;
-        info!("connected DualSense VHID TCP {addr}");
+        info!("connected DualSense VHID TCP {addr} (slot {slot})");
         Ok(Self {
             stream: Box::new(stream),
             rx_buf: Vec::new(),
@@ -118,13 +130,16 @@ impl VhidClient {
     }
 
     #[cfg(windows)]
-    pub fn connect_pipe() -> Result<Self> {
-        let stream = std::fs::OpenOptions::new()
+    pub fn connect_pipe(slot: u8) -> Result<Self> {
+        let mut stream = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(VHID_PIPE_NAME)
             .with_context(|| format!("open {VHID_PIPE_NAME}"))?;
-        info!("connected DualSense VHID pipe");
+        stream
+            .write_all(&encode_slot_hello(slot))
+            .with_context(|| format!("send slot hello (slot {slot}) to pipe"))?;
+        info!("connected DualSense VHID pipe (slot {slot})");
         Ok(Self {
             stream: Box::new(stream),
             rx_buf: Vec::new(),

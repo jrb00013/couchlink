@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
+exclude = [
+  "vendor/webrtc-ice-0.17.2",
+  "vendor/webrtc-sctp-0.17.2",
+]
 members = [
   "crates/proto",
   "crates/pad",
@@ -33,3 +37,23 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 couchlink-proto = { path = "crates/proto" }
 couchlink-pad = { path = "crates/pad" }
+
+# webrtc-ice 0.17.2 builds "host:port" for STUN/TURN server addresses by
+# gluing url.host and url.port together with a bare format!(), even though
+# Url::parse_url already stripped the [] brackets from IPv6 literals earlier
+# in the same crate. The result is ambiguous ("2603:...::1dbd:3478") and
+# fails to resolve, breaking ICE entirely for any IPv6-only STUN/TURN URL —
+# no fix has shipped upstream as of 0.17.2 (the latest release). Patched
+# locally in vendor/webrtc-ice-0.17.2 to re-bracket IPv6 hosts before the
+# concatenation, matching Url's own Display impl a few lines above the bug.
+#
+# webrtc-sctp 0.17.2 hands each chunk the remainder of the SCTP packet
+# (`raw.slice(offset..)`). FORWARD-TSN / ABORT / ERROR parsers then walk
+# `buf.len()` instead of the chunk Length. Chrome bundles a minimum
+# FORWARD-TSN (no stream pairs — RFC 3758 unordered DATA) with SACK/DATA;
+# the parser returns "chunk too short", the whole packet is dropped, and
+# pad + video freeze. No 0.17.x release has the rtc#89 slice-to-length
+# fix. Patched in vendor/webrtc-sctp-0.17.2.
+[patch.crates-io]
+webrtc-ice = { path = "vendor/webrtc-ice-0.17.2" }
+webrtc-sctp = { path = "vendor/webrtc-sctp-0.17.2" }
