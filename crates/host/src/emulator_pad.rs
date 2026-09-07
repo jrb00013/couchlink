@@ -75,25 +75,41 @@ pub fn emulator_player_for(slot: u8) -> u8 {
     slot + 1
 }
 
-/// Every remote slot a session can seat, in bind order.
-fn prebind_slots() -> impl Iterator<Item = u8> {
+/// Every remote slot a session can seat, in slot order.
+///
+/// Test-only since emulator binding became per-join: nothing in the running
+/// host iterates the slots any more (`prebind_all` makes the ViGEm seats in
+/// one call, and `apply` binds exactly the one slot that just sat down). The
+/// slot→player invariants it backs are still worth pinning, because they are
+/// the ones that fail silently — see the tests below.
+#[cfg(test)]
+fn seatable_slots() -> impl Iterator<Item = u8> {
     1..=MAX_REMOTE_SLOTS
 }
 
-/// Write every remote slot's emulator binding once, before anyone connects.
+/// Create the ViGEm seats every remote slot may need, before anyone connects.
+/// Does **not** touch the emulator's own Player N config — see below.
 ///
 /// Two independent pieces (do not conflate them):
 ///
 /// **A — Persistent ViGEm seats** (`ensure-ds-vhid` / companion preallocate):
 /// XInput-0/1/2 exist for the companion lifetime. Late joins attach; no PnP.
+/// Eager and unconditional: creating a virtual pad nobody ends up using is
+/// invisible (RPCS3/PCSX2 never look at it until something names it), so
+/// there is no cost to doing all three regardless of how many friends this
+/// session actually expects — which is unknowable up front.
 ///
-/// **B — Runtime PCSX2 reconfiguration** (headless):
-/// Prefer `inputprofiles/couchlink.ini` + `EmuCore/InputProfileName=couchlink`
-/// on the game settings layer so `UpdateGameSettingsLayer` / Load() picks up
-/// Pad* without UI. Join does not need to mutate Pad*. Optional UIA Apply
-/// Profile remains behind `COUCHLINK_PCSX2_LIVE_APPLY=1` only.
-///
-/// Slot → device map is fixed: slot 1 → XInput-0 → port 1B, etc.
+/// **B — Emulator Player N binding** (`link-emulator-pad.sh`): deliberately
+/// NOT done here for every slot. Naming a slot in RPCS3's Default.yml (or
+/// PCSX2's ini) makes the emulator treat that player as present — a real
+/// controller icon, and in games with a bot-vs-human player count (e.g.
+/// Mortal Kombat co-op vs. CPU) an extra bound-but-idle Player 3/4 changes
+/// how the game reads the room. Session size varies every time (solo vs.
+/// friend vs. full lobby) and cannot be guessed at host start, so this half
+/// runs per-slot in `apply_on_join`/`apply` instead — only a slot someone
+/// actually sits in ever gets named to the emulator. The join-time write is
+/// a local file edit, not the PnP device creation A avoids, so lazily doing
+/// B costs nothing latency-wise.
 ///
 /// Best-effort like the rest of this module: a failure here leaves the
 /// per-join `apply` path as the fallback it always was.
@@ -103,19 +119,9 @@ pub fn prebind_all() {
         return;
     };
     let backend = backend_for(JOIN_PAD_KIND);
-    // Companion first so the three remote ViGEm seats exist (and claim
-    // stable XInput indices) before we name them in the emulator ini.
     run(&root, "scripts/ensure-ds-vhid.sh", backend, None);
-    for slot in prebind_slots() {
-        run(
-            &root,
-            "scripts/link-emulator-pad.sh",
-            backend,
-            Some(emulator_player_for(slot)),
-        );
-    }
     info!(
-        "pre-bound {MAX_REMOTE_SLOTS} emulator pad slot(s) — PCSX2 can be started before or after players join"
+        "pre-created {MAX_REMOTE_SLOTS} ViGEm pad seat(s) — emulator Player N binds per-slot on join, not before"
     );
 }
 
@@ -236,7 +242,7 @@ mod tests {
         assert_eq!(emulator_player_for(3), 4);
         // Never player 1: that is the host's own controller, and overwriting it
         // would unbind the person running the session.
-        for slot in prebind_slots() {
+        for slot in seatable_slots() {
             assert!(
                 emulator_player_for(slot) >= 2,
                 "slot {slot} must not claim emulator player 1 (the host's own pad)"
@@ -244,21 +250,22 @@ mod tests {
         }
     }
 
-    /// `prebind_all` exists to remove an ordering constraint: PCSX2 reads its
-    /// ini only at launch, so a slot bound later than PCSX2's start is absent
-    /// for the whole session. That only holds if pre-binding covers *every*
-    /// seatable slot — one gap and that player is silently unplayable, which is
-    /// exactly the bug it was written to prevent.
+    /// Every seatable slot must map to its own emulator player, because
+    /// `apply` binds them one at a time as people sit down and nothing
+    /// reconciles them against each other afterwards. A gap leaves a seated
+    /// player unbound; a duplicate points two players at one pad, which reads
+    /// in-game as "my input moves someone else's character". Both fail
+    /// silently, so pin the whole mapping rather than one example of it.
     #[test]
-    fn prebind_covers_every_seatable_slot_exactly_once() {
-        let slots: Vec<u8> = prebind_slots().collect();
+    fn every_seatable_slot_maps_to_its_own_emulator_player() {
+        let slots: Vec<u8> = seatable_slots().collect();
         assert_eq!(slots, vec![1, 2, 3], "must cover slots 1..=MAX_REMOTE_SLOTS");
         assert_eq!(slots.len(), MAX_REMOTE_SLOTS as usize);
 
         let players: Vec<u8> = slots.iter().copied().map(emulator_player_for).collect();
         assert_eq!(players, vec![2, 3, 4], "emulator players 2-4, host keeps 1");
 
-        // No slot may pre-bind onto another slot's player port: a duplicate
+        // No slot may bind onto another slot's player port: a duplicate
         // would have two players sharing one pad, which reads as "my input
         // moves someone else's character".
         let mut seen = players.clone();
