@@ -32,6 +32,15 @@ mod run {
     };
     use windows_capture::window::Window;
 
+    /// Exit code for "the window I was capturing went away".
+    ///
+    /// Must stay non-zero: `start-win-capture.ps1` treats a zero exit as "the
+    /// capture ended on purpose" and stops its retry loop, while any non-zero
+    /// exit means "relaunch me", which is what re-resolves the window title
+    /// after the emulator restarts. Distinct from 1 so this shows up in a log
+    /// as a deliberate restart request rather than a crash.
+    const EXIT_SOURCE_CLOSED: i32 = 75;
+
     #[derive(Clone, Copy, Debug, ValueEnum)]
     pub enum CaptureSource {
         Desktop,
@@ -638,9 +647,36 @@ mod run {
             Ok(())
         }
 
+        /// The captured window is gone — exit so a fresh process re-resolves it.
+        ///
+        /// The target `Window` is resolved exactly once, at startup, by
+        /// `wait_for_window`. Everything downstream — the capture session, the
+        /// D3D11 device, the encoder — is bound to that one HWND, so when the
+        /// window is destroyed there is nothing this process can do to recover:
+        /// re-resolving in place would mean rebuilding all of it.
+        ///
+        /// Merely logging and continuing (what this used to do) is the worst of
+        /// the options, because the failure is invisible to every watchdog. The
+        /// Hyper-V socket to the host stays open, so the host keeps reading a
+        /// live link and its "link has been down too long" respawn never fires;
+        /// frames either stop or keep arriving from a dead session. The remote
+        /// player sees the picture freeze, or flap between the last good frame
+        /// and black, while the host logs a perfectly healthy stream at full
+        /// fps with 0% dropped. Live-traced 2026-09-07: restarting the emulator
+        /// mid-session did this every single time, and the only cure was
+        /// killing win-capture by hand so it came back against the new window.
+        ///
+        /// Exiting non-zero is what makes it self-healing: `start-win-capture.ps1`
+        /// retries on a non-zero exit (and *stops* on zero), and that relaunch
+        /// re-enters `wait_for_window`, which re-matches the title and waits if
+        /// the emulator has not finished restarting yet. So an emulator restart
+        /// costs a couple of seconds of stream instead of a dead session.
         fn on_closed(&mut self) -> Result<(), Self::Error> {
-            warn!("capture source closed");
-            Ok(())
+            warn!("capture source closed — exiting so the launcher re-resolves the window");
+            // The tracing writer is line-buffered on a background thread; give
+            // the line above a moment to land or the log explains nothing.
+            std::thread::sleep(Duration::from_millis(50));
+            std::process::exit(EXIT_SOURCE_CLOSED);
         }
     }
 

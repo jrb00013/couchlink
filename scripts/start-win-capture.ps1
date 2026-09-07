@@ -39,10 +39,27 @@ try {
     Write-Host "WARN: fix-default-terminal.ps1 failed (non-fatal): $($_.Exception.Message)"
 }
 
-$BuildScript = Join-Path $Root "scripts\build-win-capture.ps1"
-$built = @(& $BuildScript)
-$Bin = "$($built | Select-Object -Last 1)".Trim()
-if (-not $Bin) { throw "build-win-capture.ps1 returned no binary path" }
+# A build failure must not strand a session that already has a working exe.
+# This script is on the host's respawn path, so throwing here means capture
+# never comes back for as long as the build keeps failing — even though the
+# staged copy below is the very binary a successful build would have used.
+# See the matching fallback in ensure-win-capture.sh.
+$StagedBin = Join-Path $env:LOCALAPPDATA "couchlink\bin\couchlink-win-capture.exe"
+$Bin = ""
+try {
+    $built = @(& (Join-Path $Root "scripts\build-win-capture.ps1"))
+    $Bin = "$($built | Select-Object -Last 1)".Trim()
+} catch {
+    Write-Host "WARN: build-win-capture.ps1 failed: $($_.Exception.Message)"
+}
+if (-not $Bin) {
+    if (Test-Path $StagedBin) {
+        Write-Host "WARN: build produced no binary - falling back to staged $StagedBin"
+        $Bin = $StagedBin
+    } else {
+        throw "build-win-capture.ps1 returned no binary path and none is staged at $StagedBin"
+    }
+}
 
 # $Root resolves through the \\wsl.localhost\... UNC share this script was
 # invoked from, so $Bin does too - and Windows shows a blocking "Open File -
@@ -82,7 +99,16 @@ try {
             & $Bin @argList
             $code = $LASTEXITCODE
             if ($null -eq $code -or $code -eq 0) { break }
-            Write-Host "Windows capture: no window matching '$Window' yet (exit $code) - retrying in 2s"
+            # 75 = the captured window was destroyed (emulator restarted or the
+            # game was closed). Relaunching re-resolves the title against the
+            # new window, which is the whole point - see on_closed in
+            # win_capture.rs. Any other non-zero code is the original case:
+            # the window does not exist yet.
+            if ($code -eq 75) {
+                Write-Host "Windows capture: '$Window' window closed - reattaching in 2s"
+            } else {
+                Write-Host "Windows capture: no window matching '$Window' yet (exit $code) - retrying in 2s"
+            }
             Start-Sleep -Seconds 2
         }
     } else {
