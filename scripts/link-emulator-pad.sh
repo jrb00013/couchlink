@@ -76,16 +76,53 @@ fi
 # RPCS3 writes this file with CRLF on Windows: match on the stripped line or
 # every comparison silently fails on the trailing \r and we report a no-op edit
 # as success.
+# Switching Handler must also rewrite the face buttons, not just the device.
+#
+# RPCS3 stores each button as the *name that handler uses for it*, and the
+# handlers do not share one vocabulary. The face buttons are the only ones
+# that actually differ: SDL-family handlers (DualSense, DS4) call them by
+# position — South/East/West/North — while XInput calls them A/B/X/Y. Every
+# other binding in the block (Left/Down/Right/Up, Start, Back, LB/RB, LT/RT,
+# LS/RS) is spelled the same either way.
+#
+# So flipping only Handler/Device leaves whatever the block was last written
+# with. On a config first set up around the host's own DualSense that means
+# SDL names, and under the XInput handler the four face buttons resolve to
+# nothing while everything else keeps working. The player can move, use the
+# D-pad, press Start — and no attack button does anything.
+#
+# It is invisible from every angle: the YAML still lists a name for each
+# button, RPCS3's Gamepad Settings dialog renders those names in the face
+# button boxes (it displays the stored string), and RPCS3 logs the pad as
+# connected. Live-traced 2026-09-07 — X confirmed arriving on the XInput
+# device via XInputGetState while the game ignored it, with the same pad's
+# D-pad working in-game at the same moment. The leftover `VID=0x54c
+# PID=0x268` (DualShock) on an XInput-handler pad is the tell.
+face_button_names() {
+  case "$1" in
+    XInput) echo "X A B Y" ;;   # Square Cross Circle Triangle
+    *)      echo "West South East North" ;;
+  esac
+}
+read -r F_SQUARE F_CROSS F_CIRCLE F_TRIANGLE <<<"$(face_button_names "$HANDLER")"
+
+# `Cross` is read alongside handler/device deliberately. A pad whose handler
+# and device already match but whose face buttons still carry the previous
+# handler's names is the exact broken state this script has to repair, and
+# comparing only handler/device reports it as `already` and walks away —
+# which is what let a player sit through a whole session with no attack
+# buttons while every run logged success.
 current="$(awk -v p="Player $PLAYER Input:" '
   { line = $0; sub(/\r$/, "", line) }
   line == p { inblock = 1; next }
   line ~ /^Player [0-9]+ Input:/ { inblock = 0 }
   inblock && line ~ /^  Handler:/ { h = line; sub(/^  Handler: /, "", h) }
   inblock && line ~ /^  Device:/ { d = line; sub(/^  Device: /, "", d) }
-  END { print h "|" d }
+  inblock && line ~ /^    Cross:/ { x = line; sub(/^    Cross: /, "", x) }
+  END { print h "|" d "|" x }
 ' "$CONFIG")"
 
-want="${HANDLER}|\"${DEVICE}\""
+want="${HANDLER}|\"${DEVICE}\"|${F_CROSS}"
 if [[ "$current" == "$want" ]]; then
   echo "==> RPCS3 Player $PLAYER already linked to $HANDLER / $DEVICE"
   RPCS3_STATUS=already
@@ -97,12 +134,17 @@ if [[ ! -f "$CONFIG.couchlink.bak" ]]; then
 fi
 
 tmp="$(mktemp)"
-awk -v p="Player $PLAYER Input:" -v h="$HANDLER" -v d="$DEVICE" '
+awk -v p="Player $PLAYER Input:" -v h="$HANDLER" -v d="$DEVICE" \
+    -v sq="$F_SQUARE" -v cr_="$F_CROSS" -v ci="$F_CIRCLE" -v tr="$F_TRIANGLE" '
   { line = $0; cr = ""; if (sub(/\r$/, "", line)) cr = "\r" }
   line == p { inblock = 1; print line cr; next }
   line ~ /^Player [0-9]+ Input:/ { inblock = 0 }
   inblock && line ~ /^  Handler:/ { print "  Handler: " h cr; next }
   inblock && line ~ /^  Device:/ { print "  Device: \"" d "\"" cr; next }
+  inblock && line ~ /^    Square: /   { print "    Square: " sq cr; next }
+  inblock && line ~ /^    Cross: /    { print "    Cross: " cr_ cr; next }
+  inblock && line ~ /^    Circle: /   { print "    Circle: " ci cr; next }
+  inblock && line ~ /^    Triangle: / { print "    Triangle: " tr cr; next }
   { print line cr }
 ' "$CONFIG" > "$tmp"
 
