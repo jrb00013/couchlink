@@ -106,6 +106,18 @@ if [[ -n "$window_title" ]]; then
   source_mode="window"
 fi
 
+# Framing overrides, empty unless set, so the capture exe keeps its own
+# defaults (client-area crop on, cursor hidden). These exist so a window that
+# ever measures wrong can be put back to full-frame from .env.couchlink,
+# without rebuilding the Windows binary mid-session.
+_framing_args=""
+if [[ -n "${COUCHLINK_CAPTURE_CROP:-}" ]]; then
+  _framing_args="${_framing_args},'-CropClientArea','${COUCHLINK_CAPTURE_CROP}'"
+fi
+if [[ -n "${COUCHLINK_CAPTURE_HIDE_CURSOR:-}" ]]; then
+  _framing_args="${_framing_args},'-HideCursor','${COUCHLINK_CAPTURE_HIDE_CURSOR}'"
+fi
+
 build_ps1="$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
 start_ps1="$(wslpath -w "$ROOT/scripts/start-win-capture.ps1")"
 
@@ -219,7 +231,7 @@ task_name="couchlink-win-capture"
 _ps_style="Hidden"
 [[ "$source_mode" == "picker" ]] && _ps_style="Normal"
 psw -Command "
-  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$encode_fps','-BitrateKbps','$bitrate_kbps')
+  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$encode_fps','-BitrateKbps','$bitrate_kbps'${_framing_args})
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   # Start-Process flattens -ArgumentList arrays WITHOUT quoting, so a window
   # title like 'Marvel - Ultimate Alliance' becomes argv tokens
