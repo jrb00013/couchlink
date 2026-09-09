@@ -9,6 +9,10 @@ param(
     [int]$MaxWidth = 1920,
     [int]$MaxHeight = 1080,
     [int]$BitrateKbps = 18000,
+    # Default "" means "leave the exe's own default alone". Set to true/false
+    # only to override, so the escape hatch never silently pins a value.
+    [string]$CropClientArea = "",
+    [string]$HideCursor = "",
     [switch]$ListWindows,
     [switch]$BuildOnly
 )
@@ -85,6 +89,8 @@ $argList = @("--connect", $Connect, "--max-fps", "$MaxFps", "--source", $Source,
              "--max-width", "$MaxWidth", "--max-height", "$MaxHeight",
              "--bitrate-kbps", "$BitrateKbps")
 if ($GpuEncode) { $argList += @("--gpu-encode", "true") }
+if ($CropClientArea) { $argList += @("--crop-client-area", $CropClientArea) }
+if ($HideCursor) { $argList += @("--hide-cursor", $HideCursor) }
 if ($Source -eq "window") {
     if (-not $Window) { throw "-Window is required when -Source window" }
     $argList += @("--window", $Window)

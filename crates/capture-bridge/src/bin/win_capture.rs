@@ -32,6 +32,110 @@ mod run {
     };
     use windows_capture::window::Window;
 
+    /// Where the client area sits inside a captured window frame, in pixels.
+    ///
+    /// `(left, top, width, height)`. Cached per captured-texture size by the
+    /// caller — the inset only changes when the window is resized or toggles
+    /// fullscreen, and both change the texture size, so this is never
+    /// recomputed on a steady stream.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct ClientInset {
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+    }
+
+    /// Measure the client area inside a window's captured frame.
+    ///
+    /// Returns `None` whenever the numbers do not describe a sane sub-rectangle
+    /// of the frame, and every caller then sends the frame uncropped. That is
+    /// the deliberate bias: a stream framed with a title bar is a cosmetic
+    /// problem, while a bad rectangle is a black or garbled picture, so
+    /// anything unexpected keeps the old full-frame behaviour.
+    ///
+    /// The frame the compositor hands back is not guaranteed to match
+    /// `GetWindowRect` — DPI scaling, and on Windows 11 the rounded-corner and
+    /// shadow allowance, both show up as a difference — so the insets measured
+    /// in window coordinates are rescaled by the frame-to-window ratio rather
+    /// than trusted as raw pixels.
+    ///
+    /// In fullscreen the client area covers the whole window, so this yields a
+    /// zero inset at full size, which callers treat as "no crop".
+    #[cfg(windows)]
+    fn client_inset(hwnd: isize, frame_w: u32, frame_h: u32) -> Option<ClientInset> {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowInfo, WINDOWINFO};
+
+        // GetWindowInfo hands back the window and client rectangles together,
+        // both already in screen coordinates, so the inset is a subtraction
+        // with no second call to fall out of sync with.
+        let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+        let mut info = WINDOWINFO {
+            cbSize: core::mem::size_of::<WINDOWINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetWindowInfo(hwnd, &mut info).ok()? };
+        let (win, client) = (info.rcWindow, info.rcClient);
+
+        let win_w = win.right.checked_sub(win.left)?;
+        let win_h = win.bottom.checked_sub(win.top)?;
+        let client_w = client.right.checked_sub(client.left)?;
+        let client_h = client.bottom.checked_sub(client.top)?;
+        if win_w <= 0 || win_h <= 0 || client_w <= 0 || client_h <= 0 {
+            return None;
+        }
+
+        let inset_l = client.left.checked_sub(win.left)?;
+        let inset_t = client.top.checked_sub(win.top)?;
+        if inset_l < 0 || inset_t < 0 {
+            return None;
+        }
+
+        // Rescale into frame space (see the DPI / Win11 note above).
+        let sx = f64::from(frame_w) / f64::from(win_w as u32);
+        let sy = f64::from(frame_h) / f64::from(win_h as u32);
+        let left = (f64::from(inset_l as u32) * sx).round() as u32;
+        let top = (f64::from(inset_t as u32) * sy).round() as u32;
+        let width = (f64::from(client_w as u32) * sx).round() as u32;
+        let height = (f64::from(client_h as u32) * sy).round() as u32;
+
+        // Must be a non-empty rectangle that actually fits the frame.
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if left.checked_add(width)? > frame_w || top.checked_add(height)? > frame_h {
+            return None;
+        }
+        // A crop that changes nothing (fullscreen / borderless) is not a crop.
+        if left == 0 && top == 0 && width == frame_w && height == frame_h {
+            return None;
+        }
+        // Guard against a measurement that would throw most of the picture
+        // away — far more likely a bad reading than a real window shape.
+        if u64::from(width) * u64::from(height) * 2 < u64::from(frame_w) * u64::from(frame_h) {
+            return None;
+        }
+        Some(ClientInset {
+            left,
+            top,
+            width,
+            height,
+        })
+    }
+
+    /// Whether the capture API should composite the mouse pointer in.
+    ///
+    /// Excluding it is a capture-API flag, not a per-frame edit, so hiding the
+    /// cursor costs nothing on the hot path.
+    fn cursor_setting(hide: bool) -> CursorCaptureSettings {
+        if hide {
+            CursorCaptureSettings::WithoutCursor
+        } else {
+            CursorCaptureSettings::WithCursor
+        }
+    }
+
     /// Exit code for "the window I was capturing went away".
     ///
     /// Must stay non-zero: `start-win-capture.ps1` treats a zero exit as "the
@@ -83,6 +187,30 @@ mod run {
         pub gpu_encode: bool,
         #[arg(long, default_value_t = 18000)]
         pub bitrate_kbps: u32,
+        /// Send only the window's client area — no title bar, border or shadow
+        /// (`--source window` only).
+        ///
+        /// A window capture includes the whole window as the compositor draws
+        /// it, so the remote player watches the emulator's title bar and frame
+        /// instead of just the game. In fullscreen the client area *is* the
+        /// window, so the inset computes to zero and this becomes a no-op —
+        /// nothing special is needed for that case.
+        ///
+        /// Free: the inset is folded into the source rectangle of the scale
+        /// the video processor already performs, so it is the same blit on a
+        /// smaller source, not an extra pass. Set false if a window ever
+        /// crops wrong and you need the old full-window framing back without
+        /// rebuilding.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        pub crop_client_area: bool,
+        /// Leave the mouse cursor out of the captured frames.
+        ///
+        /// The host's pointer is meaningless to the remote player — it is not
+        /// their cursor and they cannot move it — and it sits on top of the
+        /// game. Handled by the capture API itself, so excluding it costs
+        /// nothing per frame.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        pub hide_cursor: bool,
     }
 
     /// width, height, payload, format, keyframe
@@ -177,6 +305,16 @@ mod run {
         sent: u32,
         dropped: u32,
         rate_window: Instant,
+        /// Window being captured, for measuring the client area. 0 when the
+        /// source is a monitor or came from the picker, where there is no
+        /// window chrome to remove.
+        crop_hwnd: isize,
+        /// Frame size the cached `crop` was measured against. The client inset
+        /// only moves when the window is resized or toggles fullscreen, and
+        /// both change this, so a steady stream never re-measures.
+        crop_for_size: Option<(u32, u32)>,
+        /// Cached client area, or None for "send the frame as captured".
+        crop: Option<ClientInset>,
     }
 
     /// Own the encoder on a dedicated thread parked on the MFT's event queue.
@@ -443,6 +581,30 @@ mod run {
     /// Area-average box fit. Nearest-neighbour made UI text look crunchy whenever
     /// the capture was smaller than the monitor; this keeps edges readable without
     /// a heavyweight scaler on the capture thread.
+    /// Copy out the client-area sub-rectangle of a BGRA frame.
+    ///
+    /// CPU-path counterpart to the video processor's source rectangle. Rows are
+    /// contiguous, so this is one `extend_from_slice` per row of the crop, and
+    /// it moves fewer bytes than the uncropped frame did.
+    ///
+    /// `inset` is already validated to fit inside the frame by `client_inset`;
+    /// a row that somehow falls outside is skipped rather than panicking, so a
+    /// bad rectangle cannot take the stream down mid-session.
+    fn crop_bgra(src: &[u8], src_w: u32, inset: ClientInset) -> Vec<u8> {
+        let stride = src_w as usize * 4;
+        let row_bytes = inset.width as usize * 4;
+        let left_bytes = inset.left as usize * 4;
+        let mut out = Vec::with_capacity(row_bytes * inset.height as usize);
+        for row in 0..inset.height as usize {
+            let start = (inset.top as usize + row) * stride + left_bytes;
+            match src.get(start..start + row_bytes) {
+                Some(slice) => out.extend_from_slice(slice),
+                None => break,
+            }
+        }
+        out
+    }
+
     fn downscale_bgra(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
         let mut out = vec![0u8; (dw * dh * 4) as usize];
         let sw = sw as usize;
@@ -503,7 +665,7 @@ mod run {
     }
 
     impl GraphicsCaptureApiHandler for BridgeCapture {
-        type Flags = (mpsc::SyncSender<FrameMsg>, Duration, u32, u32, EncoderCfg);
+        type Flags = (mpsc::SyncSender<FrameMsg>, Duration, u32, u32, EncoderCfg, isize);
         type Error = CaptureError;
 
         fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
@@ -530,6 +692,9 @@ mod run {
                 sent: 0,
                 dropped: 0,
                 rate_window: Instant::now(),
+                crop_hwnd: ctx.flags.5,
+                crop_for_size: None,
+                crop: None,
             })
         }
 
@@ -563,6 +728,31 @@ mod run {
             }
             self.last = Instant::now();
             let (w, h, _) = gpu_convert::texture_size(frame.as_raw_texture());
+            // Re-measure the client area only when the frame size changes — a
+            // resize or a fullscreen toggle. On a steady stream this is two
+            // comparisons per frame and nothing else.
+            if self.crop_hwnd != 0 && self.crop_for_size != Some((w, h)) {
+                self.crop_for_size = Some((w, h));
+                let previous = self.crop;
+                self.crop = client_inset(self.crop_hwnd, w, h);
+                if self.crop != previous {
+                    match self.crop {
+                        Some(c) => info!(
+                            "cropping to client area {}x{} at +{},+{} of {w}x{h} (window chrome trimmed)",
+                            c.width, c.height, c.left, c.top
+                        ),
+                        None => info!("sending full {w}x{h} frame (no window chrome to trim)"),
+                    }
+                }
+            }
+            // Everything downstream sizes against the visible picture, so a
+            // cropped frame keeps the game's aspect ratio instead of the
+            // window's.
+            let (src_w, src_h) = match self.crop {
+                Some(c) => (c.width, c.height),
+                None => (w, h),
+            };
+            let crop_rect = self.crop.map(|c| (c.left, c.top, c.width, c.height));
             // Zero-copy first: if the captured surface can be converted to NV12 on
             // the GPU, the pixels never touch system memory. This only applies when
             // no downscale is needed — scaling still happens on the CPU path, and
@@ -571,7 +761,7 @@ mod run {
                 && !self.gpu_convert_failed
                 && ZERO_COPY_OK.load(Ordering::Relaxed)
             {
-                let (tw, th) = fit(w, h, self.max_w, self.max_h);
+                let (tw, th) = fit(src_w, src_h, self.max_w, self.max_h);
                 let texture = frame.as_raw_texture().clone();
                 if gpu_convert::is_bgra(&texture) {
                     if self.converter.as_ref().map(|c| c.dimensions())
@@ -591,6 +781,9 @@ mod run {
                         }
                     }
                     if let Some(converter) = self.converter.as_mut() {
+                        // Folded into the scale the processor already does —
+                        // same blit, smaller source rectangle, no extra pass.
+                        converter.set_source_rect(crop_rect);
                         match converter.to_nv12(&texture) {
                             Ok(nv12) => {
                                 let raw = self.raw_tx.as_ref().expect("checked above");
@@ -617,6 +810,18 @@ mod run {
 
             let buffer = frame.buffer()?;
             let raw = buffer.as_nopadding_buffer(&mut self.scratch);
+            // Same framing as the GPU path. This one really does copy rows, but
+            // it only runs when the GPU conversion is unavailable — already the
+            // slow fallback — and it copies *less* than before, since the
+            // chrome is dropped rather than scaled.
+            let cropped;
+            let (raw, w, h) = match self.crop {
+                Some(c) => {
+                    cropped = crop_bgra(raw, w, c);
+                    (cropped.as_slice(), c.width, c.height)
+                }
+                None => (raw, w, h),
+            };
             let (dw, dh) = fit(w, h, self.max_w, self.max_h);
             let (w, h, pixels) = if (dw, dh) == (w, h) {
                 (w, h, raw.to_vec())
@@ -948,7 +1153,9 @@ mod run {
             "capturing at most {}x{} (wire format settles on the first frame)",
             args.max_width, args.max_height
         );
-        let flags = (tx, frame_dur, args.max_width, args.max_height, enc_cfg);
+        // Trailing 0: only a window capture has chrome to trim, so the other
+        // sources carry "no window to measure" and skip cropping entirely.
+        let flags = (tx, frame_dur, args.max_width, args.max_height, enc_cfg, 0isize);
 
         match args.source {
             CaptureSource::Desktop => {
@@ -957,7 +1164,7 @@ mod run {
                 info!("capturing primary monitor → {}", args.connect);
                 let settings = Settings::new(
                     m,
-                    CursorCaptureSettings::WithCursor,
+                    cursor_setting(args.hide_cursor),
                     DrawBorderSettings::Default,
                     SecondaryWindowSettings::Default,
                     MinimumUpdateIntervalSettings::Custom(frame_dur),
@@ -999,7 +1206,7 @@ mod run {
                         spawn_tcp_writer(args.connect.clone(), rx);
                         let settings = Settings::new(
                             item,
-                            CursorCaptureSettings::WithCursor,
+                            cursor_setting(args.hide_cursor),
                             DrawBorderSettings::Default,
                             SecondaryWindowSettings::Default,
                             MinimumUpdateIntervalSettings::Custom(frame_dur),
@@ -1019,7 +1226,7 @@ mod run {
                         info!("capturing primary monitor → {}", args.connect);
                         let settings = Settings::new(
                             m,
-                            CursorCaptureSettings::WithCursor,
+                            cursor_setting(args.hide_cursor),
                             DrawBorderSettings::Default,
                             SecondaryWindowSettings::Default,
                             MinimumUpdateIntervalSettings::Custom(frame_dur),
@@ -1046,9 +1253,19 @@ mod run {
                     couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
                 }
                 spawn_tcp_writer(args.connect.clone(), rx);
+                // Only this source can be cropped to a client area — the
+                // monitor and picker paths have no window frame to measure.
+                let flags = (
+                    flags.0,
+                    flags.1,
+                    flags.2,
+                    flags.3,
+                    flags.4,
+                    if args.crop_client_area { w.as_raw_hwnd() as isize } else { 0 },
+                );
                 let settings = Settings::new(
                     w,
-                    CursorCaptureSettings::WithCursor,
+                    cursor_setting(args.hide_cursor),
                     DrawBorderSettings::Default,
                     SecondaryWindowSettings::Default,
                     MinimumUpdateIntervalSettings::Custom(frame_dur),

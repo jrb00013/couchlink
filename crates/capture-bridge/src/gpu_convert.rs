@@ -33,6 +33,9 @@ pub struct GpuConverter {
     next: usize,
     src: (u32, u32),
     dst: (u32, u32),
+    /// Current source-rect crop, so `set_source_rect` is a no-op when nothing
+    /// changed and the driver call only happens on a real geometry change.
+    source_rect: Option<(u32, u32, u32, u32)>,
 }
 
 // SAFETY: the D3D11 device is created without D3D11_CREATE_DEVICE_SINGLETHREADED, so
@@ -93,6 +96,7 @@ impl GpuConverter {
                 next: 0,
                 src: (src_w, src_h),
                 dst: (dst_w, dst_h),
+                source_rect: None,
             })
         }
     }
@@ -100,6 +104,48 @@ impl GpuConverter {
     /// (source, destination) sizes this converter was built for.
     pub const fn dimensions(&self) -> ((u32, u32), (u32, u32)) {
         (self.src, self.dst)
+    }
+
+    /// Restrict the blit to `rect` (`left, top, width, height`) of the source.
+    ///
+    /// This is how a crop is applied without paying for one. The video
+    /// processor is already scaling source to destination; giving it a source
+    /// rectangle just means it reads a sub-region of the same texture in the
+    /// same pass. There is no second blit, no intermediate surface and no
+    /// extra copy, so a cropped frame costs exactly what an uncropped one did.
+    ///
+    /// It is processor state rather than a per-blit argument, so this is
+    /// called only when the rectangle actually changes (window resized,
+    /// fullscreen toggled) and never on a steady stream. `None` clears it back
+    /// to the full source.
+    ///
+    /// Best-effort like the rest of this module: a driver that rejects the
+    /// rectangle leaves the stream running uncropped rather than failing.
+    pub fn set_source_rect(&mut self, rect: Option<(u32, u32, u32, u32)>) {
+        if self.source_rect == rect {
+            return;
+        }
+        let (enable, r) = match rect {
+            Some((left, top, width, height)) => (
+                true,
+                windows::Win32::Foundation::RECT {
+                    left: left as i32,
+                    top: top as i32,
+                    right: (left + width) as i32,
+                    bottom: (top + height) as i32,
+                },
+            ),
+            None => (false, windows::Win32::Foundation::RECT::default()),
+        };
+        unsafe {
+            self.video_context.VideoProcessorSetStreamSourceRect(
+                &self.processor,
+                0,
+                enable,
+                Some(&r),
+            );
+        }
+        self.source_rect = rect;
     }
 
     /// Convert a captured BGRA texture into NV12, entirely on the GPU. The returned
