@@ -4,6 +4,7 @@
 //! Kept pure (no filesystem) so unit tests can prove every supported Xbox
 //! variant and DualSense / DualSense Edge / DualShock 4 product is accepted.
 
+use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 use crate::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
 use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 use crate::steam_controller::{
@@ -187,7 +188,10 @@ mod tests {
     fn dualsense_and_edge_are_recognized() {
         assert!(is_supported_dualsense(SONY_VID, PID_DUALSENSE));
         assert!(is_supported_dualsense(SONY_VID, PID_DUALSENSE_EDGE));
-        assert_eq!(classify(SONY_VID, PID_DUALSENSE), ControllerFamily::DualSense);
+        assert_eq!(
+            classify(SONY_VID, PID_DUALSENSE),
+            ControllerFamily::DualSense
+        );
         assert_eq!(
             classify(SONY_VID, PID_DUALSENSE_EDGE),
             ControllerFamily::DualSense
@@ -254,8 +258,7 @@ mod tests {
 
     #[test]
     fn parses_sysfs_hid_id() {
-        let (bus, vid, pid) =
-            parse_hid_id_line("HID_ID=0003:0000045E:00000B12").unwrap();
+        let (bus, vid, pid) = parse_hid_id_line("HID_ID=0003:0000045E:00000B12").unwrap();
         assert_eq!(bus, 0x0003);
         assert_eq!(vid, MICROSOFT_VID);
         assert_eq!(pid, PID_XBOX_SERIES);
