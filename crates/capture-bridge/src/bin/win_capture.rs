@@ -1243,40 +1243,66 @@ mod run {
                 if args.window.trim().is_empty() {
                     bail!("--source window requires --window TITLE_SUBSTRING");
                 }
-                let w = wait_for_window(&args.window)?;
-                info!(
-                    "capturing window '{}' → {}",
-                    w.title().unwrap_or_else(|_| args.window.clone()),
-                    args.connect
-                );
-                if args.keep_rendering {
-                    couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
-                }
+                // Reconnect loop: when the window closes (game exit, alt-F4, crash,
+                // switching games) we wait for it to reappear and restart capture
+                // automatically rather than exiting and relying on the PS1 wrapper
+                // to relaunch us.
                 spawn_tcp_writer(args.connect.clone(), rx);
-                // Only this source can be cropped to a client area — the
-                // monitor and picker paths have no window frame to measure.
-                let flags = (
-                    flags.0,
-                    flags.1,
-                    flags.2,
-                    flags.3,
-                    flags.4,
-                    if args.crop_client_area { w.as_raw_hwnd() as isize } else { 0 },
-                );
-                let settings = Settings::new(
-                    w,
-                    cursor_setting(args.hide_cursor),
-                    DrawBorderSettings::Default,
-                    SecondaryWindowSettings::Default,
-                    MinimumUpdateIntervalSettings::Custom(frame_dur),
-                    DirtyRegionSettings::Default,
-                    ColorFormat::Bgra8,
-                    flags,
-                );
-                let result = BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"));
-                // Never leave someone else's window parked at -32000.
-                couchlink_capture_bridge::keep_rendering::stop();
-                result?;
+                 loop {
+                    let w = wait_for_window(&args.window)?;
+
+                    info!(
+                        "capturing window '{}' → {}",
+                        w.title().unwrap_or_else(|_| args.window.clone()),
+                        args.connect
+                    );
+
+                    if args.keep_rendering {
+                        couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
+                    }
+
+                    // Only window capture can have window chrome to trim.
+                    // Pass the HWND to BridgeCapture when client-area cropping
+                    // is enabled; otherwise pass 0 and send the full frame.
+                    let window_flags = (
+                        flags.0.clone(),
+                        flags.1,
+                        flags.2,
+                        flags.3,
+                        flags.4,
+                        if args.crop_client_area {
+                            w.as_raw_hwnd() as isize
+                        } else {
+                            0
+                        },
+                    );
+
+                    let settings = Settings::new(
+                        w,
+                        cursor_setting(args.hide_cursor),
+                        DrawBorderSettings::Default,
+                        SecondaryWindowSettings::Default,
+                        MinimumUpdateIntervalSettings::Custom(frame_dur),
+                        DirtyRegionSettings::Default,
+                        ColorFormat::Bgra8,
+                        window_flags,
+                    );
+
+                    if let Err(e) =
+                        BridgeCapture::start(settings).map_err(|e| anyhow::anyhow!("{e}"))
+                    {
+                        warn!(
+                            "capture ended: {e:#} — waiting for window to reappear"
+                        );
+                    } else {
+                        warn!(
+                            "capture window closed — waiting for it to reappear"
+                        );
+                    }
+
+                    // Never leave someone else's window parked at -32000.
+                    couchlink_capture_bridge::keep_rendering::stop();
+                }
             }
         }
         Ok(())

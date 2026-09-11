@@ -2,8 +2,9 @@
 //! vs the invariants that must not regress.
 //!
 //! **A (baseline)** — live drawer from Ricardo B. on canvas / RTP, feeling good:
-//! push 0.1ms · 77.8fps · 0% shed · 5.00 Mbps@60 · capture ~1.7ms · paint 74 ·
-//! decode 82 · RTT 48ms · freeze 0.
+//! push 0.1ms · 77.8fps · 0% shed · 10.00 Mbps@60 (re-baselined from the
+//! original 5 Mbps probe by 343ce8e, "production motion — 10Mbps@60") ·
+//! capture ~1.7ms · paint 74 · decode 82 · RTT 48ms · freeze 0.
 //!
 //! **B (must hold)** — code + math that keep that shape reachable. If these fail,
 //! we have walked back into the IDR / dual-send / fps-drop death spiral.
