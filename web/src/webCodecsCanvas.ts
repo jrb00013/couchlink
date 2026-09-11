@@ -20,6 +20,18 @@ import {
   type AgeBand,
 } from "./presentAge";
 
+// Must match the host's BT.709 full-range NV12 tagging (bgra_to_nv12 /
+// MF_MT_YUV_MATRIX in mf_encoder.rs). The SPS's own VUI is the source of
+// truth when present; this is the fallback WebCodecs uses if it isn't, so it
+// has to agree with what the encoder actually emits or the fix just moves
+// where the tint shows up.
+const VIDEO_COLOR_SPACE: VideoColorSpaceInit = {
+  primaries: "bt709",
+  transfer: "bt709",
+  matrix: "bt709",
+  fullRange: true,
+};
+
 export function canUseWebCodecs(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -340,6 +352,7 @@ export class WebCodecsCanvasView {
             codedHeight: height || undefined,
             optimizeForLatency: true,
             hardwareAcceleration: accel,
+            colorSpace: VIDEO_COLOR_SPACE,
           });
           results.push({ accel, supported: !!r.supported });
         } catch {
@@ -485,6 +498,7 @@ export class WebCodecsCanvasView {
             codedHeight: au.height || undefined,
             optimizeForLatency: true,
             hardwareAcceleration: this.hwAccel,
+            colorSpace: VIDEO_COLOR_SPACE,
           });
         } catch (e) {
           cwarn("VideoDecoder configure failed; forcing prefer-software", e);

@@ -4,11 +4,17 @@ use crate::link_gov::LinkGov;
 use crate::ricardo_playable_ab::ricardo_playable_a as A;
 use couchlink_capture_bridge::EncodeTarget;
 
-const P720_5M: EncodeTarget = EncodeTarget {
+// Must track ricardo_playable_ab::ricardo_playable_a::ENCODER_KBPS — the
+// production preset moved to 10 Mbps (343ce8e, "production motion — 10Mbps@60,
+// no B-frames") but this simulated baseline was left at the old 5 Mbps value,
+// so the governor here never reached the bitrate every test compared it
+// against (A::ENCODER_KBPS). Session replay must start from what the encoder
+// actually ships, not a stale constant.
+const PRODUCTION_BASELINE: EncodeTarget = EncodeTarget {
     width: 1280,
     height: 720,
     fps: 60,
-    bitrate_kbps: 5_000,
+    bitrate_kbps: A::ENCODER_KBPS,
 };
 
 #[derive(Debug, Clone)]
@@ -20,8 +26,8 @@ pub struct GovernorSessionResult {
 
 /// Replay shed/sent windows through LinkGov; returns commanded kbps each step.
 pub fn simulate_governor_session(windows: &[(u32, u32)]) -> GovernorSessionResult {
-    let mut gov = LinkGov::new(P720_5M);
-    let baseline_kbps = P720_5M.bitrate_kbps;
+    let mut gov = LinkGov::new(PRODUCTION_BASELINE);
+    let baseline_kbps = PRODUCTION_BASELINE.bitrate_kbps;
     let mut kbps_timeline = Vec::with_capacity(windows.len());
     let mut stepped_down_on_blip = false;
 
@@ -43,7 +49,7 @@ pub fn simulate_governor_session(windows: &[(u32, u32)]) -> GovernorSessionResul
     }
 }
 
-/// Single 10% shed blip then clean — must hold 5 Mbps (Ricardo encoder target).
+/// Single 10% shed blip then clean — must hold baseline bitrate (Ricardo encoder target).
 pub fn single_blip_holds_baseline() -> bool {
     let r = simulate_governor_session(&[(10, 100), (0, 60), (0, 60), (0, 60)]);
     r.kbps_timeline[0] == A::ENCODER_KBPS && r.kbps_timeline[1] == A::ENCODER_KBPS
@@ -71,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn recovering_session_climbs_back_to_5mbps() {
+    fn recovering_session_climbs_back_to_baseline() {
         let mut windows: Vec<(u32, u32)> = (0..10).map(|_| (40, 100)).collect();
         windows.extend((0..40).map(|_| (0, 60)));
         let r = simulate_governor_session(&windows);
