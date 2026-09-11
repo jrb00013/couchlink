@@ -76,16 +76,53 @@ fi
 # RPCS3 writes this file with CRLF on Windows: match on the stripped line or
 # every comparison silently fails on the trailing \r and we report a no-op edit
 # as success.
+# Switching Handler must also rewrite the face buttons, not just the device.
+#
+# RPCS3 stores each button as the *name that handler uses for it*, and the
+# handlers do not share one vocabulary. The face buttons are the only ones
+# that actually differ: SDL-family handlers (DualSense, DS4) call them by
+# position — South/East/West/North — while XInput calls them A/B/X/Y. Every
+# other binding in the block (Left/Down/Right/Up, Start, Back, LB/RB, LT/RT,
+# LS/RS) is spelled the same either way.
+#
+# So flipping only Handler/Device leaves whatever the block was last written
+# with. On a config first set up around the host's own DualSense that means
+# SDL names, and under the XInput handler the four face buttons resolve to
+# nothing while everything else keeps working. The player can move, use the
+# D-pad, press Start — and no attack button does anything.
+#
+# It is invisible from every angle: the YAML still lists a name for each
+# button, RPCS3's Gamepad Settings dialog renders those names in the face
+# button boxes (it displays the stored string), and RPCS3 logs the pad as
+# connected. Live-traced 2026-09-07 — X confirmed arriving on the XInput
+# device via XInputGetState while the game ignored it, with the same pad's
+# D-pad working in-game at the same moment. The leftover `VID=0x54c
+# PID=0x268` (DualShock) on an XInput-handler pad is the tell.
+face_button_names() {
+  case "$1" in
+    XInput) echo "X A B Y" ;;   # Square Cross Circle Triangle
+    *)      echo "West South East North" ;;
+  esac
+}
+read -r F_SQUARE F_CROSS F_CIRCLE F_TRIANGLE <<<"$(face_button_names "$HANDLER")"
+
+# `Cross` is read alongside handler/device deliberately. A pad whose handler
+# and device already match but whose face buttons still carry the previous
+# handler's names is the exact broken state this script has to repair, and
+# comparing only handler/device reports it as `already` and walks away —
+# which is what let a player sit through a whole session with no attack
+# buttons while every run logged success.
 current="$(awk -v p="Player $PLAYER Input:" '
   { line = $0; sub(/\r$/, "", line) }
   line == p { inblock = 1; next }
   line ~ /^Player [0-9]+ Input:/ { inblock = 0 }
   inblock && line ~ /^  Handler:/ { h = line; sub(/^  Handler: /, "", h) }
   inblock && line ~ /^  Device:/ { d = line; sub(/^  Device: /, "", d) }
-  END { print h "|" d }
+  inblock && line ~ /^    Cross:/ { x = line; sub(/^    Cross: /, "", x) }
+  END { print h "|" d "|" x }
 ' "$CONFIG")"
 
-want="${HANDLER}|\"${DEVICE}\""
+want="${HANDLER}|\"${DEVICE}\"|${F_CROSS}"
 if [[ "$current" == "$want" ]]; then
   echo "==> RPCS3 Player $PLAYER already linked to $HANDLER / $DEVICE"
   RPCS3_STATUS=already
@@ -97,12 +134,17 @@ if [[ ! -f "$CONFIG.couchlink.bak" ]]; then
 fi
 
 tmp="$(mktemp)"
-awk -v p="Player $PLAYER Input:" -v h="$HANDLER" -v d="$DEVICE" '
+awk -v p="Player $PLAYER Input:" -v h="$HANDLER" -v d="$DEVICE" \
+    -v sq="$F_SQUARE" -v cr_="$F_CROSS" -v ci="$F_CIRCLE" -v tr="$F_TRIANGLE" '
   { line = $0; cr = ""; if (sub(/\r$/, "", line)) cr = "\r" }
   line == p { inblock = 1; print line cr; next }
   line ~ /^Player [0-9]+ Input:/ { inblock = 0 }
   inblock && line ~ /^  Handler:/ { print "  Handler: " h cr; next }
   inblock && line ~ /^  Device:/ { print "  Device: \"" d "\"" cr; next }
+  inblock && line ~ /^    Square: /   { print "    Square: " sq cr; next }
+  inblock && line ~ /^    Cross: /    { print "    Cross: " cr_ cr; next }
+  inblock && line ~ /^    Circle: /   { print "    Circle: " ci cr; next }
+  inblock && line ~ /^    Triangle: / { print "    Triangle: " tr cr; next }
   { print line cr }
 ' "$CONFIG" > "$tmp"
 
@@ -122,8 +164,135 @@ RPCS3_STATUS=linked
 
 }
 
+# RPCS3's `Keep pads connected` must be on for couchlink's pads specifically.
+#
+# A physical controller is plugged in once and stays; RPCS3's default (false)
+# is written for that world — when a pad stops answering, drop it. couchlink's
+# pads are the opposite: the companion presents one ViGEm target per player
+# *slot*, and those targets come and go as players join, reload a tab, or get
+# reseated. Every one of those events looks to RPCS3 exactly like a controller
+# being yanked out of the machine.
+#
+# With the setting false, that yank is terminal: RPCS3 drops the player's pad
+# and does not re-attach it when the target comes back, because it only binds
+# devices when it (re)configures the pad handler. Nothing anywhere says so —
+# the Player N block in Default.yml still names the right handler and device,
+# RPCS3's own Gamepad Settings dialog still shows it selected (that dialog
+# re-enumerates on open, so it even reads live stick input), and the game just
+# silently ignores that player. Live-traced 2026-09-07: a friend's virtual pad
+# moved XInput index between reconnects; every button and D-pad press was
+# confirmed landing on the live XInput device with `XInputGetState`, while the
+# game logged no reaction at all and every config screen looked correct.
+#
+# Turning it on costs nothing for real pads (RPCS3 just keeps a disconnected
+# pad's slot rather than freeing it) and is what makes a couchlink player's
+# controller survive their own reconnect.
+ensure_rpcs3_keep_pads_connected() {
+  local input_cfg="$1" root_cfg tmp
+  [[ -n "$input_cfg" ]] || return 0
+  # …/config/input_configs/global/Default.yml -> …/config/config.yml
+  root_cfg="$(dirname "$(dirname "$(dirname "$input_cfg")")")/config.yml"
+  RPCS3_ROOT_CONFIG_PATH="$root_cfg"
+  if [[ ! -f "$root_cfg" ]]; then
+    echo "==> RPCS3 config.yml not found next to the pad config — cannot check 'Keep pads connected'" >&2
+    RPCS3_KEEP_PADS=missing
+    return 0
+  fi
+  # CRLF-safe like the pad config above: RPCS3 writes this file with \r\n on
+  # Windows, so match on the stripped line or the comparison silently fails.
+  if awk '{ line = $0; sub(/\r$/, "", line) }
+          line ~ /^  Keep pads connected: *true$/ { found = 1 }
+          END { exit !found }' "$root_cfg"; then
+    RPCS3_KEEP_PADS=already
+    return 0
+  fi
+  if ! grep -q 'Keep pads connected:' "$root_cfg"; then
+    echo "==> RPCS3 config.yml has no 'Keep pads connected' key — leaving it alone" >&2
+    RPCS3_KEEP_PADS=absent
+    return 0
+  fi
+  [[ -f "$root_cfg.couchlink.bak" ]] || cp -f "$root_cfg" "$root_cfg.couchlink.bak"
+  tmp="$(mktemp)"
+  awk '{ line = $0; cr = ""; if (sub(/\r$/, "", line)) cr = "\r"
+         if (line ~ /^  Keep pads connected:/) print "  Keep pads connected: true" cr
+         else print line cr }' "$root_cfg" > "$tmp"
+  # Never leave a truncated config behind — RPCS3 resets on a parse error.
+  if [[ ! -s "$tmp" ]] || ! grep -q '^  Keep pads connected: true' "$tmp"; then
+    rm -f "$tmp"
+    echo "==> refusing to write malformed RPCS3 config.yml — left unchanged" >&2
+    RPCS3_KEEP_PADS=failed
+    return 0
+  fi
+  cat "$tmp" > "$root_cfg"
+  rm -f "$tmp"
+  echo "==> RPCS3 'Keep pads connected' turned on (takes effect next RPCS3 start)"
+  echo "    backup: $root_cfg.couchlink.bak"
+  RPCS3_KEEP_PADS=enabled
+}
+
+# RPCS3's exclusive fullscreen fights the capture couchlink streams through.
+#
+# The default, `Automatic`, does not mean "windowed" — it lets the driver
+# decide, and RPCS3 then requests exclusive fullscreen on its own, with no
+# fullscreen choice ever made by the person at the keyboard. Exclusive
+# fullscreen hands the swapchain to the display directly, which Windows
+# Graphics Capture (what win-capture uses) cannot share: the two renegotiate
+# against each other, and every renegotiation is a swapchain rebuild that the
+# remote player sees as the picture going black for a beat.
+#
+# Live-traced 2026-09-07: a friend reported the stream "flashing", while the
+# host pipeline was provably healthy the whole time (170fps, 0% dropped
+# frames) — the black frames were real content, RPCS3 rebuilding its
+# swapchain. `RSX: Swapchain: requesting full screen exclusive mode` appears
+# in RPCS3's log once per flash.
+#
+# RPCS3's own option help says this outright: "Using Prefer borderless
+# fullscreen option can help if you have issues with streaming RPCS3
+# gameplay." Streaming RPCS3 gameplay is the only thing couchlink does with
+# it, so set it rather than leaving a default that is wrong for every session
+# this tool ever runs. Borderless costs nothing here — the player is watching
+# an encoded stream, not the host's monitor.
+ensure_rpcs3_borderless_fullscreen() {
+  local root_cfg="$1" tmp
+  local want="Prefer borderless fullscreen"
+  [[ -n "$root_cfg" && -f "$root_cfg" ]] || { RPCS3_FULLSCREEN=missing; return 0; }
+  if awk -v w="    Exclusive Fullscreen Mode: $want" '
+        { line = $0; sub(/\r$/, "", line) }
+        line == w { found = 1 }
+        END { exit !found }' "$root_cfg"; then
+    RPCS3_FULLSCREEN=already
+    return 0
+  fi
+  if ! grep -q 'Exclusive Fullscreen Mode:' "$root_cfg"; then
+    echo "==> RPCS3 config.yml has no 'Exclusive Fullscreen Mode' key — leaving it alone" >&2
+    RPCS3_FULLSCREEN=absent
+    return 0
+  fi
+  [[ -f "$root_cfg.couchlink.bak" ]] || cp -f "$root_cfg" "$root_cfg.couchlink.bak"
+  tmp="$(mktemp)"
+  awk -v w="$want" '
+    { line = $0; cr = ""; if (sub(/\r$/, "", line)) cr = "\r"
+      if (line ~ /^    Exclusive Fullscreen Mode:/) print "    Exclusive Fullscreen Mode: " w cr
+      else print line cr }' "$root_cfg" > "$tmp"
+  if [[ ! -s "$tmp" ]] || ! grep -q "^    Exclusive Fullscreen Mode: $want" "$tmp"; then
+    rm -f "$tmp"
+    echo "==> refusing to write malformed RPCS3 config.yml — left unchanged" >&2
+    RPCS3_FULLSCREEN=failed
+    return 0
+  fi
+  cat "$tmp" > "$root_cfg"
+  rm -f "$tmp"
+  echo "==> RPCS3 fullscreen set to borderless (takes effect next RPCS3 start)"
+  RPCS3_FULLSCREEN=borderless
+}
+
 RPCS3_STATUS=skipped
+RPCS3_KEEP_PADS=skipped
+RPCS3_FULLSCREEN=skipped
+RPCS3_ROOT_CONFIG_PATH=""
 link_rpcs3 || true
+ensure_rpcs3_keep_pads_connected "$RPCS3_CONFIG_PATH" || true
+ensure_rpcs3_borderless_fullscreen "$RPCS3_ROOT_CONFIG_PATH" || true
 
 # ---------------------------------------------------------------- PCSX2 -----
 # PCSX2 binds per button rather than by device name, so the whole Pad block is
@@ -558,11 +727,14 @@ echo "RESULT $(jq -nc \
   --arg device "$DEVICE" \
   --arg rpcs3 "$RPCS3_STATUS" \
   --arg rpcs3_config "$RPCS3_CONFIG_PATH" \
+  --arg rpcs3_keep_pads "$RPCS3_KEEP_PADS" \
+  --arg rpcs3_fullscreen "$RPCS3_FULLSCREEN" \
   --arg pcsx2 "$PCSX2_STATUS" \
   --arg pcsx2_config "$PCSX2_CONFIG_PATH" \
   --arg pcsx2_section "$PCSX2_SECTION" \
   --arg pcsx2_port "$(pcsx2_port_name "$PCSX2_SECTION")" \
   --arg pcsx2_live_apply "$PCSX2_LIVE_APPLY" \
   '{player: ($player | tonumber), backend: $backend, handler: $handler, device: $device,
-    rpcs3: $rpcs3, rpcs3_config: $rpcs3_config, pcsx2: $pcsx2, pcsx2_config: $pcsx2_config,
+    rpcs3: $rpcs3, rpcs3_config: $rpcs3_config, rpcs3_keep_pads: $rpcs3_keep_pads,
+    rpcs3_fullscreen: $rpcs3_fullscreen, pcsx2: $pcsx2, pcsx2_config: $pcsx2_config,
     pcsx2_section: $pcsx2_section, pcsx2_port: $pcsx2_port, pcsx2_live_apply: $pcsx2_live_apply}')"

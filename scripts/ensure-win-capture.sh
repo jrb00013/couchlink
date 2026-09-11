@@ -106,6 +106,18 @@ if [[ -n "$window_title" ]]; then
   source_mode="window"
 fi
 
+# Framing overrides, empty unless set, so the capture exe keeps its own
+# defaults (client-area crop on, cursor hidden). These exist so a window that
+# ever measures wrong can be put back to full-frame from .env.couchlink,
+# without rebuilding the Windows binary mid-session.
+_framing_args=""
+if [[ -n "${COUCHLINK_CAPTURE_CROP:-}" ]]; then
+  _framing_args="${_framing_args},'-CropClientArea','${COUCHLINK_CAPTURE_CROP}'"
+fi
+if [[ -n "${COUCHLINK_CAPTURE_HIDE_CURSOR:-}" ]]; then
+  _framing_args="${_framing_args},'-HideCursor','${COUCHLINK_CAPTURE_HIDE_CURSOR}'"
+fi
+
 build_ps1="$(wslpath -w "$ROOT/scripts/build-win-capture.ps1")"
 start_ps1="$(wslpath -w "$ROOT/scripts/start-win-capture.ps1")"
 
@@ -119,9 +131,28 @@ psw() {
 if [[ "${COUCHLINK_SKIP_WIN_CAPTURE_BUILD:-0}" != "1" ]]; then
   echo "==> ensuring Windows capture binary is built…"
   if ! psw -File "$build_ps1" >/dev/null 2>&1; then
-    echo "error: could not build couchlink-win-capture.exe" >&2
-    echo "       install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1" >&2
-    exit 1
+    # A failed build must not take capture down when a working binary is
+    # already staged. This script is the host's respawn path (every 20s while
+    # capture is down), so an unrelated, often transient build failure — a
+    # locked target dir, a busy toolchain, a half-finished cargo run in
+    # another terminal — otherwise turns a self-healing outage into a dead
+    # session: the host relaunches forever, the build fails first every time,
+    # and the staged exe that would have worked is never even tried. Observed
+    # live 2026-09-07 mid-session, right after the emulator restarted.
+    #
+    # start-win-capture.ps1 stages the built exe to LOCALAPPDATA and launches
+    # from there, so that copy is exactly what a successful run would have
+    # used — falling back to it is the same binary, not a lesser one.
+    staged_win="$(psw -Command '$p = Join-Path $env:LOCALAPPDATA "couchlink\bin\couchlink-win-capture.exe"; if (Test-Path $p) { $p }' 2>/dev/null | tr -d '\r')"
+    if [[ -n "$staged_win" ]]; then
+      echo "==> WARN: build failed — using the already-staged couchlink-win-capture.exe" >&2
+      echo "         (rebuild later with ./scripts/build-win-capture.ps1; capture keeps running)" >&2
+      export COUCHLINK_SKIP_WIN_CAPTURE_BUILD=1
+    else
+      echo "error: could not build couchlink-win-capture.exe, and none is staged" >&2
+      echo "       install Rust on Windows (https://rustup.rs, MSVC toolchain), then retry: ./scripts/build-win-capture.ps1" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -200,7 +231,7 @@ task_name="couchlink-win-capture"
 _ps_style="Hidden"
 [[ "$source_mode" == "picker" ]] && _ps_style="Normal"
 psw -Command "
-  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$encode_fps','-BitrateKbps','$bitrate_kbps')
+  \$argList = @('-NoProfile','-WindowStyle','$_ps_style','-ExecutionPolicy','Bypass','-File','$start_ps1','-Connect','$connect','-Source','$source_mode','-MaxWidth','$wire_w','-MaxHeight','$wire_h','-MaxFps','$encode_fps','-BitrateKbps','$bitrate_kbps'${_framing_args})
   if ('$window_title' -ne '') { \$argList += @('-Window','$window_title') }
   # Start-Process flattens -ArgumentList arrays WITHOUT quoting, so a window
   # title like 'Marvel - Ultimate Alliance' becomes argv tokens
