@@ -183,7 +183,7 @@ fn neutral_frame() -> PadFrame {
         touch_x: 0,
         touch_y: 0,
         client_ts_ms: 0,
-    })
+    }
 }
 
 /// u16 stick centered on `0x8000` (0..=65535) → u8 (0..=255, center 128).
