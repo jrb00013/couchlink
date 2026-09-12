@@ -10,9 +10,6 @@ import { clog, cwarn } from "./log";
 export function attachAudioTrack(track: MediaStreamTrack, el: HTMLAudioElement): void {
   try {
     // Pin jitter buffer if exposed (same as video path, but for audio).
-    const receiver = (track as unknown as { _receiver?: unknown });
-    void receiver;
-    const anyTrack = track as unknown as { jitterBufferTarget?: number | null; playoutDelayHint?: number | null };
     // Hint is on the receiver, not the track — caller may pin via RTCRtpReceiver externally.
     // Here we just attach.
 

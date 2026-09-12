@@ -185,6 +185,9 @@ export default function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  /** Audio plays by default until the player explicitly mutes it. */
+  const [audioMuted, setAudioMuted] = useState(false);
+  const [audioVolume, setAudioVolume] = useState(1);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   /** Canvas the WebCodecs path paints to, kept separate from the RTP canvas so
    * RTP can stay on screen as a safety net while WebCodecs warms up. */
@@ -776,6 +779,16 @@ export default function App() {
     };
   }, []);
 
+  // Audio plays by default; the player only ever hears silence after they
+  // explicitly hit mute. Re-applied whenever the track element is (re)mounted
+  // or the player moves the volume slider / toggles mute.
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.muted = audioMuted;
+      audioRef.current.volume = audioVolume;
+    }
+  }, [audioMuted, audioVolume]);
+
   // Expose hidden audio element for the player to attach Opus track.
   useEffect(() => {
     if (audioRef.current) {
@@ -1017,6 +1030,28 @@ export default function App() {
             />
             <video ref={videoRef} className="stage" playsInline muted autoPlay />
             <audio ref={audioRef} autoPlay playsInline style={{ display: "none" }} />
+            <div className="audio-controls">
+              <button
+                type="button"
+                className="audio-mute-btn"
+                aria-label={audioMuted ? "Unmute audio" : "Mute audio"}
+                aria-pressed={audioMuted}
+                onClick={() => setAudioMuted((m) => !m)}
+              >
+                {audioMuted ? "🔇" : "🔊"}
+              </button>
+              <input
+                type="range"
+                className="audio-volume-slider"
+                aria-label="Volume"
+                min={0}
+                max={1}
+                step={0.01}
+                value={audioVolume}
+                disabled={audioMuted}
+                onChange={(e) => setAudioVolume(Number(e.target.value))}
+              />
+            </div>
             {state !== "connected" && (
               <div className="overlay">
                 <span>{detail || "Waiting for video…"}</span>
