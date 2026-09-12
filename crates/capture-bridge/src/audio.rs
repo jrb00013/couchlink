@@ -44,7 +44,9 @@ pub fn read_audio_frame(r: &mut impl Read) -> Result<AudioFrame> {
     read_audio_body(r)
 }
 
-fn read_audio_body(r: &mut impl Read) -> Result<AudioFrame> {
+/// Read the body of a `CLA1` frame — caller has already consumed the magic
+/// (e.g. while demuxing a mixed `CLF2`/`CLA1` stream and dispatching on it).
+pub fn read_audio_body(r: &mut impl Read) -> Result<AudioFrame> {
     let mut head = [0u8; 13];
     r.read_exact(&mut head).context("audio header")?;
     let seq = u32::from_le_bytes(head[0..4].try_into()?);

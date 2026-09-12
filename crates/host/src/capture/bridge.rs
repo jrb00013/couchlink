@@ -2,13 +2,18 @@
 //! WSL listens; Windows connects out (avoids Windows inbound firewall).
 
 use anyhow::{bail, Context, Result};
+use couchlink_capture_bridge::audio::{read_audio_body, AudioFrame, AUDIO_MAGIC};
 use couchlink_capture_bridge::{
     read_frame_body_sync, write_set_target, EncodeTarget, FrameFormat, FrameInfo, FRAME_MAGIC,
     EXPEDITE, REQUEST_IDR,
 };
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
+
+/// See `hyperv_bridge::MAX_PENDING_AUDIO` — same cap, same reasoning.
+const MAX_PENDING_AUDIO: usize = 100;
 
 /// How long to wait for a frame to start arriving. Deliberately tiny: the caller
 /// sends on a fixed cadence, so this must return promptly with either a fresh frame
@@ -85,6 +90,8 @@ pub struct WindowsBridge {
     last_frame_at: Instant,
     /// See `HyperVBridge::ever_connected` — same startup/picker race.
     ever_connected: bool,
+    /// See `HyperVBridge::pending_audio` — same demux, same cap.
+    pending_audio: VecDeque<AudioFrame>,
 }
 
 impl WindowsBridge {
@@ -143,6 +150,7 @@ impl WindowsBridge {
             last_respawn: None,
             last_frame_at: Instant::now(),
             ever_connected,
+            pending_audio: VecDeque::new(),
         })
     }
 
@@ -217,23 +225,51 @@ impl WindowsBridge {
         let Some(stream) = self.stream.as_mut() else {
             return Ok(None);
         };
-        stream.set_read_timeout(Some(poll))?;
-        let mut magic = [0u8; 4];
-        let mut got = 0;
-        while got < 4 {
-            match stream.read(&mut magic[got..]) {
-                Ok(0) => bail!("Windows capture client disconnected"),
-                Ok(n) => got += n,
-                // Only a timeout *before any byte of the frame* is safe to shrug off.
-                Err(ref e) if is_timeout(e) && got == 0 => return Ok(None),
-                Err(e) => return Err(e).context("frame magic"),
+        // See `HyperVBridge::read_frame` — win-capture multiplexes `CLA1`
+        // audio into this same stream; demux and stash it, bounded so an
+        // audio flood cannot wedge the video read loop.
+        let mut audio_out: Vec<AudioFrame> = Vec::new();
+        let info = loop {
+            if audio_out.len() >= 16 {
+                break None;
             }
+            stream.set_read_timeout(Some(poll))?;
+            let mut magic = [0u8; 4];
+            let mut got = 0;
+            while got < 4 {
+                match stream.read(&mut magic[got..]) {
+                    Ok(0) => bail!("Windows capture client disconnected"),
+                    Ok(n) => got += n,
+                    // Only a timeout *before any byte of the frame* is safe to shrug off.
+                    Err(ref e) if is_timeout(e) && got == 0 => {
+                        if !audio_out.is_empty() {
+                            self.pending_audio.extend(audio_out);
+                            self.drop_excess_pending_audio();
+                        }
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e).context("frame magic"),
+                }
+            }
+            if &magic == AUDIO_MAGIC {
+                stream.set_read_timeout(Some(FRAME_BODY_TIMEOUT))?;
+                let af = read_audio_body(stream).context("audio body")?;
+                audio_out.push(af);
+                continue;
+            }
+            if &magic != FRAME_MAGIC {
+                bail!("bad frame magic {magic:?} — capture stream desynchronized");
+            }
+            stream.set_read_timeout(Some(FRAME_BODY_TIMEOUT))?;
+            break Some(read_frame_body_sync(stream, &mut self.buf)?);
+        };
+        if !audio_out.is_empty() {
+            self.pending_audio.extend(audio_out);
+            self.drop_excess_pending_audio();
         }
-        if &magic != FRAME_MAGIC {
-            bail!("bad frame magic {magic:?} — capture stream desynchronized");
-        }
-        stream.set_read_timeout(Some(FRAME_BODY_TIMEOUT))?;
-        let info = read_frame_body_sync(stream, &mut self.buf)?;
+        let Some(info) = info else {
+            return Ok(None);
+        };
         if self.format != info.format {
             tracing::info!(
                 "capture stream format is now {:?} ({})",
@@ -328,21 +364,17 @@ impl WindowsBridge {
         self.format
     }
 
-    /// Non-blocking poll for a `CLA1` audio frame multiplexed on the same socket.
-    /// Probe with a 1 ms timeout for the magic; return `Some(opus)` or `None`.
-    /// Video frames remain on `CLF2` — this never consumes a video frame.
+    /// Drain one buffered `CLA1` Opus frame, if `read_frame` demuxed any out
+    /// of the video stream since the last call. Does not itself touch the
+    /// socket — video's own poll cadence is what pulls bytes off the wire.
     pub fn try_take_audio(&mut self) -> Option<Vec<u8>> {
-        // Minimal stub: peek for AUDIO_MAGIC without eating a CLF2.
-        // Full multiplex will drain CLA1 when WASAPI thread is live. For now,
-        // leave the socket untouched for video and return None so the host
-        // continues video-only without latency. The RTP audio track stays
-        // announced and ready; pushing silence is not needed.
-        let _ = self.stream.as_mut()?;
-        // Peek: try a non-blocking read of 4 bytes without consuming if not CLA1.
-        // To keep zero-copy and avoid blocking the 2ms cadence, do nothing here
-        // until the Windows side actually writes CLA1 — then this will be extended
-        // to `read_audio_frame` with try_read_audio_frame semantics.
-        None
+        self.pending_audio.pop_front().map(|af| af.opus)
+    }
+
+    fn drop_excess_pending_audio(&mut self) {
+        while self.pending_audio.len() > MAX_PENDING_AUDIO {
+            self.pending_audio.pop_front();
+        }
     }
 
     /// Throw away everything already queued and resynchronise.
@@ -482,5 +514,109 @@ mod tests {
         assert!(!is_timeout(&std::io::Error::from(ErrorKind::ConnectionReset)));
         assert!(!is_timeout(&std::io::Error::from(ErrorKind::UnexpectedEof)));
         assert!(!is_timeout(&std::io::Error::from(ErrorKind::BrokenPipe)));
+    }
+
+    /// win-capture interleaves `CLA1` Opus frames into the same socket as
+    /// `CLF2` video — regression for the exact bug the stub `try_take_audio`
+    /// used to have: audio must be demuxed out during the video read loop and
+    /// handed back later, and video frames on either side of it must still
+    /// arrive in order untouched.
+    #[test]
+    fn interleaved_audio_is_demuxed_without_disturbing_video() {
+        use couchlink_capture_bridge::audio::{write_audio_frame, AudioFrame};
+        use couchlink_capture_bridge::{write_frame_with_format, FrameFormat};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut bridge = WindowsBridge {
+            listener,
+            stream: None,
+            width: 0,
+            height: 0,
+            buf: Vec::new(),
+            pending: None,
+            last: None,
+            format: FrameFormat::Bgra,
+            keyframe: false,
+            target: None,
+            frames_received: 0,
+            disconnected_at: Some(Instant::now()),
+            last_respawn: None,
+            last_frame_at: Instant::now(),
+            ever_connected: false,
+            pending_audio: VecDeque::new(),
+        };
+
+        // H.264 (the real deployment's format — GPU-encoded on Windows) is
+        // used rather than Bgra: the Bgra path deliberately skips ahead to
+        // the newest frame each poll (see `latest_frame`'s doc comment),
+        // which would race this test's tight write timing. H.264 frames
+        // must always arrive in strict order, so that ordering guarantee is
+        // exactly what this test wants to exercise around the CLA1 demux.
+        let writer = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            write_frame_with_format(&mut stream, 4, 4, FrameFormat::H264, true, &[0u8; 8])
+                .unwrap();
+            write_audio_frame(
+                &mut stream,
+                &AudioFrame {
+                    seq: 1,
+                    sample_rate: 48000,
+                    channels: 2,
+                    opus: vec![9; 40],
+                },
+            )
+            .unwrap();
+            write_frame_with_format(&mut stream, 4, 4, FrameFormat::H264, false, &[1u8; 8])
+                .unwrap();
+            stream
+        });
+
+        // First capture() picks up the pending TCP connection, not a frame.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while bridge.stream.is_none() && Instant::now() < deadline {
+            let _ = bridge.capture();
+        }
+        assert!(bridge.stream.is_some(), "client never connected");
+
+        let first = loop {
+            if let Some(c) = bridge.capture().unwrap() {
+                break c;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for first frame");
+        };
+        assert!(matches!(first, Captured::H264 { ref nal, keyframe: true } if nal == &vec![0u8; 8]));
+
+        // The CLA1 in between must show up via try_take_audio, not as a
+        // video frame, and must not have been silently dropped. Polling for
+        // it can incidentally read frame2 too (the demux loop keeps reading
+        // past audio within one `read_frame` call) — keep it rather than
+        // discard it, since the point of this test is that no video frame is
+        // ever lost to the audio demux.
+        let mut second_frame = None;
+        let audio = loop {
+            if let Some(a) = bridge.try_take_audio() {
+                break a;
+            }
+            if let Ok(Some(c)) = bridge.capture() {
+                second_frame = Some(c);
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for audio frame");
+        };
+        assert_eq!(audio, vec![9; 40]);
+
+        let second = match second_frame {
+            Some(c) => c,
+            None => loop {
+                if let Some(c) = bridge.capture().unwrap() {
+                    break c;
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for second frame");
+            },
+        };
+        assert!(matches!(second, Captured::H264 { ref nal, keyframe: false } if nal == &vec![1u8; 8]));
+
+        writer.join().unwrap();
     }
 }

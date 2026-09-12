@@ -14,6 +14,7 @@ mod run {
     use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
+    use couchlink_capture_bridge::audio::{write_audio_frame, AudioFrame};
     use couchlink_capture_bridge::{window_matches, write_frame_with_format, FrameFormat};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::io::BufWriter;
@@ -967,7 +968,11 @@ mod run {
         }
     }
 
-    fn spawn_tcp_writer(connect: String, rx: mpsc::Receiver<FrameMsg>) {
+    fn spawn_tcp_writer(
+        connect: String,
+        rx: mpsc::Receiver<FrameMsg>,
+        audio_rx: mpsc::Receiver<AudioFrame>,
+    ) {
         // `hyperv:<port>:<vm-id>` skips TCP (and the whole WSL2 virtual
         // switch/NAT hop) in favour of a Hyper-V socket — see
         // `couchlink_capture_bridge::hyperv`. `vm-id` is the WSL2 side's own
@@ -986,7 +991,7 @@ mod run {
                 warn!("bad hyperv vm-id {vm_id:?} (expected a GUID), exiting writer");
                 return;
             };
-            spawn_hyperv_writer(port, vm_id, rx);
+            spawn_hyperv_writer(port, vm_id, rx, audio_rx);
             return;
         }
         std::thread::spawn(move || loop {
@@ -1015,6 +1020,20 @@ mod run {
                             if let Some(s) = shutdown_stream.as_ref() {
                                 let _ = s.shutdown(std::net::Shutdown::Both);
                             }
+                            break;
+                        }
+                        // Drain any queued Opus frames first — audio is small
+                        // and time-sensitive; never let it wait behind a
+                        // video frame's recv_timeout.
+                        let mut audio_failed = false;
+                        while let Ok(af) = audio_rx.try_recv() {
+                            if let Err(e) = write_audio_frame(&mut writer, &af) {
+                                warn!("send audio frame failed: {e:#} — reconnecting");
+                                audio_failed = true;
+                                break;
+                            }
+                        }
+                        if audio_failed {
                             break;
                         }
                         match rx.recv_timeout(Duration::from_millis(50)) {
@@ -1048,7 +1067,12 @@ mod run {
     /// host logs "link lost", capture logs "queue full", and
     /// `ensure-win-capture` leaves the stuck process alone. Tear down the
     /// write loop as soon as the command reader sees EOF so we re-accept.
-    fn spawn_hyperv_writer(port: u32, vm_id: windows::core::GUID, rx: mpsc::Receiver<FrameMsg>) {
+    fn spawn_hyperv_writer(
+        port: u32,
+        vm_id: windows::core::GUID,
+        rx: mpsc::Receiver<FrameMsg>,
+        audio_rx: mpsc::Receiver<AudioFrame>,
+    ) {
         use couchlink_capture_bridge::hyperv::HvListener;
         use std::sync::atomic::{AtomicBool, Ordering};
         std::thread::spawn(move || {
@@ -1073,10 +1097,21 @@ mod run {
                             reader.shutdown();
                             flag.store(false, Ordering::SeqCst);
                         });
-                        loop {
+                        'conn: loop {
                             if !peer_alive.load(Ordering::SeqCst) {
                                 info!("Hyper-V socket: WSL2 host gone — accepting again");
                                 break;
+                            }
+                            // Same rationale as the TCP writer: drain queued
+                            // Opus frames before blocking on the next video
+                            // frame so audio never waits behind video.
+                            while let Ok(af) = audio_rx.try_recv() {
+                                if let Err(e) = write_audio_frame(&mut stream, &af) {
+                                    warn!(
+                                        "send audio frame over Hyper-V socket failed: {e:#} — reconnecting"
+                                    );
+                                    break 'conn;
+                                }
                             }
                             match rx.recv_timeout(Duration::from_millis(50)) {
                                 Ok((w, h, payload, format, keyframe)) => {
@@ -1139,6 +1174,12 @@ mod run {
         // whenever the writer is mid-flush.
         let queue_depth = if args.gpu_encode { 2 } else { 1 };
         let (tx, rx) = mpsc::sync_channel::<FrameMsg>(queue_depth);
+        // Independent of the video source: audio always follows the default
+        // output device (see `audio_capture` module docs). 64 slots is ~1.3s
+        // of 20ms Opus frames — plenty of slack for a writer that is briefly
+        // busy without ever blocking the capture thread.
+        let (audio_tx, audio_rx) = mpsc::sync_channel::<AudioFrame>(64);
+        couchlink_capture_bridge::audio_capture::spawn_wasapi_loopback_capture(audio_tx);
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
         // Encoding on the GPU here rather than on the host removes both the software
         // encoder and almost all of the wire cost; if anything about it fails we
@@ -1159,7 +1200,7 @@ mod run {
 
         match args.source {
             CaptureSource::Desktop => {
-                spawn_tcp_writer(args.connect.clone(), rx);
+                spawn_tcp_writer(args.connect.clone(), rx, audio_rx);
                 let m = Monitor::primary().context("primary monitor")?;
                 info!("capturing primary monitor → {}", args.connect);
                 let settings = Settings::new(
@@ -1203,7 +1244,7 @@ mod run {
                             "picker selection accepted: '{picked}' {pw}x{ph} → {}",
                             args.connect
                         );
-                        spawn_tcp_writer(args.connect.clone(), rx);
+                        spawn_tcp_writer(args.connect.clone(), rx, audio_rx);
                         let settings = Settings::new(
                             item,
                             cursor_setting(args.hide_cursor),
@@ -1221,7 +1262,7 @@ mod run {
                             "capture picker dismissed — falling back to primary monitor \
                              (no window chosen)"
                         );
-                        spawn_tcp_writer(args.connect.clone(), rx);
+                        spawn_tcp_writer(args.connect.clone(), rx, audio_rx);
                         let m = Monitor::primary().context("primary monitor")?;
                         info!("capturing primary monitor → {}", args.connect);
                         let settings = Settings::new(
@@ -1247,7 +1288,7 @@ mod run {
                 // switching games) we wait for it to reappear and restart capture
                 // automatically rather than exiting and relying on the PS1 wrapper
                 // to relaunch us.
-                spawn_tcp_writer(args.connect.clone(), rx);
+                spawn_tcp_writer(args.connect.clone(), rx, audio_rx);
                  loop {
                     let w = wait_for_window(&args.window)?;
 

@@ -978,6 +978,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
+ "opus",
  "tracing",
  "tracing-subscriber",
  "windows 0.62.2",

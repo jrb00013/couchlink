@@ -38,7 +38,9 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
+    "Win32_Media_Audio",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
     "Win32_System_Console",
     "Win32_System_Variant",
@@ -46,3 +48,8 @@ windows = { version = "0.62", features = [
     "Win32_Networking_WinSock",
     "Win32_System_Hypervisor",
 ] }
+# WASAPI loopback capture encodes straight to Opus so the wire only ever
+# carries compressed audio (crates/host expects Opus RTP either way — see
+# crates/host/src/webrtc_peer.rs MIME_TYPE_OPUS). Same crate/version family
+# the native client already uses for playback (crates/client/Cargo.toml).
+opus = "0.3"
