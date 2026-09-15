@@ -1,0 +1,14 @@
+[package]
+name = "couchlink-tui"
+version.workspace = true
+edition.workspace = true
+description = "Terminal control panel for a running couchlink host: status, capture-window switching, restart — for headless/SSH use"
+
+[[bin]]
+name = "couchlink-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"

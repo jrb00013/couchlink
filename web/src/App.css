@@ -277,6 +277,39 @@ button.ghost {
   background: rgba(0, 0, 0, 0.55);
 }
 
+.audio-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  z-index: 5;
+}
+
+.audio-mute-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px;
+  color: #fff;
+}
+
+.audio-volume-slider {
+  width: 90px;
+  accent-color: var(--accent, #6cf);
+}
+
+.audio-volume-slider:disabled {
+  opacity: 0.4;
+}
+
 .pads {
   display: grid;
   gap: 0.55rem;

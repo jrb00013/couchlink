@@ -163,6 +163,10 @@ export class CouchlinkPlayer {
   private lastPadHoldAt = 0;
   private padSent = 0;
   private padWindowStart = 0;
+  /** Last-sent button/trigger state, to detect rising edges for burst resend. */
+  private lastSentButtons = 0;
+  private lastSentL2 = 0;
+  private lastSentR2 = 0;
   private padName = "none";
   /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
   private lastPadHz = 0;
@@ -986,8 +990,39 @@ export class CouchlinkPlayer {
     const held = this.holdDigitalOneTick(state, now);
     this.lastPadHold = held;
     this.lastPadHoldAt = now;
-    this.padDc.send(encodeClpd({ ...held, clientTsMs: now >>> 0 }));
-    notePadSent(now, held.seq, now >>> 0);
+    this.sendPadFrame(held, now);
+
+    // The pad channel is unordered + zero-retransmit (input must never HOL-
+    // block on a lost packet), and a held combo like L2+R2 gets that
+    // redundancy for free — dozens of 2ms frames carry the same state, so
+    // one dropped packet is invisible. A fast tap-combo (e.g. a fighting
+    // game's direction+trigger+button "enhanced" input) can exist for only
+    // one or two of those frames total; losing the single packet that
+    // carries it erases the whole input with nothing to recover it. Burst
+    // two immediate resends on any rising edge (new button, or a trigger
+    // going from released to pressed) so that window survives one lost
+    // datagram — cheap, since it only fires on edges, not steady state.
+    const risingButtons = held.buttons & ~this.lastSentButtons;
+    const risingL2 = this.lastSentL2 === 0 && held.l2 > 0;
+    const risingR2 = this.lastSentR2 === 0 && held.r2 > 0;
+    this.lastSentButtons = held.buttons;
+    this.lastSentL2 = held.l2;
+    this.lastSentR2 = held.r2;
+
+    if (risingButtons || risingL2 || risingR2) {
+      for (const delayMs of [1, 3]) {
+        window.setTimeout(() => {
+          this.seq = (this.seq + 1) >>> 0;
+          this.sendPadFrame({ ...held, seq: this.seq });
+        }, delayMs);
+      }
+    }
+  }
+
+  private sendPadFrame(state: PadState, now: number = performance.now()) {
+    if (this.padDc?.readyState !== "open") return;
+    this.padDc.send(encodeClpd({ ...state, clientTsMs: now >>> 0 }));
+    notePadSent(now, state.seq, now >>> 0);
     this.padSent += 1;
   }
 

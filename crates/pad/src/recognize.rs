@@ -6,7 +6,6 @@
 
 use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 use crate::dualsense::{PID_DUALSENSE, PID_DUALSENSE_EDGE, SONY_VID};
-use crate::dualsense::PRODUCT_NAME as DUALSENSE_NAME;
 use crate::steam_controller::{
     KNOWN_PIDS as STEAM_PIDS, PRODUCT_NAME as STEAM_NAME, VALVE_VID,
 };

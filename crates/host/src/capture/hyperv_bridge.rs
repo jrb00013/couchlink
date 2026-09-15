@@ -27,10 +27,12 @@
 //! flipping one flag, per `docs/OPTIMIZATION_PLAN.md`'s regression discipline.
 
 use anyhow::{bail, Context, Result};
+use couchlink_capture_bridge::audio::{read_audio_body, AudioFrame, AUDIO_MAGIC};
 use couchlink_capture_bridge::{
     read_frame_body_sync, write_set_target, EncodeTarget, FrameFormat, FrameInfo, FRAME_MAGIC,
     EXPEDITE, REQUEST_IDR,
 };
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd};
 use std::time::{Duration, Instant};
@@ -100,7 +102,16 @@ pub struct HyperVBridge {
     copy_count: u64,
     /// Per-frame wait samples (ms) for p95 SHM gate — capped ring.
     wait_samples_ms: Vec<f64>,
+    /// `CLA1` audio frames demuxed out of the video stream by `read_frame`,
+    /// waiting for `try_take_audio` to drain them. Capped so a stalled/absent
+    /// audio consumer cannot grow this unboundedly on a live socket.
+    pending_audio: VecDeque<AudioFrame>,
 }
+
+/// Oldest-drop cap on `pending_audio` — about 2s of 20ms Opus frames. A
+/// consumer that stops draining (video-only host, or a slow tick) must not
+/// let this queue grow forever; better to lose old audio than OOM the host.
+const MAX_PENDING_AUDIO: usize = 100;
 
 impl HyperVBridge {
     /// Open a Hyper-V capture handle for `port` without blocking on win-capture.
@@ -152,6 +163,7 @@ impl HyperVBridge {
             copy_ns: 0,
             copy_count: 0,
             wait_samples_ms: Vec::with_capacity(WAIT_SAMPLE_CAP),
+            pending_audio: VecDeque::new(),
         })
     }
 
@@ -199,34 +211,57 @@ impl HyperVBridge {
         let Some(stream) = self.stream.as_ref() else {
             return Ok(None);
         };
-        let mut magic = [0u8; 4];
-        let mut got = 0;
-        let mut deadline = DeadlineRead::new(stream, poll);
-        while got < 4 {
-            match deadline.read(&mut magic[got..]) {
-                Ok(0) => bail!("win-capture disconnected"),
-                Ok(n) => got += n,
-                Err(ref e) if is_timeout(e) && got == 0 => return Ok(None),
-                Err(e) => return Err(e).context("frame magic"),
+        // win-capture multiplexes `CLA1` (Opus audio) frames into the same
+        // stream as `CLF2` (video) — same wire, distinguished by magic (see
+        // `couchlink_capture_bridge::audio`). A `CLA1` here is not a video
+        // frame: stash it and keep reading, within the same poll budget the
+        // caller gave us, until either a video frame or the deadline shows
+        // up. Bounded iteration count so a pathological audio flood cannot
+        // wedge the video read loop.
+        let overall_deadline = Instant::now() + poll;
+        for _ in 0..16 {
+            let mut magic = [0u8; 4];
+            let mut got = 0;
+            let remaining = overall_deadline.saturating_duration_since(Instant::now());
+            let mut deadline = DeadlineRead::new(stream, remaining);
+            while got < 4 {
+                match deadline.read(&mut magic[got..]) {
+                    Ok(0) => bail!("win-capture disconnected"),
+                    Ok(n) => got += n,
+                    Err(ref e) if is_timeout(e) && got == 0 => return Ok(None),
+                    Err(e) => return Err(e).context("frame magic"),
+                }
             }
+            if &magic == AUDIO_MAGIC {
+                let mut deadline = DeadlineRead::new(stream, FRAME_BODY_TIMEOUT);
+                let af = read_audio_body(&mut deadline).context("audio body")?;
+                if self.pending_audio.len() >= MAX_PENDING_AUDIO {
+                    self.pending_audio.pop_front();
+                }
+                self.pending_audio.push_back(af);
+                continue;
+            }
+            if &magic != FRAME_MAGIC {
+                bail!("bad frame magic {magic:?} — capture stream desynchronized");
+            }
+            let mut deadline = DeadlineRead::new(stream, FRAME_BODY_TIMEOUT);
+            let info = read_frame_body_sync(&mut deadline, &mut self.buf)?;
+            if self.format != info.format {
+                self.format = info.format;
+                self.last = None;
+            }
+            self.keyframe = info.keyframe;
+            if self.width != info.width as usize || self.height != info.height as usize {
+                self.width = info.width as usize;
+                self.height = info.height as usize;
+                self.last = None;
+            }
+            self.frames_received += 1;
+            return Ok(Some(info));
         }
-        if &magic != FRAME_MAGIC {
-            bail!("bad frame magic {magic:?} — capture stream desynchronized");
-        }
-        let mut deadline = DeadlineRead::new(stream, FRAME_BODY_TIMEOUT);
-        let info = read_frame_body_sync(&mut deadline, &mut self.buf)?;
-        if self.format != info.format {
-            self.format = info.format;
-            self.last = None;
-        }
-        self.keyframe = info.keyframe;
-        if self.width != info.width as usize || self.height != info.height as usize {
-            self.width = info.width as usize;
-            self.height = info.height as usize;
-            self.last = None;
-        }
-        self.frames_received += 1;
-        Ok(Some(info))
+        // Drained 16 audio frames without a video frame showing up — give the
+        // caller back control rather than spinning; the next tick resumes.
+        Ok(None)
     }
 
     pub fn take_received(&mut self) -> u64 {
@@ -292,9 +327,12 @@ impl HyperVBridge {
         self.format
     }
 
+    /// Drain one buffered `CLA1` Opus frame, if `read_frame` demuxed any out
+    /// of the video stream since the last call. Does not itself touch the
+    /// socket — video's own poll cadence (`capture()` / `latest_frame()`) is
+    /// what pulls bytes off the wire and fills `pending_audio`.
     pub fn try_take_audio(&mut self) -> Option<Vec<u8>> {
-        let _ = self.stream.as_ref()?;
-        None
+        self.pending_audio.pop_front().map(|af| af.opus)
     }
 
     pub fn resync(&mut self) {

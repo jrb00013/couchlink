@@ -17,6 +17,8 @@ pub mod mf_encoder;
 pub mod hyperv;
 #[cfg(not(windows))]
 pub mod linux_capture;
+#[cfg(windows)]
+pub mod audio_capture;
 
 pub mod audio;
 

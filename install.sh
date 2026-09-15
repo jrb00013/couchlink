@@ -342,6 +342,7 @@ mkdir -p "$REAL_HOME/.local/bin"
 if [[ "$INSTALL_ROLE" == "host" ]]; then
   couchlink_install_bin target/release/couchlink-signaling "$REAL_HOME/.local/bin/couchlink-signaling"
   couchlink_install_bin target/release/couchlink-host "$REAL_HOME/.local/bin/couchlink-host"
+  couchlink_install_bin target/release/couchlink-tui "$REAL_HOME/.local/bin/couchlink-tui"
 fi
 couchlink_install_bin target/release/couchlink-client "$REAL_HOME/.local/bin/couchlink-client"
 if [[ "${EUID:-$(id -u)}" -eq 0 && "$REAL_USER" != "root" ]]; then
