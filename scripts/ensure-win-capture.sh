@@ -192,6 +192,20 @@ if command -v tasklist.exe >/dev/null 2>&1; then
   fi
 fi
 
+if command -v powershell.exe >/dev/null 2>&1; then
+  # Kill the *owning* PowerShell wrapper tree (start-win-capture.ps1), not
+  # just the exe image. That wrapper has its own internal reattach loop
+  # ("window closed - reattaching in 2s"), so killing only the exe by name
+  # left the wrapper alive to instantly relaunch it with whatever -Window
+  # title it was originally started with — sometimes hours/days stale.
+  # Observed live 2026-09-15: a leftover wrapper kept winning the race against
+  # every fresh launch, silently reverting the capture target every time.
+  psw -Command "
+    Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" |
+      Where-Object { \$_.CommandLine -like '*start-win-capture*' } |
+      ForEach-Object { taskkill /PID \$_.ProcessId /T /F 2>\$null }
+  " >/dev/null 2>&1 || true
+fi
 if command -v taskkill.exe >/dev/null 2>&1; then
   taskkill.exe /IM couchlink-win-capture.exe /F >/dev/null 2>&1 || true
   sleep 0.5
