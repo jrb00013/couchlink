@@ -1174,12 +1174,16 @@ mod run {
         // whenever the writer is mid-flush.
         let queue_depth = if args.gpu_encode { 2 } else { 1 };
         let (tx, rx) = mpsc::sync_channel::<FrameMsg>(queue_depth);
-        // Independent of the video source: audio always follows the default
-        // output device (see `audio_capture` module docs). 64 slots is ~1.3s
-        // of 20ms Opus frames — plenty of slack for a writer that is briefly
-        // busy without ever blocking the capture thread.
+        // 64 slots is ~1.3s of 20ms Opus frames — plenty of slack for a
+        // writer that is briefly busy without ever blocking the capture
+        // thread. Desktop/picker capture has no single target process, so it
+        // keeps the original whole-system loopback; window-source capture
+        // scopes audio to that window's process (see `audio_capture` module
+        // docs) and is spawned per-window further down instead of here.
         let (audio_tx, audio_rx) = mpsc::sync_channel::<AudioFrame>(64);
-        couchlink_capture_bridge::audio_capture::spawn_wasapi_loopback_capture(audio_tx);
+        if !matches!(args.source, CaptureSource::Window) {
+            couchlink_capture_bridge::audio_capture::spawn_wasapi_loopback_capture(audio_tx.clone());
+        }
         let frame_dur = Duration::from_millis(1000 / args.max_fps.max(1) as u64);
         // Encoding on the GPU here rather than on the host removes both the software
         // encoder and almost all of the wire cost; if anything about it fails we
@@ -1297,6 +1301,28 @@ mod run {
                         w.title().unwrap_or_else(|_| args.window.clone()),
                         args.connect
                     );
+
+                    // Re-scoped per reconnect: a new game process (or a
+                    // relaunch after crash) gets a new PID, and the old
+                    // process-loopback thread naturally stops producing once
+                    // its target process's audio session is torn down.
+                    match w.process_id() {
+                        Ok(pid) => {
+                            couchlink_capture_bridge::audio_capture::spawn_wasapi_process_loopback_capture(
+                                audio_tx.clone(),
+                                pid,
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "could not resolve pid for '{}' ({e:#}) — capturing whole-system audio instead",
+                                args.window
+                            );
+                            couchlink_capture_bridge::audio_capture::spawn_wasapi_loopback_capture(
+                                audio_tx.clone(),
+                            );
+                        }
+                    }
 
                     if args.keep_rendering {
                         couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());

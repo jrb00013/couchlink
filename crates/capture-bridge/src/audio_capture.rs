@@ -1,27 +1,41 @@
 //! WASAPI loopback capture → Opus encode → `AudioFrame`, Windows-only.
 //!
-//! Captures whatever the default render (speaker) device is playing —
-//! game audio included — via WASAPI's loopback flag on that render endpoint.
-//! Independent of which window video capture is following: this always
-//! follows the system's default output device, not any one process.
+//! Two capture modes:
+//!
+//! - Process-scoped (`spawn_wasapi_process_loopback_capture`): captures only
+//!   the audio rendered by one process (and its child processes), via the
+//!   Windows 10 2004+ "process loopback" activation. Used whenever win-capture
+//!   is following a specific window (`--source window`), so a friend only
+//!   hears the game — not Discord notifications, browser tabs, or anything
+//!   else on the host's speakers.
+//! - System-wide (`spawn_wasapi_loopback_capture`): the original default-
+//!   render-endpoint loopback, used for desktop/picker capture where there is
+//!   no single target process to scope to.
 //!
 //! Fail-open by design: if any COM/WASAPI call fails (no default device, a
-//! locked-down audio session, etc.) this logs a warning and the capture
-//! stream stays video-only — matching how the rest of win-capture treats a
-//! missing/optional subsystem.
+//! locked-down audio session, process loopback unsupported on this Windows
+//! build, etc.) this logs a warning and the capture stream stays video-only —
+//! matching how the rest of win-capture treats a missing/optional subsystem.
 
 use crate::audio::AudioFrame;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
+use windows::core::{implement, Interface, PCWSTR};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, WAVE_FORMAT_PCM,
+    eConsole, eRender, ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
+    IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, WAVE_FORMAT_PCM,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject, INFINITE};
 
 /// Opus wants 2.5/5/10/20/40/60ms frames — 20ms is the same cadence the
 /// native client's playback side (`crates/client/src/audio.rs`) already
@@ -35,12 +49,43 @@ const BUFFER_DURATION_100NS: i64 = 10_000_000;
 
 /// Spawn the loopback-capture thread. Never blocks the caller — failures are
 /// logged and the thread exits, leaving video capture completely unaffected.
+///
+/// Captures the *entire* default output device — every app on the host, not
+/// just one game. Only appropriate when there is no single target process to
+/// scope to (desktop / picker capture). Window-source capture must use
+/// [`spawn_wasapi_process_loopback_capture`] instead.
 pub fn spawn_wasapi_loopback_capture(tx: SyncSender<AudioFrame>) {
     std::thread::spawn(move || {
         if let Err(e) = run(tx) {
             tracing::warn!(
                 "WASAPI loopback audio capture unavailable ({e:#}) — continuing video-only"
             );
+        }
+    });
+}
+
+/// Spawn a process-scoped loopback-capture thread: only audio rendered by
+/// `target_pid` (and its child processes — an emulator's game process is
+/// commonly a child of the emulator's own PID) crosses the wire, via the
+/// Windows 10 2004+ "process loopback" activation. This is what keeps a
+/// friend from hearing Discord pings, browser tabs, or anything else on the
+/// host's speakers while a specific game window is being streamed.
+///
+/// Falls back to the full system-loopback capture if process loopback fails
+/// to activate — e.g. an older Windows build that predates the API — so
+/// audio degrades to "everything" rather than disappearing entirely.
+pub fn spawn_wasapi_process_loopback_capture(tx: SyncSender<AudioFrame>, target_pid: u32) {
+    std::thread::spawn(move || {
+        if let Err(e) = run_process(tx.clone(), target_pid) {
+            tracing::warn!(
+                "process-scoped WASAPI loopback unavailable for pid {target_pid} ({e:#}) — \
+                 falling back to whole-system audio"
+            );
+            if let Err(e) = run(tx) {
+                tracing::warn!(
+                    "WASAPI loopback audio capture unavailable ({e:#}) — continuing video-only"
+                );
+            }
         }
     });
 }
@@ -64,12 +109,6 @@ fn run(tx: SyncSender<AudioFrame>) -> Result<()> {
             .context("Activate IAudioClient")?;
 
         let wfx = client.GetMixFormat().context("GetMixFormat")?;
-        let src_rate = (*wfx).nSamplesPerSec;
-        let src_channels = (*wfx).nChannels as usize;
-        // Modern Windows mix formats are IEEE float (tag 3) or EXTENSIBLE
-        // wrapping float (tag 0xFFFE) essentially universally; true 16-bit
-        // PCM mix formats are a legacy case this still handles correctly.
-        let is_float = (*wfx).wFormatTag != WAVE_FORMAT_PCM as u16;
 
         client
             .Initialize(
@@ -81,10 +120,146 @@ fn run(tx: SyncSender<AudioFrame>) -> Result<()> {
                 None,
             )
             .context("IAudioClient::Initialize (loopback)")?;
-        let capture_client: IAudioCaptureClient =
-            client.GetService().context("GetService(IAudioCaptureClient)")?;
-        client.Start().context("IAudioClient::Start")?;
 
+        capture_loop(&client, wfx, tx)
+    }
+}
+
+/// COM completion handler for `ActivateAudioInterfaceAsync` — the process-
+/// loopback activation is asynchronous even though every other WASAPI call
+/// used here is synchronous, so this just signals an event the calling
+/// thread is blocked on.
+#[implement(IActivateAudioInterfaceCompletionHandler)]
+struct ActivateHandler {
+    event: HANDLE,
+}
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivateHandler_Impl {
+    fn ActivateCompleted(
+        &self,
+        _operation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
+    ) -> windows::core::Result<()> {
+        unsafe { SetEvent(self.event) }?;
+        Ok(())
+    }
+}
+
+fn run_process(tx: SyncSender<AudioFrame>, target_pid: u32) -> Result<()> {
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED)
+            .ok()
+            .context("CoInitializeEx (process audio thread)")?;
+
+        let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+            ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+            Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                    TargetProcessId: target_pid,
+                    ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                },
+            },
+        };
+        let params_blob = std::slice::from_raw_parts(
+            &mut params as *mut _ as *mut u8,
+            std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>(),
+        );
+        let mut prop_variant = build_activation_propvariant(params_blob)?;
+
+        let event = CreateEventW(None, true, false, None).context("CreateEventW")?;
+        let handler: IActivateAudioInterfaceCompletionHandler =
+            ActivateHandler { event }.into();
+
+        // The device id for process-loopback activation isn't a real endpoint
+        // id — it's this fixed virtual-device string mmdeviceapi.h defines.
+        let device_id: Vec<u16> = "VAD\\Process_Loopback\0".encode_utf16().collect();
+        let op: IActivateAudioInterfaceAsyncOperation = ActivateAudioInterfaceAsync(
+            PCWSTR(device_id.as_ptr()),
+            &IAudioClient::IID,
+            Some(&mut prop_variant),
+            &handler,
+        )
+        .context("ActivateAudioInterfaceAsync")?;
+
+        if WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0 {
+            bail!("WaitForSingleObject on activation event failed");
+        }
+
+        let mut activate_result = windows::core::HRESULT(0);
+        let mut audio_client_unknown: Option<windows::core::IUnknown> = None;
+        op.GetActivateResult(&mut activate_result, &mut audio_client_unknown)
+            .context("GetActivateResult")?;
+        activate_result.ok().context("process loopback activation")?;
+        let client: IAudioClient = audio_client_unknown
+            .context("activation returned no interface")?
+            .cast()
+            .context("cast activated interface to IAudioClient")?;
+
+        // Process loopback only ever delivers 32-bit float, 2ch, 48kHz — it
+        // has no "mix format" of its own to query, unlike a real endpoint.
+        let mut wfx = windows::Win32::Media::Audio::WAVEFORMATEX {
+            wFormatTag: windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT as u16,
+            nChannels: TARGET_CHANNELS as u16,
+            nSamplesPerSec: TARGET_RATE,
+            nAvgBytesPerSec: TARGET_RATE * TARGET_CHANNELS as u32 * 4,
+            nBlockAlign: (TARGET_CHANNELS * 4) as u16,
+            wBitsPerSample: 32,
+            cbSize: 0,
+        };
+
+        client
+            .Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                BUFFER_DURATION_100NS,
+                0,
+                &mut wfx,
+                None,
+            )
+            .context("IAudioClient::Initialize (process loopback)")?;
+
+        capture_loop(&client, &mut wfx, tx)
+    }
+}
+
+/// Wraps a raw `AUDIOCLIENT_ACTIVATION_PARAMS` blob in the blob-typed
+/// `PROPVARIANT` `ActivateAudioInterfaceAsync` expects as its activation
+/// params argument.
+unsafe fn build_activation_propvariant(
+    blob: &[u8],
+) -> Result<windows::Win32::System::Com::StructuredStorage::PROPVARIANT> {
+    use windows::Win32::System::Com::{StructuredStorage::PROPVARIANT, BLOB};
+    use windows::Win32::System::Variant::VT_BLOB;
+
+    // The blob must outlive the activation call; leak it deliberately — this
+    // runs once per capture-thread lifetime, not in a hot loop.
+    let leaked: &'static [u8] = Box::leak(blob.to_vec().into_boxed_slice());
+    let mut pv: PROPVARIANT = std::mem::zeroed();
+    let inner = &mut pv.Anonymous.Anonymous;
+    inner.vt = VT_BLOB;
+    inner.Anonymous.blob = BLOB {
+        cbSize: leaked.len() as u32,
+        pBlobData: leaked.as_ptr() as *mut u8,
+    };
+    Ok(pv)
+}
+
+unsafe fn capture_loop(
+    client: &IAudioClient,
+    wfx: *mut windows::Win32::Media::Audio::WAVEFORMATEX,
+    tx: SyncSender<AudioFrame>,
+) -> Result<()> {
+    let src_rate = (*wfx).nSamplesPerSec;
+    let src_channels = (*wfx).nChannels as usize;
+    // Modern Windows mix formats are IEEE float (tag 3) or EXTENSIBLE
+    // wrapping float (tag 0xFFFE) essentially universally; true 16-bit
+    // PCM mix formats are a legacy case this still handles correctly.
+    let is_float = (*wfx).wFormatTag != WAVE_FORMAT_PCM as u16;
+
+    let capture_client: IAudioCaptureClient =
+        client.GetService().context("GetService(IAudioCaptureClient)")?;
+    client.Start().context("IAudioClient::Start")?;
+
+    {
         let mut encoder = opus::Encoder::new(
             TARGET_RATE,
             opus::Channels::Stereo,
