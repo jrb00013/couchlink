@@ -13,6 +13,7 @@ members = [
   "crates/client",
   "crates/windows-helper",
   "crates/ds-vhid",
+  "crates/couchlink-tui",
 ]
 default-members = ["crates/signaling", "crates/host", "crates/client"]
 
