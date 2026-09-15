@@ -84,6 +84,18 @@ impl SlotRegistry {
         info!(
             "pre-allocated {MAX_REMOTE_SLOTS} virtual controller(s) (backend={kind:?}) — late joins reuse these pads"
         );
+        // Issue #66: players and the host had no way to tell which seat
+        // landed on which emulator-visible device. Preallocating in fixed
+        // slot order (above) already makes this deterministic — connect
+        // order can no longer scramble it — so print the resulting mapping
+        // once, in the exact wording `link-emulator-pad.sh` assumes, as the
+        // single source of truth to check a session against.
+        for slot in 1..=MAX_REMOTE_SLOTS {
+            info!(
+                "slot {slot} (couchlink player {slot}) -> {}",
+                emulator_device_label(kind, slot)
+            );
+        }
         Ok(())
     }
 
@@ -114,6 +126,21 @@ impl SlotRegistry {
         info!("slot {slot}: plugged in a new virtual controller");
         guard.insert(slot, (backend.clone(), hub.clone()));
         Ok((backend, hub))
+    }
+}
+
+/// The device string an emulator will actually see for a given slot, in the
+/// same terms `link-emulator-pad.sh` uses to bind a player's controls to it.
+/// Mirrors that script's `case` on `COUCHLINK_DS_VHID_BACKEND` — keep both in
+/// sync if either changes.
+fn emulator_device_label(kind: crate::BackendKind, slot: u8) -> String {
+    let index = slot.saturating_sub(1);
+    match kind {
+        crate::BackendKind::Xbox360 => format!("XInput Pad #{index}"),
+        crate::BackendKind::Ds4 => format!("Wireless Controller {index}"),
+        crate::BackendKind::WinUhid | crate::BackendKind::Auto => {
+            format!("DualSense Wireless Controller {index}")
+        }
     }
 }
 

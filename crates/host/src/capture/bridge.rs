@@ -25,7 +25,14 @@ const DRAIN_POLL: Duration = Duration::from_millis(1);
 /// How long win-capture may be gone before we relaunch it ourselves — see
 /// `super::respawn_windows_capture`. Long enough that a normal reconnect (a
 /// picker window closing and reopening, a brief TCP blip) never triggers it.
-const RESPAWN_AFTER: Duration = Duration::from_secs(5);
+///
+/// Was 5s. Issue #67: a hung-not-disconnected win-capture froze the stream
+/// for ~10s — almost exactly `FRAME_STALE_AFTER` (4s) + this grace (5s) +
+/// relaunch/reconnect time. Neither threshold needs to be that generous: a
+/// picker reopen or brief TCP blip resolves in well under a second in
+/// practice, so 2s still filters those out while cutting the visible freeze
+/// roughly in half.
+const RESPAWN_AFTER: Duration = Duration::from_secs(2);
 /// Floor between relaunch attempts, so a win-capture that keeps failing to
 /// start doesn't get hammered every capture-poll tick.
 const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
@@ -37,7 +44,12 @@ const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// `maybe_respawn`, which only fires off a real socket error. This is the
 /// second trigger: if no frame has landed in this long while the socket is
 /// still nominally connected, treat it exactly like a disconnect.
-const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
+///
+/// Was 4s — over 200 missed frames' worth of margin at 60fps. Issue #67:
+/// this generosity directly extended the visible freeze when win-capture
+/// hung. 1.5s is still ~90 missed frames of slack, far past any real jitter,
+/// while detecting the hang much sooner.
+const FRAME_STALE_AFTER: Duration = Duration::from_millis(1500);
 
 /// A socket read timeout surfaces as `WouldBlock` (EAGAIN) on Unix and `TimedOut`
 /// on Windows. Both mean "no data yet", not "connection broken".

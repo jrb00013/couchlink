@@ -15,20 +15,17 @@ PLAYER="${COUCHLINK_EMU_PLAYER:-2}"
 
 # ViGEm's virtual pad always enumerates through XInput, and the host's real
 # DualSense uses the SDL handler — so XInput slot 1 is unambiguous for the
-# first remote player. The companion now plugs in exactly one target per
-# couchlink player *slot* — created once, the first time that slot ever
-# connects, and reused (never re-created) on every reconnect after that, so
-# a second/third player's controller can never get silently swapped for a
-# different seated player's mid-session anymore.
+# first remote player. The companion plugs in every couchlink player *slot*
+# up front, in fixed slot order, at companion startup (`SlotRegistry::
+# preallocate` in crates/ds-vhid/src/session.rs) — not lazily on first
+# connect — so which XInput index a slot lands on is now deterministic
+# (slot 1 -> XInput-0, slot 2 -> XInput-1, ...) regardless of which player
+# actually connects first. PLAYER-1 below is a guarantee, not a working
+# assumption, as of that preallocate change (issue #66).
 #
-# What is NOT guaranteed: which XInput index a slot lands on. That's driver
-# assignment order, decided by which slot connects to the companion FIRST
-# in its lifetime — normally slot order, but if players connect out of
-# order on a freshly (re)started companion, slot 2 could grab XInput-0
-# before slot 1 ever has. PLAYER-1 below is therefore a working assumption,
-# not a guarantee; if a player's binding looks wrong at the start of a
-# session, check the companion's own log for "slot N: plugged in a new
-# virtual controller" lines to see the real connect order.
+# To double-check a live session against this instead of trusting it blind,
+# the companion logs the full slot -> device mapping once at startup, right
+# after preallocation: "slot N (couchlink player N) -> <device string>".
 # NOTE: the numeric suffix RPCS3 assigns a repeated device name has not been
 # verified live for 2+ simultaneous virtual pads — confirm this against
 # RPCS3's own Controller Settings before trusting it past the first slot.
