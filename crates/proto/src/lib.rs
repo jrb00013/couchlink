@@ -8,6 +8,7 @@ pub mod age;
 pub mod pad_frame;
 pub mod video_frame;
 pub mod host_events;
+pub mod stun;
 pub mod signal;
 
 pub use age::{age_ms, parse_age_echo_json, AgeEcho};

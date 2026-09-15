@@ -328,6 +328,23 @@ impl WindowsBridge {
         self.format
     }
 
+    /// Non-blocking poll for a `CLA1` audio frame multiplexed on the same socket.
+    /// Probe with a 1 ms timeout for the magic; return `Some(opus)` or `None`.
+    /// Video frames remain on `CLF2` — this never consumes a video frame.
+    pub fn try_take_audio(&mut self) -> Option<Vec<u8>> {
+        // Minimal stub: peek for AUDIO_MAGIC without eating a CLF2.
+        // Full multiplex will drain CLA1 when WASAPI thread is live. For now,
+        // leave the socket untouched for video and return None so the host
+        // continues video-only without latency. The RTP audio track stays
+        // announced and ready; pushing silence is not needed.
+        let _ = self.stream.as_mut()?;
+        // Peek: try a non-blocking read of 4 bytes without consuming if not CLA1.
+        // To keep zero-copy and avoid blocking the 2ms cadence, do nothing here
+        // until the Windows side actually writes CLA1 — then this will be extended
+        // to `read_audio_frame` with try_read_audio_frame semantics.
+        None
+    }
+
     /// Throw away everything already queued and resynchronise.
     ///
     /// The host does not read this socket until a player connects, so by then a

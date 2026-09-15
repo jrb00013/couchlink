@@ -184,6 +184,7 @@ export default function App() {
   const touchInputRef = useRef<TouchGamepadInput | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   /** Canvas the WebCodecs path paints to, kept separate from the RTP canvas so
    * RTP can stay on screen as a safety net while WebCodecs warms up. */
@@ -775,6 +776,27 @@ export default function App() {
     };
   }, []);
 
+  // Expose hidden audio element for the player to attach Opus track.
+  useEffect(() => {
+    if (audioRef.current) {
+      (window as unknown as { __couchlinkAudioEl?: HTMLAudioElement }).__couchlinkAudioEl =
+        audioRef.current;
+      // If an audio track arrived before mount, attach now.
+      const pending = (playerRef.current as unknown as { pendingAudioTrack?: MediaStreamTrack })
+        ?.pendingAudioTrack;
+      if (pending && audioRef.current && audioRef.current.srcObject == null) {
+        import("./audio").then(({ attachAudioTrack }) => {
+          if (audioRef.current) attachAudioTrack(pending, audioRef.current);
+          (playerRef.current as unknown as { pendingAudioTrack?: MediaStreamTrack }).pendingAudioTrack =
+            undefined;
+        });
+      }
+    }
+    return () => {
+      delete (window as unknown as { __couchlinkAudioEl?: HTMLAudioElement }).__couchlinkAudioEl;
+    };
+  }, []);
+
   // Touch controller: one shared input for the mobile layout, live for the
   // lifetime of the page. Desktop is unaffected — setTouchInput(null) when the
   // device is not mobile, and the overlay is only rendered on mobile.
@@ -994,6 +1016,7 @@ export default function App() {
               aria-label="Game stream (WebCodecs)"
             />
             <video ref={videoRef} className="stage" playsInline muted autoPlay />
+            <audio ref={audioRef} autoPlay playsInline style={{ display: "none" }} />
             {state !== "connected" && (
               <div className="overlay">
                 <span>{detail || "Waiting for video…"}</span>

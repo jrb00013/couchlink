@@ -10,6 +10,7 @@ mod latency;
 mod latency_live_sim;
 mod link_gov;
 mod motion;
+mod nat_punch;
 mod ricardo_playable_ab;
 mod scale;
 mod signaling_client;
@@ -243,6 +244,30 @@ async fn push_to_all(
     }
     let (any, _peer_sheds) = webrtc_peer::governor_shed_counts(&fates);
     (any, webrtc_peer::governor_frame_shed(&fates))
+}
+
+/// Push one Opus frame to every slot on the separate RTP audio pipe.
+///
+/// Fire-and-forget: 10 ms peer budget, never `request_keyframe`, never
+/// `dropped_frames` / `link_gov`. Fan-out is concurrent so one slow peer
+/// cannot HOL-block the others.
+async fn push_audio_to_all(
+    slots: &Arc<Mutex<HashMap<u8, PlayerConn>>>,
+    opus: Vec<u8>,
+    duration: Duration,
+) {
+    let guard = slots.lock().await;
+    if guard.is_empty() {
+        return;
+    }
+    let futs = guard.iter().map(|(_, conn)| {
+        let data = opus.clone();
+        let host = Arc::clone(&conn.host);
+        async move {
+            let _timed_out = host.push_opus(data, duration).await;
+        }
+    });
+    futures_util::future::join_all(futs).await;
 }
 
 /// Drain a rejoin burst from the inbound queue. One reload (or a double-tab /
@@ -496,6 +521,31 @@ async fn main() -> Result<()> {
             .filter(|p| p.is_file())
             .and_then(|p| std::fs::read_to_string(p).ok())
             .filter(|c| c.contains("[Peer]") && c.contains("Endpoint"))
+    };
+    // Opt-in: ask the NAT itself what public endpoint the WireGuard socket
+    // actually gets, instead of trusting the static config's Endpoint (which
+    // setup-wireguard.sh can only guess at ahead of time — see nat_punch.rs).
+    // Off by default so nobody's working static-endpoint setup changes
+    // behavior without asking; falls straight back to the static conf on any
+    // failure (symmetric NAT, no route to a STUN server, unparseable config).
+    let wg_conf = if std::env::var("COUCHLINK_WG_PUNCH").as_deref() == Ok("1") {
+        wg_conf.map(|conf| {
+            let port = nat_punch::endpoint_port_from_conf(&conf).unwrap_or(51820);
+            match nat_punch::discover_and_rewrite(&conf, port, &nat_punch::DEFAULT_STUN_SERVERS) {
+                Some(rewritten) => {
+                    tracing::info!("WireGuard endpoint discovered via STUN for invite");
+                    rewritten
+                }
+                None => {
+                    tracing::warn!(
+                        "STUN endpoint discovery failed or NAT is symmetric — using static wg0-player.conf Endpoint"
+                    );
+                    conf
+                }
+            }
+        })
+    } else {
+        wg_conf
     };
     let join = invite::player_invite_url(
         &public_http,
@@ -958,6 +1008,11 @@ async fn main() -> Result<()> {
                             capture_ok_announced = Some(true);
                             let _ = signal_out.send(stream_info_message(&preset, Some(true), None));
                         }
+                        // Separate audio pipe — drain any pending Opus without blocking video cadence.
+                        // Never touches dropped_frames / link_gov.
+                        if let Some(opus) = capturer.try_take_audio() {
+                            push_audio_to_all(&slots, opus, Duration::from_millis(20)).await;
+                        }
                         continue;
                     }
                     capture::Captured::Bgra(b) => b,
@@ -1139,6 +1194,10 @@ async fn main() -> Result<()> {
                             idle_frames = 0;
                             dropped_frames = 0;
                         }
+                    }
+                    // Separate audio pipe — one Opus drain per cadence tick, isolated from video governor.
+                    if let Some(opus) = capturer.try_take_audio() {
+                        push_audio_to_all(&slots, opus, Duration::from_millis(20)).await;
                     }
                 }
             }

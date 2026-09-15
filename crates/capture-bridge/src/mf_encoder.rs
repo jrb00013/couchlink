@@ -234,6 +234,15 @@ impl HardwareEncoder {
             set_ratio(&out, &MF_MT_FRAME_SIZE, width, height)?;
             set_ratio(&out, &MF_MT_FRAME_RATE, fps, 1)?;
             set_ratio(&out, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+            // Capture is BT.709 full-range RGB (see bgra_to_nv12); tag the VUI so
+            // the SPS carries what the bitstream actually is instead of decoders
+            // guessing BT.601 studio-swing. Best-effort — an MFT that rejects an
+            // unknown attribute should still encode with the default assumption,
+            // it just won't self-describe as accurately in the SPS.
+            let _ = out.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+            let _ = out.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
+            let _ = out.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
+            let _ = out.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255.0 as u32);
             // Main is a big quality win over Baseline at the same bitrate (CABAC),
             // and Chrome/WebCodecs decode it fine. Fall back to Baseline if rejected.
             if out
@@ -263,6 +272,11 @@ impl HardwareEncoder {
             set_ratio(&inp, &MF_MT_FRAME_SIZE, width, height)?;
             set_ratio(&inp, &MF_MT_FRAME_RATE, fps, 1)?;
             set_ratio(&inp, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+            // Must match the output type's tags and bgra_to_nv12's actual math.
+            let _ = inp.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+            let _ = inp.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
+            let _ = inp.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
+            let _ = inp.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255.0 as u32);
             transform
                 .SetInputType(0, &inp, 0)
                 .context("SetInputType(NV12)")?;
@@ -858,43 +872,7 @@ fn avcc_to_annex_b(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-const fn nv12_len(width: u32, height: u32) -> usize {
-    (width as usize * height as usize) + (width as usize * height as usize / 2)
-}
-
-/// BGRA -> NV12 (BT.601), the input format hardware encoders universally accept.
-/// Chroma is interleaved (UVUV) and half resolution in both axes.
-pub fn bgra_to_nv12(bgra: &[u8], width: usize, height: usize, out: &mut Vec<u8>) {
-    let y_size = width * height;
-    out.resize(y_size + y_size / 2, 0);
-    let (y_plane, uv_plane) = out.split_at_mut(y_size);
-    let stride = width * 4;
-
-    for y in 0..height {
-        let Some(row) = bgra.get(y * stride..y * stride + stride) else {
-            break;
-        };
-        let y_row = &mut y_plane[y * width..(y + 1) * width];
-        for (px, out) in row.chunks_exact(4).zip(y_row.iter_mut()) {
-            let b = px[0] as i32;
-            let g = px[1] as i32;
-            let r = px[2] as i32;
-            *out = ((((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255)) as u8;
-        }
-        if y % 2 != 0 {
-            continue;
-        }
-        let uv_row = &mut uv_plane[(y / 2) * width..(y / 2) * width + width];
-        for (cx, uv) in uv_row.chunks_exact_mut(2).enumerate() {
-            let px = &row[cx * 8..cx * 8 + 4];
-            let b = px[0] as i32;
-            let g = px[1] as i32;
-            let r = px[2] as i32;
-            uv[0] = ((((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255)) as u8;
-            uv[1] = ((((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255)) as u8;
-        }
-    }
-}
+use crate::color::{bgra_to_nv12, nv12_len};
 
 #[cfg(test)]
 mod tests {
@@ -942,26 +920,6 @@ mod tests {
         assert!(!contains_sps(&without));
     }
 
-    #[test]
-    fn nv12_is_the_right_size_and_luma_matches_bt601() {
-        let white = vec![255u8; 4 * 4 * 4];
-        let mut out = Vec::new();
-        bgra_to_nv12(&white, 4, 4, &mut out);
-        assert_eq!(out.len(), nv12_len(4, 4));
-        assert_eq!(out[0], 235, "white luma is 235 in studio swing");
-        let black = vec![0u8; 4 * 4 * 4];
-        bgra_to_nv12(&black, 4, 4, &mut out);
-        assert_eq!(out[0], 16, "black luma is 16 in studio swing");
-        // Neutral chroma for greyscale input.
-        assert_eq!(out[16], 128);
-        assert_eq!(out[17], 128);
-    }
-
-    #[test]
-    fn a_short_source_does_not_panic() {
-        let short = vec![0u8; 4 * 2 * 4];
-        let mut out = Vec::new();
-        bgra_to_nv12(&short, 4, 4, &mut out);
-        assert_eq!(out.len(), nv12_len(4, 4));
-    }
+    // bgra_to_nv12 / nv12_len color-conversion tests now live in
+    // crate::color, which this module re-exports from.
 }

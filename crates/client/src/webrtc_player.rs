@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::decode::{DecodedFrame, H264Decoder};
+use crate::audio as native_audio;
 
 /// How many undecoded NALs may queue before the client gives up on catching up and
 /// asks for a keyframe instead. A couple of frames absorbs normal jitter; more than
@@ -54,6 +55,7 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
 pub struct WebRtcPlayer {
@@ -202,12 +204,42 @@ impl WebRtcPlayer {
             })
             .expect("spawn decode thread");
 
+        // Native audio: separate RTP pipe, never touches video backlog/PLI.
+        let audio_output = native_audio::spawn_audio_output();
+        let audio_tx = audio_output.as_ref().and_then(|o| o.sender());
+        // Keep AudioOutput alive as long as the peer lives.
+        let _audio_keep = Arc::new(audio_output);
+
         let pc_pli = Arc::clone(&pc);
         pc.on_track(Box::new(move |track, _, _| {
-            let nal_tx = nal_tx.clone();
-            let backlog = Arc::clone(&backlog);
-            let pc_pli = Arc::clone(&pc_pli);
-            Box::pin(async move {
+            let mime = track.codec().capability.mime_type.clone();
+            if mime.to_ascii_lowercase().contains("opus") || track.kind() == RTPCodecType::Audio {
+                info!("audio track received: {}", mime);
+                let tx = audio_tx.clone();
+                let _keep = Arc::clone(&_audio_keep);
+                Box::pin(async move {
+                    // Pin audio jitter buffer to 0 if exposed
+                    let _ = tx; // keep alive
+                    loop {
+                        match track.read_rtp().await {
+                            Ok((packet, _)) => {
+                                if let Some(t) = &tx {
+                                    let _ = t.send(packet.payload.to_vec());
+                                }
+                                let _ = &_keep;
+                            }
+                            Err(e) => {
+                                warn!("audio track read_rtp ended: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }) as _
+            } else {
+                let nal_tx = nal_tx.clone();
+                let backlog = Arc::clone(&backlog);
+                let pc_pli = Arc::clone(&pc_pli);
+                Box::pin(async move {
                 info!("video track received: {}", track.codec().capability.mime_type);
                 // We joined mid-stream, so the next frames reference pictures we
                 // never saw and carry no parameter sets. Ask for a keyframe straight
@@ -285,7 +317,8 @@ impl WebRtcPlayer {
                         }
                     }
                 }
-            })
+            }) as _
+            }
         }));
 
         Ok((

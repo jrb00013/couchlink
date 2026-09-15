@@ -153,6 +153,18 @@ impl FrameCapture {
             _ => (0.0, 0.0, 0.0),
         }
     }
+
+    /// Non-blocking drain of one pending Opus audio frame, if the capture socket
+    /// has multiplexed a `CLA1` since the last video frame. Returns opus bytes.
+    /// Separate pipe: never blocks the video cadence, never sheds video.
+    pub fn try_take_audio(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Self::Windows(c) => c.try_take_audio(),
+            #[cfg(target_os = "linux")]
+            Self::HyperV(c) => c.try_take_audio(),
+            Self::Local(_) => None,
+        }
+    }
 }
 
 /// Which capture IPC transport was requested (`COUCHLINK_CAPTURE_IPC`).

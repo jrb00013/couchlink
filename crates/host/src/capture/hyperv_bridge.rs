@@ -292,6 +292,11 @@ impl HyperVBridge {
         self.format
     }
 
+    pub fn try_take_audio(&mut self) -> Option<Vec<u8>> {
+        let _ = self.stream.as_ref()?;
+        None
+    }
+
     pub fn resync(&mut self) {
         while matches!(self.read_frame(DRAIN_POLL), Ok(Some(_))) {}
         self.last = None;

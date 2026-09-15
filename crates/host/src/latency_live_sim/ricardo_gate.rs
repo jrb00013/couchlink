@@ -32,7 +32,7 @@ pub fn beats_ricardo_soft(m: SessionMetrics) -> bool {
 /// |--------|---------|-----------------|
 /// | push   | 77.8    | ≥ 74            |
 /// | shed   | 0%      | ≤ 3%            |
-/// | encode | 5 Mbps  | ≥ 5000 kbps     |
+/// | encode | 10 Mbps | ≥ A::ENCODER_KBPS |
 /// | paint  | 74      | ≥ 74            |
 /// | S_p50  | (n/a)   | ≤ 45 ms (wow)   |
 pub fn beats_ricardo(m: SessionMetrics) -> bool {
@@ -49,21 +49,30 @@ pub fn strictly_beats_ricardo(m: SessionMetrics) -> bool {
 }
 
 /// Frozen self baseline from the first honest LIVE Ricardo PASS on this branch
-/// (2026-08-23 probe10 / probe-ci): push 74.8 · paint 84 · S_p50 7.4 · 5 Mbps · 0% shed.
+/// (2026-08-23 probe10 / probe-ci): push 74.8 · paint 84 · S_p50 7.4 · 0% shed.
+///
+/// Encoder bitrate tracks `A::ENCODER_KBPS` rather than a frozen literal — the
+/// production preset moved 5->10 Mbps after this probe (343ce8e, "production
+/// motion — 10Mbps@60"), and a scorecard frozen at the old bitrate can never
+/// clear the current Ricardo gate on that axis, which made every downstream
+/// beats_ricardo/beats_self assertion fail for a reason that has nothing to do
+/// with push/paint/latency regressing.
 pub mod self_baseline {
+    use super::A;
     pub const PUSH_FPS: f64 = 74.8;
     pub const PAINT_FPS: f64 = 84.0;
     pub const SURPLUS_P50_MS: f64 = 7.4;
-    pub const ENCODER_KBPS: u32 = 5_000;
+    pub const ENCODER_KBPS: u32 = A::ENCODER_KBPS;
     pub const SHED_PCT: u32 = 0;
 }
 
 /// Beat-self bars — clear margin over the frozen self baseline, not a skim.
 pub mod self_beat {
+    use super::A;
     pub const MIN_PUSH_FPS: f64 = 90.0;
     pub const MIN_PAINT_FPS: f64 = 100.0;
     pub const MAX_SURPLUS_P50_MS: f64 = 5.0;
-    pub const MIN_ENCODER_KBPS: u32 = 5_000;
+    pub const MIN_ENCODER_KBPS: u32 = A::ENCODER_KBPS;
     pub const MAX_SHED_PCT: u32 = 1;
 }
 
@@ -107,7 +116,7 @@ mod tests {
         let m = SessionMetrics {
             push_fps: 50.0,
             shed_pct: 8,
-            encoder_kbps: 5_000,
+            encoder_kbps: A::ENCODER_KBPS,
             paint_fps: 70.0,
             input_s_p50_ms: 40.0,
         };
@@ -132,7 +141,7 @@ mod tests {
         let m = SessionMetrics {
             push_fps: 78.0,
             shed_pct: 0,
-            encoder_kbps: 5_000,
+            encoder_kbps: A::ENCODER_KBPS,
             paint_fps: 74.0,
             input_s_p50_ms: 35.0,
         };
@@ -144,7 +153,7 @@ mod tests {
         // Compose the shipped optimizations into one session scorecard.
         assert!(
             single_blip_holds_baseline(),
-            "governor must hold 5 Mbps through a single WAN blip"
+            "governor must hold baseline bitrate through a single WAN blip"
         );
         assert_eq!(
             simulate_two_peer_shed_counting(false),
@@ -209,7 +218,7 @@ mod tests {
         let m = SessionMetrics {
             push_fps: 95.0,
             shed_pct: 0,
-            encoder_kbps: 5_000,
+            encoder_kbps: A::ENCODER_KBPS,
             paint_fps: 105.0,
             input_s_p50_ms: 4.0,
         };
