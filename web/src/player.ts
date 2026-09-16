@@ -1,4 +1,4 @@
-import { encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
+import { BTN, encodeClpd, fromBrowserGamepad, PAD_CHANNEL, type PadState } from "./clpd";
 import { KeyboardMouseInput } from "./keyboardMouse";
 import { controllerKind, selectPhysicalGamepads } from "./controllerKind";
 import { TouchGamepadInput } from "./touchPad";
@@ -161,6 +161,17 @@ export class CouchlinkPlayer {
   /** Soft-hold previous pad for one missed digital poll. */
   private lastPadHold: PadState | null = null;
   private lastPadHoldAt = 0;
+  /**
+   * L2/R2 bits seen recently, and when — bridges the stagger between a
+   * DualSense's digital trigger edge and its analog value crossing
+   * `fromBrowserGamepad`'s press threshold, which the browser's Gamepad
+   * backend can report on different 2ms polls even for a simultaneous
+   * physical press. Without this, a fast R2+face-button combo (e.g. a
+   * fighting game "enhanced" input) can land on two different polls and
+   * never appear pressed together in a single sent frame. See issue #69.
+   */
+  private lastTriggerBits = 0;
+  private lastTriggerBitsAt = 0;
   private padSent = 0;
   private padWindowStart = 0;
   /** Last-sent button/trigger state, to detect rising edges for burst resend. */
@@ -984,10 +995,32 @@ export class CouchlinkPlayer {
     return state;
   }
 
+  /**
+   * OR a just-seen L2/R2 press into the next few polls so it overlaps with a
+   * digital button pressed on the same physical tap but a different 2ms
+   * poll. See the `lastTriggerBits` doc comment and issue #69 — this widens
+   * the combo window by a few ms, not a full input-lag frame.
+   */
+  private holdTriggerEdge(state: PadState, now: number): PadState {
+    const TRIGGER_BITS = BTN.L2 | BTN.R2;
+    const HOLD_MS = 6; // ~3 polls at PAD_POLL_MS=2 — absorbs digital/analog sub-report stagger
+    const curTriggerBits = state.buttons & TRIGGER_BITS;
+    let buttons = state.buttons;
+    if (now - this.lastTriggerBitsAt <= HOLD_MS) {
+      buttons |= this.lastTriggerBits;
+    }
+    if (curTriggerBits) {
+      this.lastTriggerBits = curTriggerBits;
+      this.lastTriggerBitsAt = now;
+    }
+    return buttons === state.buttons ? state : { ...state, buttons };
+  }
+
   private emitPad(state: PadState) {
     if (this.padDc?.readyState !== "open") return;
     const now = performance.now();
-    const held = this.holdDigitalOneTick(state, now);
+    const withTriggerHold = this.holdTriggerEdge(state, now);
+    const held = this.holdDigitalOneTick(withTriggerHold, now);
     this.lastPadHold = held;
     this.lastPadHoldAt = now;
     this.sendPadFrame(held, now);

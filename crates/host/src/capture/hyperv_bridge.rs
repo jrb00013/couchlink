@@ -50,13 +50,16 @@ const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_BUDGET: Duration = Duration::from_millis(250);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// See `bridge::RESPAWN_AFTER` / `docs/INCIDENT-2026-08-19-terminals-died.md`.
-const RESPAWN_AFTER: Duration = Duration::from_secs(5);
+/// Issue #67: matches `bridge.rs`'s reduction — this grace plus
+/// `FRAME_STALE_AFTER` below summed to the ~10s visible freeze reported
+/// there.
+const RESPAWN_AFTER: Duration = Duration::from_secs(2);
 const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// See `bridge::FRAME_STALE_AFTER` — same fix, same reasoning, over vsock
 /// instead of TCP: a hung win-capture never errors this side's read, it just
 /// stops sending, so `maybe_respawn` needs a second trigger besides a socket
 /// error.
-const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
+const FRAME_STALE_AFTER: Duration = Duration::from_millis(1500);
 /// Cap on per-frame wait samples kept for p95 (SHM decision gate).
 const WAIT_SAMPLE_CAP: usize = 120;
 
