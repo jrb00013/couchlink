@@ -277,6 +277,23 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                     relay_to_host(&store, sid, &SignalMessage::PresentPath { path, slot });
                 }
             }
+            SignalMessage::ClientLinkStats {
+                frames_dropped_delta,
+                jitter_buffer_ms,
+                ..
+            } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(
+                        &store,
+                        sid,
+                        &SignalMessage::ClientLinkStats {
+                            frames_dropped_delta,
+                            jitter_buffer_ms,
+                            slot,
+                        },
+                    );
+                }
+            }
             SignalMessage::RequestOffer { .. } => {
                 if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
                     relay_to_host(&store, sid, &SignalMessage::RequestOffer { slot });

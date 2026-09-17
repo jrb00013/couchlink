@@ -179,6 +179,8 @@ export class CouchlinkPlayer {
   private lastSentL2 = 0;
   private lastSentR2 = 0;
   private padName = "none";
+  /** Cumulative `framesDropped` as of the last stats tick, to derive a delta for `client_link_stats`. */
+  private lastReportedFramesDropped = 0;
   /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
   private lastPadHz = 0;
   /** Last Gamepad.id announced to the host, so pad_info is sent on change… */
@@ -486,6 +488,22 @@ export class CouchlinkPlayer {
             totalFreezesDuration: video.totalFreezesDuration,
             jbTarget: this.videoReceiver?.jitterBufferTarget ?? null,
           });
+          // The host's link governor only ever saw congestion on the CLVD
+          // DataChannel push path — once a session promotes to full RTP
+          // paint (the common case), RTP sends never shed on their own, so
+          // the governor goes blind exactly when this matters most. Report
+          // what we can actually see (framesDropped is cumulative from
+          // getStats, so send the delta) so the host can react to real
+          // receive-side congestion instead of none at all.
+          const droppedDelta = Math.max(0, video.framesDropped - this.lastReportedFramesDropped);
+          this.lastReportedFramesDropped = video.framesDropped;
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            send(this.ws, {
+              type: "client_link_stats",
+              frames_dropped_delta: droppedDelta,
+              jitter_buffer_ms: Math.round(video.jitterBufferMs),
+            });
+          }
         }
       } catch (e) {
         cwarn("getStats failed", String(e));
