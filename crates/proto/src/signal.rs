@@ -132,6 +132,27 @@ pub enum SignalMessage {
         #[serde(default)]
         slot: u8,
     },
+    /// Player reports its own receive-side video health for this stats window.
+    ///
+    /// The host's link governor (`link_gov.rs`) only ever saw congestion on
+    /// the CLVD DataChannel push path — the RTP video track is written
+    /// unconditionally with no shed/backpressure signal of its own, so once a
+    /// session promotes to the WebCodecs present path (full RTP paint, CLVD
+    /// down to input_wm tips only), the governor went structurally blind: RTP
+    /// sends report "delivered" even while the browser's own jitter buffer
+    /// balloons and it drops frames on arrival. This closes that loop with
+    /// the browser's own `getStats()` numbers, which the host has no way to
+    /// see otherwise.
+    ClientLinkStats {
+        /// Frames the browser dropped since its last report (not cumulative).
+        frames_dropped_delta: u32,
+        /// Current receiver jitter buffer size, milliseconds — informational
+        /// (logged), not yet fed into the governor's step decision.
+        jitter_buffer_ms: u32,
+        /// Player slot reporting (stamped by the signaling server).
+        #[serde(default)]
+        slot: u8,
+    },
     /// Host announces stream ready (codec / resolution).
     StreamInfo {
         width: u32,
