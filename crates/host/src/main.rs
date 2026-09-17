@@ -854,6 +854,7 @@ async fn main() -> Result<()> {
                             // reads it same as any other shed.
                             if frames_dropped_delta > 0 {
                                 dropped_frames += frames_dropped_delta as u64;
+                                link_gov.note_client_congestion();
                                 info!(
                                     "slot {slot}: client reports {frames_dropped_delta} frame(s) \
                                      dropped, jitter buffer {jitter_buffer_ms}ms — counted toward \
