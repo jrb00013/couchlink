@@ -833,6 +833,35 @@ async fn main() -> Result<()> {
                                 });
                             }
                         }
+                        SignalMessage::RequestCaptureWindows { slot } => {
+                            let signal_out = signal_out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let windows = capture::list_capturable_windows();
+                                let _ = signal_out.send(SignalMessage::CaptureWindowList {
+                                    windows,
+                                    slot,
+                                });
+                            });
+                        }
+                        SignalMessage::SwitchCaptureWindow { title, slot } => {
+                            info!("slot {slot}: live capture switch requested -> {title:?}");
+                            tokio::task::spawn_blocking(move || {
+                                let Ok(root) = std::env::var("COUCHLINK_ROOT") else {
+                                    warn!("live capture switch: COUCHLINK_ROOT unset");
+                                    return;
+                                };
+                                let root = std::path::Path::new(&root);
+                                if let Err(e) =
+                                    capture::set_capture_window_override(root, Some(&title))
+                                {
+                                    warn!("could not write capture window override: {e:#}");
+                                    return;
+                                }
+                                if let Err(e) = capture::force_switch_capture_window(root) {
+                                    warn!("live capture switch failed: {e:#}");
+                                }
+                            });
+                        }
                         SignalMessage::PresentPath { path, slot } => {
                             if let Some(conn) = slots.lock().await.get(&slot) {
                                 conn.host.set_present_path(&path);

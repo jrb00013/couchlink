@@ -213,7 +213,99 @@ export class CouchlinkPlayer {
     playoutDelayHint?: number | null;
   }) | null = null;
 
-  constructor(private cb: PlayerCallbacks) {}
+  /** Window-switcher overlay DOM, while open. */
+  private switcherEl: HTMLDivElement | null = null;
+
+  constructor(private cb: PlayerCallbacks) {
+    // Deliberately obscure: three modifiers + a letter no game binds. A
+    // DualSense/gamepad physically cannot produce a keydown at all, so a
+    // controller player can never trigger this by accident; a keyboard+mouse
+    // player would have to hold Ctrl+Shift+Alt and press K at the same
+    // time, which no game (and no OS shortcut) uses — if this fires, it was
+    // on purpose. See SignalMessage::RequestCaptureWindows's doc comment.
+    window.addEventListener("keydown", (ev) => {
+      if (ev.ctrlKey && ev.shiftKey && ev.altKey && ev.key.toLowerCase() === "k") {
+        ev.preventDefault();
+        this.requestWindowSwitcher();
+      }
+    });
+  }
+
+  private requestWindowSwitcher() {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    clog("signal → request_capture_windows");
+    send(this.ws, { type: "request_capture_windows" });
+  }
+
+  private closeWindowSwitcherOverlay() {
+    this.switcherEl?.remove();
+    this.switcherEl = null;
+  }
+
+  private showWindowSwitcherOverlay(windows: string[]) {
+    this.closeWindowSwitcherOverlay();
+    const backdrop = document.createElement("div");
+    backdrop.style.cssText =
+      "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.72);" +
+      "display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;";
+    backdrop.addEventListener("click", (ev) => {
+      if (ev.target === backdrop) this.closeWindowSwitcherOverlay();
+    });
+
+    const panel = document.createElement("div");
+    panel.style.cssText =
+      "background:#1b1b1f;color:#eee;border-radius:10px;padding:16px 18px;" +
+      "min-width:320px;max-width:min(560px,90vw);max-height:70vh;overflow:auto;" +
+      "box-shadow:0 8px 32px rgba(0,0,0,0.5);";
+
+    const title = document.createElement("div");
+    title.textContent = "Switch capture window";
+    title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:10px;";
+    panel.appendChild(title);
+
+    if (windows.length === 0) {
+      const empty = document.createElement("div");
+      empty.textContent = "No windows reported by the host.";
+      empty.style.cssText = "opacity:0.7;font-size:13px;";
+      panel.appendChild(empty);
+    }
+
+    for (const w of windows) {
+      const btn = document.createElement("button");
+      btn.textContent = w;
+      btn.style.cssText =
+        "display:block;width:100%;text-align:left;background:#2a2a30;color:#eee;" +
+        "border:1px solid #3a3a42;border-radius:6px;padding:8px 10px;margin:4px 0;" +
+        "font-size:13px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      btn.addEventListener("mouseenter", () => (btn.style.background = "#35353d"));
+      btn.addEventListener("mouseleave", () => (btn.style.background = "#2a2a30"));
+      btn.addEventListener("click", () => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          clog("signal → switch_capture_window", w);
+          send(this.ws, { type: "switch_capture_window", title: w });
+        }
+        this.closeWindowSwitcherOverlay();
+      });
+      panel.appendChild(btn);
+    }
+
+    const hint = document.createElement("div");
+    hint.textContent = "Esc or click outside to cancel";
+    hint.style.cssText = "opacity:0.5;font-size:11px;margin-top:8px;";
+    panel.appendChild(hint);
+
+    backdrop.appendChild(panel);
+    document.body.appendChild(backdrop);
+    this.switcherEl = backdrop;
+
+    const onEscape = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") {
+        this.closeWindowSwitcherOverlay();
+        window.removeEventListener("keydown", onEscape);
+      }
+    };
+    window.addEventListener("keydown", onEscape);
+  }
 
   setTurn(turn: { url: string; user: string; pass: string } | null) {
     this.turn = turn;
@@ -1250,6 +1342,9 @@ export class CouchlinkPlayer {
         break;
       case "host_stats":
         this.cb.onHostStats?.(msg);
+        break;
+      case "capture_window_list":
+        this.showWindowSwitcherOverlay(msg.windows);
         break;
       case "players_status":
         this.cb.onPlayersStatus?.(msg.occupied, msg.max);

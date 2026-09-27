@@ -153,6 +153,31 @@ pub enum SignalMessage {
         #[serde(default)]
         slot: u8,
     },
+    /// Player asks the host for the list of capturable Windows windows —
+    /// fired only by a deliberate in-page shortcut (see `web/src/player.ts`
+    /// `WINDOW_SWITCH_SHORTCUT`), never automatically. The combo is chosen to
+    /// be unreachable by normal gameplay input so a friend triggering the
+    /// window switcher is always intentional.
+    RequestCaptureWindows {
+        #[serde(default)]
+        slot: u8,
+    },
+    /// Host's answer to `RequestCaptureWindows` — every currently capturable
+    /// window's title, for the player's switcher overlay to list.
+    CaptureWindowList {
+        windows: Vec<String>,
+        #[serde(default)]
+        slot: u8,
+    },
+    /// Player picked a window from the switcher overlay. The host re-targets
+    /// `couchlink-win-capture.exe` at it live, without touching the host
+    /// process, signaling, or the tunnel — see
+    /// `crates/host/src/capture/mod.rs` `capture_window_override`.
+    SwitchCaptureWindow {
+        title: String,
+        #[serde(default)]
+        slot: u8,
+    },
     /// Host announces stream ready (codec / resolution).
     StreamInfo {
         width: u32,

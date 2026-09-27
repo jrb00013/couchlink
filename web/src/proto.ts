@@ -50,6 +50,14 @@ export type SignalMessage =
    * host's link governor otherwise never sees RTP-path congestion — see the
    * Rust `SignalMessage::ClientLinkStats` doc comment). */
   | { type: "client_link_stats"; frames_dropped_delta: number; jitter_buffer_ms: number }
+  /** Player → host: fired only by the deliberate window-switcher shortcut
+   * (see WINDOW_SWITCH_SHORTCUT in player.ts) — asks for the capturable
+   * window list. */
+  | { type: "request_capture_windows" }
+  /** Host → player: answer to request_capture_windows, for the switcher overlay. */
+  | { type: "capture_window_list"; windows: string[] }
+  /** Player → host: switch live capture to this window title. */
+  | { type: "switch_capture_window"; title: string }
   | {
       type: "stream_info";
       width: number;
