@@ -48,7 +48,7 @@ find_rpcs3_config() {
   # silently misses the config every time that's true. Search for the file
   # itself instead, under the user's actual home and common install roots.
   local win_user
-  win_user="$(powershell.exe -NoProfile -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
+  win_user="$(powershell.exe -NoProfile -WindowStyle Hidden -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
   local hit
   if [[ -n "$win_user" ]] && [[ -d "/mnt/c/Users/$win_user" ]]; then
     hit="$(find "/mnt/c/Users/$win_user" -maxdepth 6 -ipath '*/rpcs3/config/input_configs/global/Default.yml' 2>/dev/null | head -1)"
@@ -305,7 +305,7 @@ find_pcsx2_config() {
   # several turn up, the one PCSX2 actually writes to is the newest, so
   # pick by mtime rather than by search order.
   local win_user
-  win_user="$(powershell.exe -NoProfile -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
+  win_user="$(powershell.exe -NoProfile -WindowStyle Hidden -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
   local roots=()
   [[ -n "$win_user" ]] && [[ -d "/mnt/c/Users/$win_user" ]] && roots+=("/mnt/c/Users/$win_user")
   [[ -d "/mnt/c/Program Files/PCSX2" ]] && roots+=("/mnt/c/Program Files/PCSX2")
@@ -672,7 +672,7 @@ pcsx2_live_apply_if_running() {
     return 0
   fi
 
-  if ! powershell.exe -NoProfile -Command \
+  if ! powershell.exe -NoProfile -WindowStyle Hidden -Command \
       'if (Get-Process pcsx2-qt -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }' \
       >/dev/null 2>&1; then
     echo "==> PCSX2 not running — disk + input profile only (Load() on next launch)"
@@ -694,7 +694,7 @@ pcsx2_live_apply_if_running() {
   fi
   win_ps1="$(wslpath -w "$ps1")"
   echo "==> PCSX2 live-apply: Invoke Apply Profile 'couchlink' (Pad::CopyConfiguration path)"
-  if powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_ps1" \
+  if powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$win_ps1" \
       -ProfileName couchlink 2>&1; then
     PCSX2_LIVE_APPLY=applied
   else
