@@ -833,11 +833,62 @@ async fn main() -> Result<()> {
                                 });
                             }
                         }
+                        SignalMessage::RequestCaptureWindows { slot } => {
+                            let signal_out = signal_out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let windows = capture::list_capturable_windows();
+                                let _ = signal_out.send(SignalMessage::CaptureWindowList {
+                                    windows,
+                                    slot,
+                                });
+                            });
+                        }
+                        SignalMessage::SwitchCaptureWindow { title, slot } => {
+                            info!("slot {slot}: live capture switch requested -> {title:?}");
+                            tokio::task::spawn_blocking(move || {
+                                let Ok(root) = std::env::var("COUCHLINK_ROOT") else {
+                                    warn!("live capture switch: COUCHLINK_ROOT unset");
+                                    return;
+                                };
+                                let root = std::path::Path::new(&root);
+                                if let Err(e) =
+                                    capture::set_capture_window_override(root, Some(&title))
+                                {
+                                    warn!("could not write capture window override: {e:#}");
+                                    return;
+                                }
+                                if let Err(e) = capture::force_switch_capture_window(root) {
+                                    warn!("live capture switch failed: {e:#}");
+                                }
+                            });
+                        }
                         SignalMessage::PresentPath { path, slot } => {
                             if let Some(conn) = slots.lock().await.get(&slot) {
                                 conn.host.set_present_path(&path);
                             } else {
                                 warn!("present_path for unknown slot {slot} dropped");
+                            }
+                        }
+                        SignalMessage::ClientLinkStats {
+                            frames_dropped_delta,
+                            jitter_buffer_ms,
+                            slot,
+                        } => {
+                            // See the SignalMessage doc comment: this is the only
+                            // congestion signal the governor gets once RTP is the
+                            // live present path, since RTP sends never shed on
+                            // their own. Feed it straight into the same
+                            // `dropped_frames` accumulator the DataChannel path
+                            // already uses — the window/on_window call below
+                            // reads it same as any other shed.
+                            if frames_dropped_delta > 0 {
+                                dropped_frames += frames_dropped_delta as u64;
+                                link_gov.note_client_congestion();
+                                info!(
+                                    "slot {slot}: client reports {frames_dropped_delta} frame(s) \
+                                     dropped, jitter buffer {jitter_buffer_ms}ms — counted toward \
+                                     link governor"
+                                );
                             }
                         }
                         SignalMessage::Heartbeat => {

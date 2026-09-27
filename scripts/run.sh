@@ -193,9 +193,9 @@ couchlink_try_upnp_online() {
       bridge_w="$(wslpath -w "$ROOT/scripts/windows/open-ports-upnp.ps1" 2>/dev/null || true)"
       if [[ -n "${bridge_w:-}" ]]; then
         if couchlink_verbose; then
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" && ok=1 || true
+          powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$bridge_w" && ok=1 || true
         else
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" >/dev/null 2>&1 && ok=1 || true
+          powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$bridge_w" >/dev/null 2>&1 && ok=1 || true
         fi
       fi
     fi

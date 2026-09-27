@@ -277,12 +277,59 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                     relay_to_host(&store, sid, &SignalMessage::PresentPath { path, slot });
                 }
             }
+            SignalMessage::ClientLinkStats {
+                frames_dropped_delta,
+                jitter_buffer_ms,
+                ..
+            } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(
+                        &store,
+                        sid,
+                        &SignalMessage::ClientLinkStats {
+                            frames_dropped_delta,
+                            jitter_buffer_ms,
+                            slot,
+                        },
+                    );
+                }
+            }
             SignalMessage::RequestOffer { .. } => {
                 if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
                     relay_to_host(&store, sid, &SignalMessage::RequestOffer { slot });
                 }
             }
+            SignalMessage::RequestCaptureWindows { .. } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(&store, sid, &SignalMessage::RequestCaptureWindows { slot });
+                }
+            }
+            SignalMessage::SwitchCaptureWindow { title, .. } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(
+                        &store,
+                        sid,
+                        &SignalMessage::SwitchCaptureWindow { title, slot },
+                    );
+                }
+            }
             // --- host → player: route by the slot the host stamped ---
+            SignalMessage::CaptureWindowList { windows, slot } => {
+                if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
+                    match store.player_tx(sid, slot) {
+                        Some(player_tx) => {
+                            if let Ok(json) =
+                                (SignalMessage::CaptureWindowList { windows, slot }).to_json()
+                            {
+                                let _ = player_tx.send(json);
+                            }
+                        }
+                        None => warn!(
+                            "capture window list for unknown slot {slot} dropped (session {sid})"
+                        ),
+                    }
+                }
+            }
             SignalMessage::Offer { slot, .. } => {
                 if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
                     match store.player_tx(sid, slot) {
