@@ -42,7 +42,7 @@ is_wsl() { grep -qi microsoft /proc/version 2>/dev/null; }
 win_home() {
   local u
   if is_wsl && command -v powershell.exe >/dev/null 2>&1; then
-    u="$(powershell.exe -NoProfile -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
+    u="$(powershell.exe -NoProfile -WindowStyle Hidden -Command '$env:USERNAME' 2>/dev/null | tr -d '\r' || true)"
     [[ -n "${u:-}" && -d "/mnt/c/Users/$u" ]] && echo "/mnt/c/Users/$u"
   fi
 }
