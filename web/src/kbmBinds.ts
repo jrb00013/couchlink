@@ -35,23 +35,29 @@ export type KbmAction =
 
 export type KbmBinds = Record<KbmAction, KbmCode[]>;
 
+// Label format: "{PS name} / {Xbox name} — {what it does}". The wire
+// protocol and CLPD button bits are always PlayStation-shaped (see BTN in
+// clpd.ts) regardless of what pad the friend actually owns, so the Xbox name
+// is shown for anyone who only knows their pad by that layout — see also
+// docs/CONTROLS.md for the full PC keyboard/mouse -> Xbox -> PlayStation
+// reference table.
 export const KBM_ACTIONS: ReadonlyArray<{ action: KbmAction; label: string }> = [
   { action: "moveUp", label: "Move up (left stick)" },
   { action: "moveDown", label: "Move down (left stick)" },
   { action: "moveLeft", label: "Move left (left stick)" },
   { action: "moveRight", label: "Move right (left stick)" },
-  { action: "cross", label: "✕ Cross — jump / confirm" },
-  { action: "circle", label: "○ Circle — cancel" },
-  { action: "square", label: "□ Square" },
-  { action: "triangle", label: "△ Triangle" },
-  { action: "l1", label: "L1" },
-  { action: "r1", label: "R1" },
-  { action: "l2", label: "L2 — aim" },
-  { action: "r2", label: "R2 — shoot" },
-  { action: "l3", label: "L3 — stick click" },
-  { action: "r3", label: "R3 — stick click" },
-  { action: "options", label: "Options / Start" },
-  { action: "create", label: "Create / Select" },
+  { action: "cross", label: "✕ Cross / A — jump / confirm" },
+  { action: "circle", label: "○ Circle / B — cancel" },
+  { action: "square", label: "□ Square / X" },
+  { action: "triangle", label: "△ Triangle / Y" },
+  { action: "l1", label: "L1 / LB" },
+  { action: "r1", label: "R1 / RB" },
+  { action: "l2", label: "L2 / LT — aim" },
+  { action: "r2", label: "R2 / RT — shoot" },
+  { action: "l3", label: "L3 / Left stick click" },
+  { action: "r3", label: "R3 / Right stick click" },
+  { action: "options", label: "Options / Menu (Start)" },
+  { action: "create", label: "Create / View (Back)" },
   { action: "dpadUp", label: "D-Pad up" },
   { action: "dpadDown", label: "D-Pad down" },
   { action: "dpadLeft", label: "D-Pad left" },
