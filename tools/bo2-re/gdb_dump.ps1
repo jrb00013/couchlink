@@ -1,8 +1,12 @@
 # Dump guest memory from a running RPCS3 through its GDB stub (127.0.0.1:2345).
 # Run on WINDOWS (the stub only listens on Windows loopback, WSL cannot reach it):
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File gdb_dump.ps1 -Out C:\Users\josep\bo2dump
-# Read-only: sends only qSupported and 'm' (memory read) packets, then detaches
-# the socket without a continue/kill packet.
+# WARNING: RPCS3's GDB stub PAUSES the whole emulator the moment a client connects
+# ("Emulation is being paused... Got connection"). Closing the socket without
+# telling it to continue leaves the game frozen (this happened live). The script
+# therefore always sends 'c' (continue) in a finally block. If a game ever stays
+# paused anyway: RPCS3 menu Emulation > Resume. The stub is single-client and can
+# refuse later connections, so plan on ONE dump per game boot.
 param(
   [string]$Out = "$env:TEMP\bo2dump",
   [int]$Port = 2345,
@@ -34,6 +38,7 @@ function Send([string]$d) {
   $r = $sb.ToString(); $b2 = [Text.Encoding]::ASCII.GetBytes("+"); $s.Write($b2, 0, 1)
   $r.TrimStart('$').Substring(0, $r.Length - 4)
 }
+try {
 "stub says: " + (Send "qSupported")
 foreach ($k in $Ranges.Keys) {
   $a, $l = $Ranges[$k].Split(','); $addr = [Convert]::ToInt64($a, 16); $len = [Convert]::ToInt32($l, 16)
@@ -47,4 +52,8 @@ foreach ($k in $Ranges.Keys) {
   Set-Content -NoNewline -Path "$Out\$k.$a.hex" -Value $hex.ToString()
   "{0}: {1} bytes @ 0x{2}" -f $k, ($hex.Length / 2), $a
 }
-$c.Close()
+} finally {
+  # Resume the emulator no matter what happened above.
+  try { $p = [Text.Encoding]::ASCII.GetBytes("`$c#63"); $s.Write($p, 0, $p.Length); $s.Flush(); Start-Sleep -Milliseconds 300 } catch {}
+  $c.Close()
+}

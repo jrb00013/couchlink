@@ -9,7 +9,8 @@ Facts (issue rpcs3#16426 dump, BLUS31011 01.00, PPU hash `PPU-fa8ffe9a...`):
 ## One-time check (no game needed)
     python3 tools/bo2-re/disasm.py --selftest
 
-## Capture (needs BO2 running; do NOT run while a game you care about is running)
+## Capture (needs BO2 running)
+**Connecting to the GDB stub PAUSES the emulator.** Only run this while the game is already frozen/expendable. `gdb_dump.ps1` sends continue on exit, but that resume path is untested; if the game stays paused use RPCS3 Emulation > Resume. One connection per boot.
 1. Boot BO2 with the crash patch (`BLUS31011_patch.yml`) so the watchdog cannot kill the process.
 2. Reproduce the freeze (split-screen, grenade / SPURS spike).
 3. While frozen, from WSL:
