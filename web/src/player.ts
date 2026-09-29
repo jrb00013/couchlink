@@ -1081,6 +1081,16 @@ export class CouchlinkPlayer {
   private flushKbmPadImmediate() {
     const kbm = this.kbm;
     if (!kbm?.hasInput()) return;
+    // Physical pad seated: don't replace its frame with pure KBM — re-poll so
+    // mouse-look can overlay rx/ry onto the DualSense (or whatever) state.
+    const pads = navigator.getGamepads?.() ?? [];
+    const physical = selectPhysicalGamepads(
+      [...pads].filter((p): p is Gamepad => !!p)
+    );
+    if (physical[0]) {
+      this.pollAndSendPad();
+      return;
+    }
     this.seq = (this.seq + 1) >>> 0;
     this.emitPad(kbm.sample(this.seq));
   }
@@ -1176,7 +1186,16 @@ export class CouchlinkPlayer {
     }
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
-    const state: PadState = fromBrowserGamepad(gp, this.seq);
+    let state: PadState = fromBrowserGamepad(gp, this.seq);
+    // Mouse look → BO2 camera: while pointer-locked with mouse-look on, drive
+    // the right stick from the mouse even if a DualSense is still connected.
+    // Without this, plugging a pad permanently shadows KBM and friends who
+    // "put the controller on" lose camera look.
+    const kbm = this.kbm;
+    if (kbm?.getMouseLookEnabled() && kbm.isPointerLocked()) {
+      const look = kbm.sampleLookAxes();
+      state = { ...state, rx: look.rx, ry: look.ry };
+    }
     this.emitPad(state);
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {

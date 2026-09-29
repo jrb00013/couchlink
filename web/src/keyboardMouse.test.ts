@@ -50,9 +50,8 @@ describe("KeyboardMouseInput", () => {
 
   beforeEach(() => {
     installFakeDom();
-    // Mouse look is opt-in (default off) — most of this file's mouse-look
-    // assertions predate that and assume it's always active, so enable it
-    // here; the "disabled by default" behavior gets its own explicit test.
+    // Most look assertions need motion accepted; pass the flag explicitly.
+    // Default-on / disable / sampleLookAxes have their own tests below.
     kbm = new KeyboardMouseInput({ mouseLookEnabled: true });
     kbm.start();
   });
@@ -138,8 +137,20 @@ describe("KeyboardMouseInput", () => {
     expect(state.ry).toBeLessThan(128);
   });
 
-  it("mouse look is opt-in — disabled by default, ignores mouse movement even while pointer-locked", () => {
-    const disabledKbm = new KeyboardMouseInput();
+  it("mouse look defaults on — pointer-locked movement drives the right stick", () => {
+    const defaultKbm = new KeyboardMouseInput();
+    defaultKbm.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 100, movementY: 0 })
+    );
+    const state = defaultKbm.sample(1);
+    expect(state.rx).toBeGreaterThan(128);
+    defaultKbm.stop();
+  });
+
+  it("mouse look can be disabled — ignores mouse movement even while pointer-locked", () => {
+    const disabledKbm = new KeyboardMouseInput({ mouseLookEnabled: false });
     disabledKbm.start();
     (globalThis as any).document.pointerLockElement = {};
     (globalThis as any).window.dispatchEvent(
@@ -149,6 +160,21 @@ describe("KeyboardMouseInput", () => {
     expect(state.rx).toBe(128);
     expect(state.ry).toBe(128);
     disabledKbm.stop();
+  });
+
+  it("sampleLookAxes overlays onto a physical-pad frame without touching buttons", () => {
+    const lookKbm = new KeyboardMouseInput({ mouseLookEnabled: true });
+    lookKbm.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 60, movementY: -40 })
+    );
+    const look = lookKbm.sampleLookAxes();
+    expect(look.rx).toBeGreaterThan(128);
+    expect(look.ry).toBeLessThan(128);
+    // Consumed — next sampleLookAxes is centered.
+    expect(lookKbm.sampleLookAxes()).toEqual({ rx: 128, ry: 128 });
+    lookKbm.stop();
   });
 
   it("setMouseLookEnabled toggles live and snaps the stick back to neutral when disabled mid-look", () => {

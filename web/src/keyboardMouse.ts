@@ -26,10 +26,9 @@ export type KbmOptions = {
   /** Sensitivity scalar for mouse → right stick. Default 0.5. */
   mouseSensitivity?: number;
   /**
-   * Whether mouse movement drives the right stick at all. Default false —
-   * this is an explicit opt-in (see KeybindsModal), not automatic, because
-   * some games (e.g. Black Ops II) don't expect a constantly-driven right
-   * stick from a KBM player and it fought with their own aim handling.
+   * Whether mouse movement drives the right stick at all. Default true —
+   * pointer-lock still gates it so accidental cursor motion never aims.
+   * Toggle off in Keybinds if a title fights mouse-driven look.
    */
   mouseLookEnabled?: boolean;
   /** Element to request pointer lock on (typically the canvas). */
@@ -58,7 +57,7 @@ export class KeyboardMouseInput {
 
   constructor(opts: KbmOptions = {}) {
     this.sensitivity = opts.mouseSensitivity ?? 0.5;
-    this.mouseLookEnabled = opts.mouseLookEnabled ?? false;
+    this.mouseLookEnabled = opts.mouseLookEnabled ?? true;
     this.lockTarget = opts.lockTarget ?? null;
     this.binds = cloneBinds(opts.binds ?? DEFAULT_KBM_BINDS);
   }
@@ -158,6 +157,21 @@ export class KeyboardMouseInput {
     };
   }
 
+  /**
+   * Consume accumulated mouse delta into right-stick axes.
+   * Used both by full KBM `sample()` and by the physical-pad overlay path
+   * (mouse look → camera while DualSense is still seated for buttons/move).
+   */
+  sampleLookAxes(): { rx: number; ry: number } {
+    const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+    const scale = this.sensitivity * 128;
+    const rx = clamp(128 + this.mouseDx * scale);
+    const ry = clamp(128 + this.mouseDy * scale);
+    this.mouseDx = 0;
+    this.mouseDy = 0;
+    return { rx, ry };
+  }
+
   /** Sample current state into a PadState, consuming accumulated mouse delta. */
   sample(seq: number): PadState {
     const held = (action: KbmAction) => this.actionHeld(action);
@@ -169,12 +183,7 @@ export class KeyboardMouseInput {
     const lx = moveLeft ? 0 : moveRight ? 255 : 128;
     const ly = moveUp ? 0 : moveDown ? 255 : 128;
 
-    const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-    const scale = this.sensitivity * 128;
-    const rx = clamp(128 + this.mouseDx * scale);
-    const ry = clamp(128 + this.mouseDy * scale);
-    this.mouseDx = 0;
-    this.mouseDy = 0;
+    const { rx, ry } = this.sampleLookAxes();
 
     let buttons = 0;
     if (held("cross")) buttons |= BTN.CROSS;

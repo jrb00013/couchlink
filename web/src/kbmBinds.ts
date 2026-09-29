@@ -156,12 +156,11 @@ export function saveKbmSensitivity(sensitivity: number): void {
   }
 }
 
-// Mouse-look was previously always-on for keyboard+mouse players — some
-// games (e.g. Call of Duty: Black Ops II) already have their own aim/camera
-// input assumptions that don't play well with an always-active right-stick
-// drive, so this is now an explicit opt-in toggle in the keybinds UI.
+// Mouse-look defaults on (pointer-lock gated). Toggle lives in Keybinds —
+// disable if a title fights mouse-driven right-stick camera.
 export const KBM_MOUSE_LOOK_STORAGE_KEY = "couchlink.kbm.mouseLook.v1";
-export const DEFAULT_KBM_MOUSE_LOOK_ENABLED = false;
+/** Default on — friends expect mouse → camera; pointer-lock still gates it. */
+export const DEFAULT_KBM_MOUSE_LOOK_ENABLED = true;
 
 export function loadKbmMouseLookEnabled(): boolean {
   try {

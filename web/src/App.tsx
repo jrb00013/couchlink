@@ -908,9 +908,13 @@ export default function App() {
     .filter((p) => p.slot !== 0 && p.slot !== mySlot)
     .sort((a, b) => a.slot - b.slot);
 
+  // Keep KBM alive on desktop even with a DualSense seated — mouse-look
+  // overlays rx/ry onto the pad while pointer-locked (see pollAndSendPad).
+  // Previously hasPhysicalPad killed KBM entirely, so "put the controller on"
+  // permanently blocked mouse → BO2 camera.
   useEffect(() => {
-    setKbmActive(!hasPhysicalPad && !isMobile);
-  }, [hasPhysicalPad, isMobile]);
+    setKbmActive(!isMobile);
+  }, [isMobile]);
 
   const applyPastedLink = () => {
     try {

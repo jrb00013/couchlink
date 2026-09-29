@@ -84,7 +84,7 @@ export function KeybindsModal({
         </p>
         <div className="keybinds-row kbm-mouselook-row">
           <label htmlFor="kbm-mouselook" className="keybinds-action">
-            Mouse look → right stick
+            Mouse look → right stick (BO2 camera)
           </label>
           <input
             id="kbm-mouselook"
@@ -93,6 +93,12 @@ export function KeybindsModal({
             onChange={(e) => onMouseLookEnabledChange(e.target.checked)}
           />
         </div>
+        {mouseLookEnabled && (
+          <p className="modal-hint" style={{ marginTop: 0 }}>
+            Click the video to lock the cursor. Works with a DualSense plugged
+            in — mouse drives camera, pad keeps move/buttons.
+          </p>
+        )}
         {mouseLookEnabled && (
           <div className="keybinds-row kbm-sensitivity-row">
             <label htmlFor="kbm-sensitivity" className="keybinds-action">
