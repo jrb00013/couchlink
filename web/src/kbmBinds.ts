@@ -156,6 +156,31 @@ export function saveKbmSensitivity(sensitivity: number): void {
   }
 }
 
+// Mouse-look was previously always-on for keyboard+mouse players — some
+// games (e.g. Call of Duty: Black Ops II) already have their own aim/camera
+// input assumptions that don't play well with an always-active right-stick
+// drive, so this is now an explicit opt-in toggle in the keybinds UI.
+export const KBM_MOUSE_LOOK_STORAGE_KEY = "couchlink.kbm.mouseLook.v1";
+export const DEFAULT_KBM_MOUSE_LOOK_ENABLED = false;
+
+export function loadKbmMouseLookEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem(KBM_MOUSE_LOOK_STORAGE_KEY);
+    if (raw === null) return DEFAULT_KBM_MOUSE_LOOK_ENABLED;
+    return raw === "true";
+  } catch {
+    return DEFAULT_KBM_MOUSE_LOOK_ENABLED;
+  }
+}
+
+export function saveKbmMouseLookEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(KBM_MOUSE_LOOK_STORAGE_KEY, String(enabled));
+  } catch {
+    /* quota / private mode — input still works this session */
+  }
+}
+
 export function formatKbmCode(code: KbmCode): string {
   if (code === "Mouse0") return "Left click";
   if (code === "Mouse1") return "Middle click";

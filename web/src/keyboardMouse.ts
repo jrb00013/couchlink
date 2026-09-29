@@ -25,6 +25,13 @@ export type KbmSnapshot = {
 export type KbmOptions = {
   /** Sensitivity scalar for mouse → right stick. Default 0.5. */
   mouseSensitivity?: number;
+  /**
+   * Whether mouse movement drives the right stick at all. Default false —
+   * this is an explicit opt-in (see KeybindsModal), not automatic, because
+   * some games (e.g. Black Ops II) don't expect a constantly-driven right
+   * stick from a KBM player and it fought with their own aim handling.
+   */
+  mouseLookEnabled?: boolean;
   /** Element to request pointer lock on (typically the canvas). */
   lockTarget?: HTMLElement | null;
   binds?: KbmBinds;
@@ -42,6 +49,7 @@ export class KeyboardMouseInput {
   private lookX = 0;
   private lookY = 0;
   private sensitivity: number;
+  private mouseLookEnabled: boolean;
   private lockTarget: HTMLElement | null;
   private active = false;
   private binds: KbmBinds;
@@ -50,6 +58,7 @@ export class KeyboardMouseInput {
 
   constructor(opts: KbmOptions = {}) {
     this.sensitivity = opts.mouseSensitivity ?? 0.5;
+    this.mouseLookEnabled = opts.mouseLookEnabled ?? false;
     this.lockTarget = opts.lockTarget ?? null;
     this.binds = cloneBinds(opts.binds ?? DEFAULT_KBM_BINDS);
   }
@@ -65,6 +74,24 @@ export class KeyboardMouseInput {
 
   getSensitivity(): number {
     return this.sensitivity;
+  }
+
+  /** Live-toggle mouse-look without recreating the instance (that would drop pointer lock). */
+  setMouseLookEnabled(enabled: boolean) {
+    this.mouseLookEnabled = enabled;
+    if (!enabled) {
+      // Snap the stick back to neutral immediately, don't wait for decay —
+      // otherwise disabling mid-look leaves the last look direction "stuck"
+      // held on the wire until snapshot()'s decay eventually zeroes it.
+      this.mouseDx = 0;
+      this.mouseDy = 0;
+      this.lookX = 0;
+      this.lookY = 0;
+    }
+  }
+
+  getMouseLookEnabled(): boolean {
+    return this.mouseLookEnabled;
   }
 
   setLockTarget(el: HTMLElement | null) {
@@ -240,7 +267,7 @@ export class KeyboardMouseInput {
   };
 
   private onMouseMove = (e: MouseEvent) => {
-    if (!document.pointerLockElement) return;
+    if (!document.pointerLockElement || !this.mouseLookEnabled) return;
     this.mouseDx += e.movementX / 100;
     this.mouseDy += e.movementY / 100;
     this.lookX = Math.max(-1, Math.min(1, this.lookX + e.movementX / 40));

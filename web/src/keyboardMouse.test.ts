@@ -50,7 +50,10 @@ describe("KeyboardMouseInput", () => {
 
   beforeEach(() => {
     installFakeDom();
-    kbm = new KeyboardMouseInput();
+    // Mouse look is opt-in (default off) — most of this file's mouse-look
+    // assertions predate that and assume it's always active, so enable it
+    // here; the "disabled by default" behavior gets its own explicit test.
+    kbm = new KeyboardMouseInput({ mouseLookEnabled: true });
     kbm.start();
   });
 
@@ -133,6 +136,41 @@ describe("KeyboardMouseInput", () => {
     const state = kbm.sample(1);
     expect(state.rx).toBeGreaterThan(128);
     expect(state.ry).toBeLessThan(128);
+  });
+
+  it("mouse look is opt-in — disabled by default, ignores mouse movement even while pointer-locked", () => {
+    const disabledKbm = new KeyboardMouseInput();
+    disabledKbm.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 100, movementY: 100 })
+    );
+    const state = disabledKbm.sample(1);
+    expect(state.rx).toBe(128);
+    expect(state.ry).toBe(128);
+    disabledKbm.stop();
+  });
+
+  it("setMouseLookEnabled toggles live and snaps the stick back to neutral when disabled mid-look", () => {
+    const toggling = new KeyboardMouseInput({ mouseLookEnabled: true });
+    toggling.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+    );
+    expect(toggling.sample(1).rx).toBeGreaterThan(128);
+
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+    );
+    toggling.setMouseLookEnabled(false);
+    expect(toggling.sample(2).rx).toBe(128);
+
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+    );
+    expect(toggling.sample(3).rx).toBe(128);
+    toggling.stop();
   });
 
   it("ignores mouse movement while not pointer-locked", () => {
