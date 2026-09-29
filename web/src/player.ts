@@ -181,6 +181,9 @@ export class CouchlinkPlayer {
   private padName = "none";
   /** Cumulative `framesDropped` as of the last stats tick, to derive a delta for `client_link_stats`. */
   private lastReportedFramesDropped = 0;
+  private lastReportedPacketsLost = 0;
+  private lastReportedPacketsReceived = 0;
+  private lastReportedFreezeCount = 0;
   /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
   private lastPadHz = 0;
   /** Last Gamepad.id announced to the host, so pad_info is sent on change… */
@@ -496,12 +499,28 @@ export class CouchlinkPlayer {
             video.framesDropped - this.lastReportedFramesDropped
           );
           this.lastReportedFramesDropped = video.framesDropped;
+          // Packet loss and freezes are what a lossy WAN actually shows: NACK/FEC
+          // hide loss from framesDropped while the picture still stalls on a
+          // retransmit. Cumulative counters → per-report deltas (clamped so a
+          // stats reset never goes negative).
+          const lostDelta = Math.max(0, video.packetsLost - this.lastReportedPacketsLost);
+          const recvDelta = Math.max(
+            0,
+            video.packetsReceived - this.lastReportedPacketsReceived
+          );
+          const freezeDelta = Math.max(0, video.freezeCount - this.lastReportedFreezeCount);
+          this.lastReportedPacketsLost = video.packetsLost;
+          this.lastReportedPacketsReceived = video.packetsReceived;
+          this.lastReportedFreezeCount = video.freezeCount;
           if (this.ws?.readyState === WebSocket.OPEN) {
             send(this.ws, {
               type: "client_link_stats",
               frames_dropped_delta: droppedDelta,
               jitter_buffer_ms: Math.round(video.jitterBufferMs),
               rtt_ms: path?.rttMs ?? 0,
+              packets_lost_delta: lostDelta,
+              packets_received_delta: recvDelta,
+              freeze_count_delta: freezeDelta,
             });
           }
         }

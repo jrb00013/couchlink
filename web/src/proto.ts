@@ -54,6 +54,10 @@ export type SignalMessage =
       frames_dropped_delta: number;
       jitter_buffer_ms: number;
       rtt_ms?: number;
+      /** Per-report deltas; older hosts ignore unknown fields. */
+      packets_lost_delta?: number;
+      packets_received_delta?: number;
+      freeze_count_delta?: number;
     }
   | {
       type: "stream_info";

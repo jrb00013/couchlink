@@ -154,6 +154,17 @@ pub enum SignalMessage {
         /// (input feels frozen while video still paints — live 862ms case).
         #[serde(default)]
         rtt_ms: u32,
+        /// RTP packets lost / received since the last report (not cumulative).
+        /// Packet loss is the congestion signal that `frames_dropped_delta` misses:
+        /// NACK/FEC hide loss from the frame counter while the picture still
+        /// freezes waiting on a retransmit (live: 3.6% loss, 44 freezes, 0 drops).
+        #[serde(default)]
+        packets_lost_delta: u32,
+        #[serde(default)]
+        packets_received_delta: u32,
+        /// Browser `freezeCount` growth since the last report.
+        #[serde(default)]
+        freeze_count_delta: u32,
         /// Player slot reporting (stamped by the signaling server).
         #[serde(default)]
         slot: u8,

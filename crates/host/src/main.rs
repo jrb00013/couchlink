@@ -844,8 +844,24 @@ async fn main() -> Result<()> {
                             frames_dropped_delta,
                             jitter_buffer_ms,
                             rtt_ms,
+                            packets_lost_delta,
+                            packets_received_delta,
+                            freeze_count_delta,
                             slot,
                         } => {
+                            if link_gov::client_report_is_congested(
+                                packets_lost_delta,
+                                packets_received_delta,
+                                freeze_count_delta,
+                            ) {
+                                link_gov.note_client_loss();
+                                info!(
+                                    "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
+                                     {freeze_count_delta} freeze(s), jb {jitter_buffer_ms}ms — \
+                                     link governor stepping down",
+                                    packets_lost_delta.saturating_add(packets_received_delta)
+                                );
+                            }
                             // See the SignalMessage doc comment: this is the only
                             // congestion signal the governor gets once RTP is the
                             // live present path, since RTP sends never shed on

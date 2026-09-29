@@ -281,6 +281,9 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                 frames_dropped_delta,
                 jitter_buffer_ms,
                 rtt_ms,
+                packets_lost_delta,
+                packets_received_delta,
+                freeze_count_delta,
                 ..
             } => {
                 if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
@@ -291,6 +294,9 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                             frames_dropped_delta,
                             jitter_buffer_ms,
                             rtt_ms,
+                            packets_lost_delta,
+                            packets_received_delta,
+                            freeze_count_delta,
                             slot,
                         },
                     );
