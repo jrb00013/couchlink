@@ -179,6 +179,8 @@ export class CouchlinkPlayer {
   private lastSentL2 = 0;
   private lastSentR2 = 0;
   private padName = "none";
+  /** Cumulative `framesDropped` as of the last stats tick, to derive a delta for `client_link_stats`. */
+  private lastReportedFramesDropped = 0;
   /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
   private lastPadHz = 0;
   /** Last Gamepad.id announced to the host, so pad_info is sent on change… */
@@ -486,6 +488,22 @@ export class CouchlinkPlayer {
             totalFreezesDuration: video.totalFreezesDuration,
             jbTarget: this.videoReceiver?.jitterBufferTarget ?? null,
           });
+          // Host link governor is blind on RTP/WebCodecs once CLVD sheds go to
+          // zero — report receive-side drops (and RTT) so it can step down.
+          // Matches live freeze pattern: host drop_pct=0 while friend freezes.
+          const droppedDelta = Math.max(
+            0,
+            video.framesDropped - this.lastReportedFramesDropped
+          );
+          this.lastReportedFramesDropped = video.framesDropped;
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            send(this.ws, {
+              type: "client_link_stats",
+              frames_dropped_delta: droppedDelta,
+              jitter_buffer_ms: Math.round(video.jitterBufferMs),
+              rtt_ms: path?.rttMs ?? 0,
+            });
+          }
         }
       } catch (e) {
         cwarn("getStats failed", String(e));
@@ -1063,6 +1081,16 @@ export class CouchlinkPlayer {
   private flushKbmPadImmediate() {
     const kbm = this.kbm;
     if (!kbm?.hasInput()) return;
+    // Physical pad seated: don't replace its frame with pure KBM — re-poll so
+    // mouse-look can overlay rx/ry onto the DualSense (or whatever) state.
+    const pads = navigator.getGamepads?.() ?? [];
+    const physical = selectPhysicalGamepads(
+      [...pads].filter((p): p is Gamepad => !!p)
+    );
+    if (physical[0]) {
+      this.pollAndSendPad();
+      return;
+    }
     this.seq = (this.seq + 1) >>> 0;
     this.emitPad(kbm.sample(this.seq));
   }
@@ -1158,7 +1186,16 @@ export class CouchlinkPlayer {
     }
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
-    const state: PadState = fromBrowserGamepad(gp, this.seq);
+    let state: PadState = fromBrowserGamepad(gp, this.seq);
+    // Mouse look → BO2 camera: while pointer-locked with mouse-look on, drive
+    // the right stick from the mouse even if a DualSense is still connected.
+    // Without this, plugging a pad permanently shadows KBM and friends who
+    // "put the controller on" lose camera look.
+    const kbm = this.kbm;
+    if (kbm?.getMouseLookEnabled() && kbm.isPointerLocked()) {
+      const look = kbm.sampleLookAxes();
+      state = { ...state, rx: look.rx, ry: look.ry };
+    }
     this.emitPad(state);
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {

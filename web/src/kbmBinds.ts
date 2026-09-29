@@ -131,6 +131,55 @@ export function setBind(binds: KbmBinds, action: KbmAction, code: KbmCode): KbmB
   return next;
 }
 
+export const KBM_SENSITIVITY_STORAGE_KEY = "couchlink.kbm.sensitivity.v1";
+export const DEFAULT_KBM_SENSITIVITY = 0.5;
+export const MIN_KBM_SENSITIVITY = 0.05;
+export const MAX_KBM_SENSITIVITY = 2;
+
+export function loadKbmSensitivity(): number {
+  try {
+    const raw = localStorage.getItem(KBM_SENSITIVITY_STORAGE_KEY);
+    if (!raw) return DEFAULT_KBM_SENSITIVITY;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return DEFAULT_KBM_SENSITIVITY;
+    return Math.max(MIN_KBM_SENSITIVITY, Math.min(MAX_KBM_SENSITIVITY, n));
+  } catch {
+    return DEFAULT_KBM_SENSITIVITY;
+  }
+}
+
+export function saveKbmSensitivity(sensitivity: number): void {
+  try {
+    localStorage.setItem(KBM_SENSITIVITY_STORAGE_KEY, String(sensitivity));
+  } catch {
+    /* quota / private mode — input still works this session */
+  }
+}
+
+// Mouse-look defaults on (pointer-lock gated). Toggle lives in Keybinds —
+// disable if a title fights mouse-driven right-stick camera.
+export const KBM_MOUSE_LOOK_STORAGE_KEY = "couchlink.kbm.mouseLook.v1";
+/** Default on — friends expect mouse → camera; pointer-lock still gates it. */
+export const DEFAULT_KBM_MOUSE_LOOK_ENABLED = true;
+
+export function loadKbmMouseLookEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem(KBM_MOUSE_LOOK_STORAGE_KEY);
+    if (raw === null) return DEFAULT_KBM_MOUSE_LOOK_ENABLED;
+    return raw === "true";
+  } catch {
+    return DEFAULT_KBM_MOUSE_LOOK_ENABLED;
+  }
+}
+
+export function saveKbmMouseLookEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(KBM_MOUSE_LOOK_STORAGE_KEY, String(enabled));
+  } catch {
+    /* quota / private mode — input still works this session */
+  }
+}
+
 export function formatKbmCode(code: KbmCode): string {
   if (code === "Mouse0") return "Left click";
   if (code === "Mouse1") return "Middle click";

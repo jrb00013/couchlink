@@ -46,6 +46,15 @@ export type SignalMessage =
    * WebCodecs is starting on the DataChannel — keep both paths live as a
    * safety net until it paints, then it reports "webcodecs". */
   | { type: "present_path"; path: "webcodecs" | "rtp" | "warmup" | "clvd" }
+  /** Player → host: receive-side video health for this stats window (the
+   * host's link governor otherwise never sees RTP/WebCodecs-path congestion).
+   * `rtt_ms` is optional so older hosts ignore it safely. */
+  | {
+      type: "client_link_stats";
+      frames_dropped_delta: number;
+      jitter_buffer_ms: number;
+      rtt_ms?: number;
+    }
   | {
       type: "stream_info";
       width: number;

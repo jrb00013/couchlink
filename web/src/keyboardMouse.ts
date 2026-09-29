@@ -25,6 +25,12 @@ export type KbmSnapshot = {
 export type KbmOptions = {
   /** Sensitivity scalar for mouse → right stick. Default 0.5. */
   mouseSensitivity?: number;
+  /**
+   * Whether mouse movement drives the right stick at all. Default true —
+   * pointer-lock still gates it so accidental cursor motion never aims.
+   * Toggle off in Keybinds if a title fights mouse-driven look.
+   */
+  mouseLookEnabled?: boolean;
   /** Element to request pointer lock on (typically the canvas). */
   lockTarget?: HTMLElement | null;
   binds?: KbmBinds;
@@ -42,6 +48,7 @@ export class KeyboardMouseInput {
   private lookX = 0;
   private lookY = 0;
   private sensitivity: number;
+  private mouseLookEnabled: boolean;
   private lockTarget: HTMLElement | null;
   private active = false;
   private binds: KbmBinds;
@@ -50,12 +57,40 @@ export class KeyboardMouseInput {
 
   constructor(opts: KbmOptions = {}) {
     this.sensitivity = opts.mouseSensitivity ?? 0.5;
+    this.mouseLookEnabled = opts.mouseLookEnabled ?? true;
     this.lockTarget = opts.lockTarget ?? null;
     this.binds = cloneBinds(opts.binds ?? DEFAULT_KBM_BINDS);
   }
 
   setBinds(binds: KbmBinds) {
     this.binds = cloneBinds(binds);
+  }
+
+  /** Live-tune mouse-look sensitivity without recreating the instance (that would drop pointer lock). */
+  setSensitivity(sensitivity: number) {
+    this.sensitivity = sensitivity;
+  }
+
+  getSensitivity(): number {
+    return this.sensitivity;
+  }
+
+  /** Live-toggle mouse-look without recreating the instance (that would drop pointer lock). */
+  setMouseLookEnabled(enabled: boolean) {
+    this.mouseLookEnabled = enabled;
+    if (!enabled) {
+      // Snap the stick back to neutral immediately, don't wait for decay —
+      // otherwise disabling mid-look leaves the last look direction "stuck"
+      // held on the wire until snapshot()'s decay eventually zeroes it.
+      this.mouseDx = 0;
+      this.mouseDy = 0;
+      this.lookX = 0;
+      this.lookY = 0;
+    }
+  }
+
+  getMouseLookEnabled(): boolean {
+    return this.mouseLookEnabled;
   }
 
   setLockTarget(el: HTMLElement | null) {
@@ -122,6 +157,21 @@ export class KeyboardMouseInput {
     };
   }
 
+  /**
+   * Consume accumulated mouse delta into right-stick axes.
+   * Used both by full KBM `sample()` and by the physical-pad overlay path
+   * (mouse look → camera while DualSense is still seated for buttons/move).
+   */
+  sampleLookAxes(): { rx: number; ry: number } {
+    const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+    const scale = this.sensitivity * 128;
+    const rx = clamp(128 + this.mouseDx * scale);
+    const ry = clamp(128 + this.mouseDy * scale);
+    this.mouseDx = 0;
+    this.mouseDy = 0;
+    return { rx, ry };
+  }
+
   /** Sample current state into a PadState, consuming accumulated mouse delta. */
   sample(seq: number): PadState {
     const held = (action: KbmAction) => this.actionHeld(action);
@@ -133,12 +183,7 @@ export class KeyboardMouseInput {
     const lx = moveLeft ? 0 : moveRight ? 255 : 128;
     const ly = moveUp ? 0 : moveDown ? 255 : 128;
 
-    const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-    const scale = this.sensitivity * 128;
-    const rx = clamp(128 + this.mouseDx * scale);
-    const ry = clamp(128 + this.mouseDy * scale);
-    this.mouseDx = 0;
-    this.mouseDy = 0;
+    const { rx, ry } = this.sampleLookAxes();
 
     let buttons = 0;
     if (held("cross")) buttons |= BTN.CROSS;
@@ -231,7 +276,7 @@ export class KeyboardMouseInput {
   };
 
   private onMouseMove = (e: MouseEvent) => {
-    if (!document.pointerLockElement) return;
+    if (!document.pointerLockElement || !this.mouseLookEnabled) return;
     this.mouseDx += e.movementX / 100;
     this.mouseDy += e.movementY / 100;
     this.lookX = Math.max(-1, Math.min(1, this.lookX + e.movementX / 40));
