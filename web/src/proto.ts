@@ -49,7 +49,7 @@ export type SignalMessage =
   /** Player → host: receive-side video health for this stats window (the
    * host's link governor otherwise never sees RTP-path congestion — see the
    * Rust `SignalMessage::ClientLinkStats` doc comment). */
-  | { type: "client_link_stats"; frames_dropped_delta: number; jitter_buffer_ms: number }
+  | { type: "client_link_stats"; frames_dropped_delta: number; jitter_buffer_ms: number; rtt_ms?: number }
   | {
       type: "stream_info";
       width: number;

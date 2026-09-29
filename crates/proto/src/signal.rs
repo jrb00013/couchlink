@@ -149,6 +149,11 @@ pub enum SignalMessage {
         /// Current receiver jitter buffer size, milliseconds — informational
         /// (logged), not yet fed into the governor's step decision.
         jitter_buffer_ms: u32,
+        /// WebRTC `currentRoundTripTime` in ms. Optional so older clients omit it.
+        /// Host treats sustained high RTT as congestion even when drop delta is 0
+        /// (input feels frozen while video still paints — live 862ms case).
+        #[serde(default)]
+        rtt_ms: u32,
         /// Player slot reporting (stamped by the signaling server).
         #[serde(default)]
         slot: u8,

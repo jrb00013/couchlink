@@ -843,23 +843,38 @@ async fn main() -> Result<()> {
                         SignalMessage::ClientLinkStats {
                             frames_dropped_delta,
                             jitter_buffer_ms,
+                            rtt_ms,
                             slot,
                         } => {
                             // See the SignalMessage doc comment: this is the only
                             // congestion signal the governor gets once RTP is the
                             // live present path, since RTP sends never shed on
-                            // their own. Feed it straight into the same
-                            // `dropped_frames` accumulator the DataChannel path
-                            // already uses — the window/on_window call below
-                            // reads it same as any other shed.
+                            // their own. Feed drops into `dropped_frames`; also
+                            // treat catastrophic RTT as congestion (live case:
+                            // drop_pct=0 host-side while friend rtt≈862ms felt frozen).
+                            const RTT_CONGESTION_MS: u32 = 250;
+                            let mut reacted = false;
                             if frames_dropped_delta > 0 {
                                 dropped_frames += frames_dropped_delta as u64;
                                 link_gov.note_client_congestion();
+                                reacted = true;
                                 info!(
                                     "slot {slot}: client reports {frames_dropped_delta} frame(s) \
                                      dropped, jitter buffer {jitter_buffer_ms}ms — counted toward \
                                      link governor"
                                 );
+                            }
+                            if rtt_ms >= RTT_CONGESTION_MS {
+                                // Synthetic shed so on_window sees pressure even when
+                                // the browser isn't dropping (input lag / surplus blowout).
+                                dropped_frames += 8;
+                                link_gov.note_client_congestion();
+                                if !reacted {
+                                    info!(
+                                        "slot {slot}: client rtt {rtt_ms}ms (≥{RTT_CONGESTION_MS}) \
+                                         — treating as link congestion (jb={jitter_buffer_ms}ms)"
+                                    );
+                                }
                             }
                         }
                         SignalMessage::Heartbeat => {

@@ -280,6 +280,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
             SignalMessage::ClientLinkStats {
                 frames_dropped_delta,
                 jitter_buffer_ms,
+                rtt_ms,
                 ..
             } => {
                 if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
@@ -289,6 +290,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                         &SignalMessage::ClientLinkStats {
                             frames_dropped_delta,
                             jitter_buffer_ms,
+                            rtt_ms,
                             slot,
                         },
                     );

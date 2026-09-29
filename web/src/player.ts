@@ -502,6 +502,7 @@ export class CouchlinkPlayer {
               type: "client_link_stats",
               frames_dropped_delta: droppedDelta,
               jitter_buffer_ms: Math.round(video.jitterBufferMs),
+              rtt_ms: path?.rttMs ?? 0,
             });
           }
         }
