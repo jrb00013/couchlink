@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   DEFAULT_KBM_BINDS,
+  DEFAULT_KBM_SENSITIVITY,
   KBM_ACTIONS,
+  MAX_KBM_SENSITIVITY,
+  MIN_KBM_SENSITIVITY,
   type KbmAction,
   type KbmBinds,
   cloneBinds,
@@ -16,10 +19,14 @@ export function KeybindsModal({
   binds,
   onChange,
   onClose,
+  sensitivity,
+  onSensitivityChange,
 }: {
   binds: KbmBinds;
   onChange: (next: KbmBinds) => void;
   onClose: () => void;
+  sensitivity: number;
+  onSensitivityChange: (next: number) => void;
 }) {
   const [capturing, setCapturing] = useState<KbmAction | null>(null);
 
@@ -71,6 +78,20 @@ export function KeybindsModal({
           sees the remap immediately. Mouse look stays on the right stick.
           Saved in this browser.
         </p>
+        <div className="keybinds-row kbm-sensitivity-row">
+          <label htmlFor="kbm-sensitivity" className="keybinds-action">
+            Mouse look sensitivity ({sensitivity.toFixed(2)})
+          </label>
+          <input
+            id="kbm-sensitivity"
+            type="range"
+            min={MIN_KBM_SENSITIVITY}
+            max={MAX_KBM_SENSITIVITY}
+            step={0.05}
+            value={sensitivity}
+            onChange={(e) => onSensitivityChange(Number(e.target.value))}
+          />
+        </div>
         <div className="keybinds-list">
           {KBM_ACTIONS.map(({ action, label }) => (
             <button
@@ -93,6 +114,7 @@ export function KeybindsModal({
             const next = cloneBinds(DEFAULT_KBM_BINDS);
             saveKbmBinds(next);
             onChange(next);
+            onSensitivityChange(DEFAULT_KBM_SENSITIVITY);
             setCapturing(null);
           }}
         >

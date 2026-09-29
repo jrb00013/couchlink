@@ -123,6 +123,57 @@ describe("KeyboardMouseInput", () => {
     expect(after.buttons & BTN.CROSS).toBe(0);
   });
 
+  it("mouse movement drives the right stick while pointer-locked, centered at 128", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    const move = (dx: number, dy: number) =>
+      (globalThis as any).window.dispatchEvent(
+        new (globalThis as any).MouseEvent("mousemove", { movementX: dx, movementY: dy })
+      );
+    move(50, -50);
+    const state = kbm.sample(1);
+    expect(state.rx).toBeGreaterThan(128);
+    expect(state.ry).toBeLessThan(128);
+  });
+
+  it("ignores mouse movement while not pointer-locked", () => {
+    (globalThis as any).document.pointerLockElement = null;
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 100, movementY: 100 })
+    );
+    const state = kbm.sample(1);
+    expect(state.rx).toBe(128);
+    expect(state.ry).toBe(128);
+  });
+
+  it("right stick returns to center the tick after motion stops (delta consumed each sample, not held)", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+    );
+    const moving = kbm.sample(1);
+    expect(moving.rx).toBeGreaterThan(128);
+    const settled = kbm.sample(2);
+    expect(settled.rx).toBe(128);
+  });
+
+  it("setSensitivity scales right-stick deflection for the same mouse delta", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    kbm.setSensitivity(0.1);
+    expect(kbm.getSensitivity()).toBe(0.1);
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 50, movementY: 0 })
+    );
+    const low = kbm.sample(1);
+
+    kbm.setSensitivity(2);
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 50, movementY: 0 })
+    );
+    const high = kbm.sample(2);
+
+    expect(high.rx - 128).toBeGreaterThan(low.rx - 128);
+  });
+
   it("clears held keys when the tab is hidden", () => {
     const doc = (globalThis as any).document;
     doc.dispatchEvent(keyEvent("keydown", "KeyA")); // no-op target, just to prove doc listeners don't interfere

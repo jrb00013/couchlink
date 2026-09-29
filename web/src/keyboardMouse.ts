@@ -58,6 +58,15 @@ export class KeyboardMouseInput {
     this.binds = cloneBinds(binds);
   }
 
+  /** Live-tune mouse-look sensitivity without recreating the instance (that would drop pointer lock). */
+  setSensitivity(sensitivity: number) {
+    this.sensitivity = sensitivity;
+  }
+
+  getSensitivity(): number {
+    return this.sensitivity;
+  }
+
   setLockTarget(el: HTMLElement | null) {
     if (this.active && this.lockTarget) {
       this.lockTarget.removeEventListener("click", this.onLockTargetClick);

@@ -26,7 +26,7 @@ import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
 import { KeyboardMouseInput } from "./keyboardMouse";
 import { KeybindsModal } from "./KeybindsModal";
-import { loadKbmBinds, type KbmBinds } from "./kbmBinds";
+import { loadKbmBinds, loadKbmSensitivity, saveKbmSensitivity, type KbmBinds } from "./kbmBinds";
 import {
   detectLandscape,
   detectMobile,
@@ -176,6 +176,11 @@ export default function App() {
   const [kbmActive, setKbmActive] = useState(false);
   const [keybindsOpen, setKeybindsOpen] = useState(false);
   const [kbmBinds, setKbmBinds] = useState<KbmBinds>(() => loadKbmBinds());
+  const [kbmSensitivity, setKbmSensitivityState] = useState<number>(() => loadKbmSensitivity());
+  const setKbmSensitivity = (v: number) => {
+    setKbmSensitivityState(v);
+    saveKbmSensitivity(v);
+  };
   const [pointerLocked, setPointerLocked] = useState(false);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
   const [kbmInput, setKbmInput] = useState<KeyboardMouseInput | null>(null);
@@ -732,6 +737,7 @@ export default function App() {
       const kbm = new KeyboardMouseInput({
         lockTarget: canvas ?? null,
         binds: kbmBinds,
+        mouseSensitivity: kbmSensitivity,
       });
       kbmRef.current = kbm;
       setKbmInput(kbm);
@@ -758,6 +764,10 @@ export default function App() {
   useEffect(() => {
     kbmRef.current?.setBinds(kbmBinds);
   }, [kbmBinds]);
+
+  useEffect(() => {
+    kbmRef.current?.setSensitivity(kbmSensitivity);
+  }, [kbmSensitivity]);
 
   // Re-detect mobile + landscape so side-mode follows a phone tilt.
   useEffect(() => {
@@ -1169,6 +1179,8 @@ export default function App() {
         <KeybindsModal
           binds={kbmBinds}
           onChange={setKbmBinds}
+          sensitivity={kbmSensitivity}
+          onSensitivityChange={setKbmSensitivity}
           onClose={() => setKeybindsOpen(false)}
         />
       )}

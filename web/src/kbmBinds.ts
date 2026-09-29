@@ -131,6 +131,31 @@ export function setBind(binds: KbmBinds, action: KbmAction, code: KbmCode): KbmB
   return next;
 }
 
+export const KBM_SENSITIVITY_STORAGE_KEY = "couchlink.kbm.sensitivity.v1";
+export const DEFAULT_KBM_SENSITIVITY = 0.5;
+export const MIN_KBM_SENSITIVITY = 0.05;
+export const MAX_KBM_SENSITIVITY = 2;
+
+export function loadKbmSensitivity(): number {
+  try {
+    const raw = localStorage.getItem(KBM_SENSITIVITY_STORAGE_KEY);
+    if (!raw) return DEFAULT_KBM_SENSITIVITY;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return DEFAULT_KBM_SENSITIVITY;
+    return Math.max(MIN_KBM_SENSITIVITY, Math.min(MAX_KBM_SENSITIVITY, n));
+  } catch {
+    return DEFAULT_KBM_SENSITIVITY;
+  }
+}
+
+export function saveKbmSensitivity(sensitivity: number): void {
+  try {
+    localStorage.setItem(KBM_SENSITIVITY_STORAGE_KEY, String(sensitivity));
+  } catch {
+    /* quota / private mode — input still works this session */
+  }
+}
+
 export function formatKbmCode(code: KbmCode): string {
   if (code === "Mouse0") return "Left click";
   if (code === "Mouse1") return "Middle click";
