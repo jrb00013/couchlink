@@ -60,6 +60,23 @@ describe("KeyboardMouseInput", () => {
     kbm.stop();
   });
 
+  it("overlay lets keys and mouse buttons through an idle physical pad", () => {
+    const idle = { seq: 7, buttons: 0, lx: 128, ly: 128, rx: 128, ry: 128, l2: 0, r2: 0 };
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "Space"));
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyW"));
+    const out = kbm.overlay(idle);
+    expect(out.buttons & BTN.CROSS).toBeTruthy();
+    expect(out.ly).toBe(0);
+    expect(out.lx).toBe(128);
+    expect(out.seq).toBe(7);
+  });
+
+  it("overlay keeps the pad's own stick and buttons when no key is down", () => {
+    const pad = { seq: 1, buttons: BTN.SQUARE, lx: 30, ly: 200, rx: 90, ry: 140, l2: 50, r2: 0 };
+    const out = kbm.overlay(pad);
+    expect(out).toEqual(pad);
+  });
+
   it("moves the left stick while WASD is held", () => {
     (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyD"));
     const state = kbm.sample(1);

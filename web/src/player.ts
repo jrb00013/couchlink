@@ -1210,11 +1210,9 @@ export class CouchlinkPlayer {
     // the right stick from the mouse even if a DualSense is still connected.
     // Without this, plugging a pad permanently shadows KBM and friends who
     // "put the controller on" lose camera look.
-    const kbm = this.kbm;
-    if (kbm?.getMouseLookEnabled() && kbm.isPointerLocked()) {
-      const look = kbm.sampleLookAxes();
-      state = { ...state, rx: look.rx, ry: look.ry };
-    }
+    // Keys and mouse buttons merge too, not just look: a seated-but-idle pad
+    // must not swallow the keyboard (PC player: "can't hit any buttons").
+    if (this.kbm) state = this.kbm.overlay(state);
     this.emitPad(state);
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {

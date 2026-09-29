@@ -218,6 +218,31 @@ export class KeyboardMouseInput {
     };
   }
 
+  /**
+   * Merge held keys, mouse buttons and mouse-look into a physical pad's frame.
+   *
+   * A connected-but-idle gamepad (paired DualSense, Steam Input, a headset
+   * that exposes HID buttons) used to shadow the keyboard completely, so the
+   * player's keys and mouse did nothing. The pad still wins where it is
+   * actually being used: keyboard axes only replace a stick when a movement
+   * key is down, and mouse-look only replaces the right stick while looking.
+   */
+  overlay(state: PadState): PadState {
+    const k = this.sample(state.seq);
+    const moving = k.lx !== 128 || k.ly !== 128;
+    const looking = k.rx !== 128 || k.ry !== 128;
+    return {
+      ...state,
+      buttons: state.buttons | k.buttons,
+      lx: moving ? k.lx : state.lx,
+      ly: moving ? k.ly : state.ly,
+      rx: looking ? k.rx : state.rx,
+      ry: looking ? k.ry : state.ry,
+      l2: Math.max(state.l2, k.l2),
+      r2: Math.max(state.r2, k.r2),
+    };
+  }
+
   /** True while any key or mouse button is held, or unprocessed mouse motion exists. */
   hasInput(): boolean {
     return (
