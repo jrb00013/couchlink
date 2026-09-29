@@ -1,6 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
   DEFAULT_KBM_BINDS,
+  FIGHTING_KBM_BINDS,
+  KBM_ACTIONS,
   KBM_STORAGE_KEY,
   formatKbmCode,
   loadKbmBinds,
@@ -47,5 +49,21 @@ describe("kbmBinds", () => {
     expect(formatKbmCode("Mouse0")).toBe("Left click");
     expect(formatKbmCode("KeyE")).toBe("E");
     expect(formatKbmCode("Space")).toBe("Space");
+  });
+
+  it("fighting preset never binds one key to two actions", () => {
+    const seen = new Map<string, string>();
+    for (const { action } of KBM_ACTIONS) {
+      for (const code of FIGHTING_KBM_BINDS[action]) {
+        expect(seen.get(code), `${code} on ${action}`).toBeUndefined();
+        seen.set(code, action);
+      }
+    }
+  });
+
+  it("fighting preset keeps the left stick unbound and the D-pad on WASD", () => {
+    expect(FIGHTING_KBM_BINDS.moveLeft).toEqual([]);
+    expect(FIGHTING_KBM_BINDS.dpadLeft).toContain("KeyA");
+    expect(FIGHTING_KBM_BINDS.dpadRight).toContain("KeyD");
   });
 });

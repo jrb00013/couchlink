@@ -81,6 +81,34 @@ export const DEFAULT_KBM_BINDS: KbmBinds = {
   dpadRight: ["KeyL", "Numpad6"],
 };
 
+/**
+ * Fighting-game layout (Mortal Kombat): WASD + arrows drive the D-pad, the
+ * left stick is unbound so one key never sends two directions, and the four
+ * attack buttons sit on a UIOJ-style cluster under the right hand.
+ */
+export const FIGHTING_KBM_BINDS: KbmBinds = {
+  moveUp: [],
+  moveDown: [],
+  moveLeft: [],
+  moveRight: [],
+  cross: ["KeyJ"],
+  circle: ["KeyK"],
+  square: ["KeyU"],
+  triangle: ["KeyI"],
+  l1: ["KeyH"],
+  r1: ["KeyO"],
+  l2: ["KeyY"],
+  r2: ["Space", "Mouse0"],
+  l3: [],
+  r3: [],
+  options: ["Enter"],
+  create: ["Tab"],
+  dpadUp: ["KeyW", "ArrowUp"],
+  dpadDown: ["KeyS", "ArrowDown"],
+  dpadLeft: ["KeyA", "ArrowLeft"],
+  dpadRight: ["KeyD", "ArrowRight"],
+};
+
 const ACTIONS = new Set(KBM_ACTIONS.map((a) => a.action));
 
 export function isKbmAction(s: string): s is KbmAction {

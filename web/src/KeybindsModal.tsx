@@ -3,6 +3,7 @@ import {
   DEFAULT_KBM_BINDS,
   DEFAULT_KBM_MOUSE_LOOK_ENABLED,
   DEFAULT_KBM_SENSITIVITY,
+  FIGHTING_KBM_BINDS,
   KBM_ACTIONS,
   MAX_KBM_SENSITIVITY,
   MIN_KBM_SENSITIVITY,
@@ -130,6 +131,19 @@ export function KeybindsModal({
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          className="kbm-keybinds-btn"
+          onClick={() => {
+            const next = cloneBinds(FIGHTING_KBM_BINDS);
+            saveKbmBinds(next);
+            onChange(next);
+            onMouseLookEnabledChange(false);
+            setCapturing(null);
+          }}
+        >
+          Fighting-game preset (Mortal Kombat)
+        </button>
         <button
           type="button"
           className="kbm-keybinds-btn"
