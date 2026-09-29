@@ -142,7 +142,7 @@ export function KeybindsModal({
             setCapturing(null);
           }}
         >
-          Fighting-game preset (Mortal Kombat)
+          Fighting preset (Mortal Kombat only)
         </button>
         <button
           type="button"
@@ -156,7 +156,7 @@ export function KeybindsModal({
             setCapturing(null);
           }}
         >
-          Reset defaults
+          Shooter defaults (Black Ops / FPS)
         </button>
       </div>
     </div>
