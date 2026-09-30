@@ -1,11 +1,12 @@
 # Applied on top of the user's RPCS3 config when installing the BO2 pack.
-# Locksmith balance: kill the hang-detect watchdog in BLUS31011_patch.yml,
-# stay under the CB-ring cliff here WITHOUT killing last-night feel.
 #
-# Crash recipe was Multithreaded RSX ON + uncapped flooding Vulkan CBs.
-# Keep MT RSX off (the amplifier). Leave Frame limit Off so sim/present
-# can run like last night; if CB freeze returns, set Frame limit: 60 until
-# the vk-cb-chain-wait build is staged.
+# Feel vs crash is solved in RPCS3 *code* (fix/vk-cb-chain-wait): wait/reclaim
+# free Vulkan CBs instead of reusing a still-pending one (BO2 present freeze).
+#
+# Until that build is staged as the active rpcs3.exe:
+#   Multithreaded RSX: false, Frame limit: Auto  (crash-safe, display-paced)
+# After CB-wait is staged, flip Multithreaded RSX back to true for last-night feel
+# (backup had MT RSX true + Frame Auto).
 Core:
   SPU Block Size: Safe
   Accurate SPU DMA: true
@@ -20,8 +21,7 @@ Video:
   RSX FIFO Fetch Accuracy: Atomic
   Accurate ZCULL stats: false
   Relaxed ZCULL Sync: true
-  # Off = last-night feel. MT RSX stays false so we don't reopen the CB flood.
-  Frame limit: Off
+  Frame limit: Auto
   Resolution: 1280x720
   Resolution Scale: 100
   Exclusive Fullscreen Mode: Disable
