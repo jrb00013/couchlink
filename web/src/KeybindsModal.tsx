@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import {
   DEFAULT_KBM_BINDS,
   DEFAULT_KBM_MOUSE_LOOK_ENABLED,
-  DEFAULT_KBM_SENSITIVITY,
+  SHOOTER_KBM_SENSITIVITY,
   FIGHTING_KBM_BINDS,
   KBM_ACTIONS,
   MAX_KBM_SENSITIVITY,
@@ -151,7 +151,7 @@ export function KeybindsModal({
             const next = cloneBinds(DEFAULT_KBM_BINDS);
             saveKbmBinds(next);
             onChange(next);
-            onSensitivityChange(DEFAULT_KBM_SENSITIVITY);
+            onSensitivityChange(SHOOTER_KBM_SENSITIVITY);
             onMouseLookEnabledChange(DEFAULT_KBM_MOUSE_LOOK_ENABLED);
             setCapturing(null);
           }}

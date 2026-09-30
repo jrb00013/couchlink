@@ -198,6 +198,9 @@ export class CouchlinkPlayer {
   private lastPathKey = "";
   /** Keyboard+mouse input source — injected by the UI, null if not active. */
   private kbm: KeyboardMouseInput | null = null;
+  /** Coalesce look-only pad flushes (buttons stay on onActivity). */
+  private lookFlushTimer: number | null = null;
+  private lastLookFlushAt = 0;
   /** Touch-screen controller — injected by the UI on mobile, null otherwise. */
   private touch: TouchGamepadInput | null = null;
   /** Previous inbound-rtp sample, for bitrate + loss deltas. */
@@ -224,9 +227,21 @@ export class CouchlinkPlayer {
 
   /** Attach or detach a keyboard/mouse input source. Call with null to disable. */
   setKbm(kbm: KeyboardMouseInput | null) {
-    if (this.kbm) this.kbm.onActivity = null;
+    if (this.kbm) {
+      this.kbm.onActivity = null;
+      this.kbm.onLookActivity = null;
+    }
+    if (this.lookFlushTimer != null) {
+      window.clearTimeout(this.lookFlushTimer);
+      this.lookFlushTimer = null;
+    }
     this.kbm = kbm;
-    if (kbm) kbm.onActivity = () => this.flushKbmPadImmediate();
+    if (kbm) {
+      // Buttons/keys: immediate (Ricardo-class Φ). Look: coalesce so we don't
+      // flood the unordered pad DC at raw mousemove Hz under load.
+      kbm.onActivity = () => this.flushKbmPadImmediate();
+      kbm.onLookActivity = () => this.scheduleLookFlush();
+    }
   }
 
   /** Attach or detach the mobile touch controller. Call with null to disable. */
@@ -1098,6 +1113,10 @@ export class CouchlinkPlayer {
 
   /** Event-driven kbm send — zero poll wait on button edges (Ricardo-class Φ). */
   private flushKbmPadImmediate() {
+    if (this.lookFlushTimer != null) {
+      window.clearTimeout(this.lookFlushTimer);
+      this.lookFlushTimer = null;
+    }
     const kbm = this.kbm;
     if (!kbm?.hasInput()) return;
     // Physical pad seated: don't replace its frame with pure KBM — re-poll so
@@ -1112,6 +1131,27 @@ export class CouchlinkPlayer {
     }
     this.seq = (this.seq + 1) >>> 0;
     this.emitPad(kbm.sample(this.seq));
+  }
+
+  /**
+   * Look-only flush — coalesce to ~8ms so mousemove doesn't flood the pad DC.
+   * Button `onActivity` still calls {@link flushKbmPadImmediate} and cancels this.
+   */
+  private scheduleLookFlush() {
+    const LOOK_COALESCE_MS = 8;
+    const now = performance.now();
+    if (now - this.lastLookFlushAt >= LOOK_COALESCE_MS) {
+      this.lastLookFlushAt = now;
+      this.flushKbmPadImmediate();
+      return;
+    }
+    if (this.lookFlushTimer != null) return;
+    const wait = Math.max(0, LOOK_COALESCE_MS - (now - this.lastLookFlushAt));
+    this.lookFlushTimer = window.setTimeout(() => {
+      this.lookFlushTimer = null;
+      this.lastLookFlushAt = performance.now();
+      this.flushKbmPadImmediate();
+    }, wait);
   }
 
   private pollAndSendPad() {

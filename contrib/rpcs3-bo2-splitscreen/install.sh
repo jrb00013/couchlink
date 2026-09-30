@@ -37,7 +37,8 @@ sed -i \
   -e 's/^  RSX FIFO Fetch Accuracy:.*/  RSX FIFO Fetch Accuracy: Atomic/' \
   -e 's/^  Accurate ZCULL stats:.*/  Accurate ZCULL stats: false/' \
   -e 's/^  Relaxed ZCULL Sync:.*/  Relaxed ZCULL Sync: true/' \
-  -e 's/^  Frame limit:.*/  Frame limit: 30/' \
+  -e 's/^  Frame limit:.*/  Frame limit: Off/' \
+  -e 's/^  Multithreaded RSX:.*/  Multithreaded RSX: false/' \
   -e 's/^  Resolution:.*/  Resolution: 1280x720/' \
   -e 's/^  Resolution Scale:.*/  Resolution Scale: 100/' \
   -e 's/^    Exclusive Fullscreen Mode:.*/    Exclusive Fullscreen Mode: Disable/' \

@@ -14,9 +14,13 @@ thread then deliberately writes to address `0x17` and kills the process
    multiplayer code maps in):
    - Force watchdog enable-flag read to 0 (`0x0041c3cc`: `lbz` → `li r3,0`)
    - NOP the intentional crash store (`0x0041c414`: `stw` → `nop`)
-2. **Per-game config** — stay under the livelock cliff: 30 FPS cap, Accurate
-   SPU DMA, PPU reservation priority over SPUs, Safe SPU block size, reduced
-   Max SPURS Threads, no exclusive fullscreen (so couchlink WGC can capture).
+2. **Per-game config** — stay under the livelock / RSX cliff without killing
+   feel: **Multithreaded RSX off** (the CB-ring amplifier), Frame limit **Off**
+   (last-night responsive sim/present). If the present surface freezes again,
+   set Frame limit back to `60` until a `vk-cb-chain-wait` RPCS3 build is
+   staged. Also: Accurate SPU DMA, PPU reservation priority over SPUs, Safe
+   SPU block size, Max SPURS Threads 4, no exclusive fullscreen (so couchlink
+   WGC can capture).
 
 This does **not** claim to reverse-engineer Treyarch's job system. It removes
 the suicide and reduces the race window so split-screen can be *played and

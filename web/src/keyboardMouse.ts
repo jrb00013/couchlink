@@ -23,7 +23,7 @@ export type KbmSnapshot = {
 };
 
 export type KbmOptions = {
-  /** Sensitivity scalar for mouse → right stick. Default 0.5. */
+  /** Sensitivity scalar for mouse → right stick. Default 1.15. */
   mouseSensitivity?: number;
   /**
    * Whether mouse movement drives the right stick at all. Default true —
@@ -36,14 +36,29 @@ export type KbmOptions = {
   binds?: KbmBinds;
 };
 
-/** Fired on key/button/mouse-look change — send pad immediately, don't wait for poll. */
+/** Fired on key/button change — send pad immediately, don't wait for poll. */
 export type KbmActivityHandler = () => void;
+/** Fired on mouse-look motion — may be coalesced; buttons stay on `onActivity`. */
+export type KbmLookActivityHandler = () => void;
+
+/**
+ * Hold stick deflection this long after the last mouse sample so a ~60Hz game
+ * read still sees the look. Snap to center after — no mushy exponential tail.
+ */
+export const LOOK_HOLD_MS = 16;
 
 export class KeyboardMouseInput {
   private keys = new Set<string>();
   private mouseButtons = 0;
-  private mouseDx = 0;
-  private mouseDy = 0;
+  /** Motion not yet folded into the look latch. */
+  private pendingDx = 0;
+  private pendingDy = 0;
+  /** Stick deflection; time-decayed, snapped after {@link LOOK_HOLD_MS} silence. */
+  private latchDx = 0;
+  private latchDy = 0;
+  /** performance.now() of last pointer-lock mouse sample that added look. */
+  private lastMouseMoveAt = 0;
+  private lastLookSampleAt = 0;
   /** Unconsumed look for the mini viz — sample() zeros mouseDx/Dy. */
   private lookX = 0;
   private lookY = 0;
@@ -54,9 +69,11 @@ export class KeyboardMouseInput {
   private binds: KbmBinds;
   /** Wired by CouchlinkPlayer for sub-poll input (beats 2ms quantisation). */
   onActivity: KbmActivityHandler | null = null;
+  /** Look-only path — player may coalesce these; never delay buttons via this. */
+  onLookActivity: KbmLookActivityHandler | null = null;
 
   constructor(opts: KbmOptions = {}) {
-    this.sensitivity = opts.mouseSensitivity ?? 0.5;
+    this.sensitivity = opts.mouseSensitivity ?? 1.15;
     this.mouseLookEnabled = opts.mouseLookEnabled ?? true;
     this.lockTarget = opts.lockTarget ?? null;
     this.binds = cloneBinds(opts.binds ?? DEFAULT_KBM_BINDS);
@@ -79,11 +96,15 @@ export class KeyboardMouseInput {
   setMouseLookEnabled(enabled: boolean) {
     this.mouseLookEnabled = enabled;
     if (!enabled) {
-      // Snap the stick back to neutral immediately, don't wait for decay —
+      // Snap the stick back to neutral immediately, don't wait for hold —
       // otherwise disabling mid-look leaves the last look direction "stuck"
-      // held on the wire until snapshot()'s decay eventually zeroes it.
-      this.mouseDx = 0;
-      this.mouseDy = 0;
+      // held on the wire until LOOK_HOLD_MS elapses.
+      this.pendingDx = 0;
+      this.pendingDy = 0;
+      this.latchDx = 0;
+      this.latchDy = 0;
+      this.lastMouseMoveAt = 0;
+      this.lastLookSampleAt = 0;
       this.lookX = 0;
       this.lookY = 0;
     }
@@ -136,8 +157,12 @@ export class KeyboardMouseInput {
     if (document.pointerLockElement) document.exitPointerLock();
     this.keys.clear();
     this.mouseButtons = 0;
-    this.mouseDx = 0;
-    this.mouseDy = 0;
+    this.pendingDx = 0;
+    this.pendingDy = 0;
+    this.latchDx = 0;
+    this.latchDy = 0;
+    this.lastMouseMoveAt = 0;
+    this.lastLookSampleAt = 0;
     this.lookX = 0;
     this.lookY = 0;
   }
@@ -158,18 +183,45 @@ export class KeyboardMouseInput {
   }
 
   /**
-   * Consume accumulated mouse delta into right-stick axes.
-   * Used both by full KBM `sample()` and by the physical-pad overlay path
-   * (mouse look → camera while DualSense is still seated for buttons/move).
+   * Map accumulated mouse delta into right-stick axes.
+   *
+   * Pad polls ~every 2ms; BO2 reads closer to ~60Hz. Time-based decay
+   * (τ = LOOK_HOLD_MS) keeps deflection visible across game polls regardless
+   * of poll Hz, then hard-snaps after LOOK_HOLD_MS of mouse silence so look
+   * stops crisply instead of a long mushy tail.
    */
-  sampleLookAxes(): { rx: number; ry: number } {
+  sampleLookAxes(nowMs: number = performance.now()): { rx: number; ry: number } {
     const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+    this.latchDx += this.pendingDx;
+    this.latchDy += this.pendingDy;
+    this.pendingDx = 0;
+    this.pendingDy = 0;
+
+    const dt =
+      this.lastLookSampleAt > 0
+        ? Math.max(0, Math.min(50, nowMs - this.lastLookSampleAt))
+        : 0;
+    this.lastLookSampleAt = nowMs;
+    if (dt > 0) {
+      const keep = Math.exp(-dt / LOOK_HOLD_MS);
+      this.latchDx *= keep;
+      this.latchDy *= keep;
+    }
+
+    if (
+      this.lastMouseMoveAt <= 0 ||
+      nowMs - this.lastMouseMoveAt > LOOK_HOLD_MS ||
+      (Math.abs(this.latchDx) < 0.02 && Math.abs(this.latchDy) < 0.02)
+    ) {
+      this.latchDx = 0;
+      this.latchDy = 0;
+    }
+
     const scale = this.sensitivity * 128;
-    const rx = clamp(128 + this.mouseDx * scale);
-    const ry = clamp(128 + this.mouseDy * scale);
-    this.mouseDx = 0;
-    this.mouseDy = 0;
-    return { rx, ry };
+    return {
+      rx: clamp(128 + this.latchDx * scale),
+      ry: clamp(128 + this.latchDy * scale),
+    };
   }
 
   /** Sample current state into a PadState, consuming accumulated mouse delta. */
@@ -248,8 +300,10 @@ export class KeyboardMouseInput {
     return (
       this.keys.size > 0 ||
       this.mouseButtons !== 0 ||
-      Math.abs(this.mouseDx) > 0.001 ||
-      Math.abs(this.mouseDy) > 0.001
+      Math.abs(this.pendingDx) > 0.001 ||
+      Math.abs(this.pendingDy) > 0.001 ||
+      Math.abs(this.latchDx) > 0.001 ||
+      Math.abs(this.latchDy) > 0.001
     );
   }
 
@@ -302,11 +356,14 @@ export class KeyboardMouseInput {
 
   private onMouseMove = (e: MouseEvent) => {
     if (!document.pointerLockElement || !this.mouseLookEnabled) return;
-    this.mouseDx += e.movementX / 100;
-    this.mouseDy += e.movementY / 100;
+    // Higher gain than /100: pixel motion must reach meaningful stick
+    // deflection so FPS titles (BO2) feel 1:1 with the mouse.
+    this.pendingDx += e.movementX / 35;
+    this.pendingDy += e.movementY / 35;
+    this.lastMouseMoveAt = performance.now();
     this.lookX = Math.max(-1, Math.min(1, this.lookX + e.movementX / 40));
     this.lookY = Math.max(-1, Math.min(1, this.lookY + e.movementY / 40));
-    this.bumpActivity();
+    this.onLookActivity?.();
   };
 
   private onContextMenu = (e: Event) => {

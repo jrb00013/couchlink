@@ -744,12 +744,14 @@ export default function App() {
     playerRef.current?.connect(signalingUrl, invite.sessionId, invite.pin);
   }, [invite.auto, invite.sessionId, invite.pin, signalingUrl]);
 
-  // Create/destroy keyboard+mouse input and wire it into the player
+  // Create/destroy keyboard+mouse input and wire it into the player.
+  // Lock target MUST be the visible stage wrap — canvasRef starts as
+  // `.stage.is-hidden` (display:none), so clicks never reached requestPointerLock.
   useEffect(() => {
-    const canvas = canvasRef.current ?? stageRef.current ?? undefined;
+    const lockEl = stageRef.current ?? canvasRef.current ?? undefined;
     if (kbmActive) {
       const kbm = new KeyboardMouseInput({
-        lockTarget: canvas ?? null,
+        lockTarget: lockEl ?? null,
         binds: kbmBinds,
         mouseSensitivity: kbmSensitivity,
         mouseLookEnabled: kbmMouseLookEnabled,
@@ -1183,7 +1185,7 @@ export default function App() {
                 ),
               )}
             </div>
-            {!hasPhysicalPad && (
+            {!isMobile && (
               <div className="kbm-row">
                 <button
                   type="button"
@@ -1198,7 +1200,7 @@ export default function App() {
         )}
       </div>
 
-      {keybindsOpen && !hasPhysicalPad && (
+      {keybindsOpen && !isMobile && (
         <KeybindsModal
           binds={kbmBinds}
           onChange={setKbmBinds}

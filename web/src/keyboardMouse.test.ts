@@ -184,13 +184,15 @@ describe("KeyboardMouseInput", () => {
     lookKbm.start();
     (globalThis as any).document.pointerLockElement = {};
     (globalThis as any).window.dispatchEvent(
-      new (globalThis as any).MouseEvent("mousemove", { movementX: 60, movementY: -40 })
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 20, movementY: -15 })
     );
     const look = lookKbm.sampleLookAxes();
     expect(look.rx).toBeGreaterThan(128);
+    expect(look.rx).toBeLessThan(255);
     expect(look.ry).toBeLessThan(128);
-    // Consumed — next sampleLookAxes is centered.
-    expect(lookKbm.sampleLookAxes()).toEqual({ rx: 128, ry: 128 });
+    // Hold within LOOK_HOLD_MS — next tick still deflected (game-rate latch).
+    const held = lookKbm.sampleLookAxes();
+    expect(held.rx).toBeGreaterThan(128);
     lookKbm.stop();
   });
 
@@ -226,14 +228,20 @@ describe("KeyboardMouseInput", () => {
     expect(state.ry).toBe(128);
   });
 
-  it("right stick returns to center the tick after motion stops (delta consumed each sample, not held)", () => {
+  it("right stick holds across 60Hz game polls then snaps after LOOK_HOLD_MS silence", () => {
     (globalThis as any).document.pointerLockElement = {};
     (globalThis as any).window.dispatchEvent(
-      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 25, movementY: 0 })
     );
-    const moving = kbm.sample(1);
+    const t0 = performance.now();
+    const moving = kbm.sampleLookAxes(t0);
     expect(moving.rx).toBeGreaterThan(128);
-    const settled = kbm.sample(2);
+    expect(moving.rx).toBeLessThan(255);
+    // Still within hold window — stick stays up for a 60Hz-paced read.
+    const held = kbm.sampleLookAxes(t0 + 8);
+    expect(held.rx).toBeGreaterThan(128);
+    // After LOOK_HOLD_MS of silence the stick snaps center (no mushy tail).
+    const settled = kbm.sampleLookAxes(t0 + 40);
     expect(settled.rx).toBe(128);
   });
 

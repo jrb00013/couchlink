@@ -160,7 +160,10 @@ export function setBind(binds: KbmBinds, action: KbmAction, code: KbmCode): KbmB
 }
 
 export const KBM_SENSITIVITY_STORAGE_KEY = "couchlink.kbm.sensitivity.v1";
-export const DEFAULT_KBM_SENSITIVITY = 0.5;
+/** Desktop default — strong enough that BO2 camera tracks mouse, not a limp stick nudge. */
+export const DEFAULT_KBM_SENSITIVITY = 1.15;
+/** Applied by "Shooter defaults" — full mouse → look mapping for FPS. */
+export const SHOOTER_KBM_SENSITIVITY = 1.35;
 export const MIN_KBM_SENSITIVITY = 0.05;
 export const MAX_KBM_SENSITIVITY = 2;
 
