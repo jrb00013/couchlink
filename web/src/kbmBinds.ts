@@ -6,8 +6,9 @@
  * the game sees — PCSX2 is not reading the friend's keyboard.
  */
 
-export const KBM_STORAGE_KEY = "couchlink.kbm.binds.v2";
-/** Prior key — migrated once so stale v1 maps (wrong mouse→trigger) don't stick. */
+export const KBM_STORAGE_KEY = "couchlink.kbm.binds.v3";
+/** Prior keys — migrated once so stale maps (wrong mouse→trigger / Shift=nade) don't stick. */
+const KBM_STORAGE_KEY_V2 = "couchlink.kbm.binds.v2";
 const KBM_STORAGE_KEY_V1 = "couchlink.kbm.binds.v1";
 
 /** KeyboardEvent.code or Mouse0 / Mouse1 / Mouse2. */
@@ -46,11 +47,11 @@ export const KBM_ACTIONS: ReadonlyArray<{ action: KbmAction; label: string }> = 
   { action: "circle", label: "○ Circle — cancel" },
   { action: "square", label: "□ Square" },
   { action: "triangle", label: "△ Triangle" },
-  { action: "l1", label: "L1" },
-  { action: "r1", label: "R1" },
-  { action: "l2", label: "L2 — aim" },
+  { action: "l1", label: "L1 — grenade / lethal" },
+  { action: "r1", label: "R1 — tactical" },
+  { action: "l2", label: "L2 — aim (ADS)" },
   { action: "r2", label: "R2 — shoot" },
-  { action: "l3", label: "L3 — stick click" },
+  { action: "l3", label: "L3 — sprint (stick click)" },
   { action: "r3", label: "R3 — stick click" },
   { action: "options", label: "Options / Start" },
   { action: "create", label: "Create / Select" },
@@ -69,15 +70,18 @@ export const DEFAULT_KBM_BINDS: KbmBinds = {
   circle: ["KeyF"],
   square: ["KeyQ"],
   triangle: ["KeyE"],
-  l1: ["ShiftLeft", "ShiftRight"],
+  // BO2 / FPS (PC muscle memory): G = lethal (L1), Shift = sprint (L3).
+  // Never put Shift on L1 — that throws a nade when friends "shift+click".
+  l1: ["KeyG"],
   r1: ["KeyR"],
-  // BO2 / FPS: DOM Mouse0 = left click, Mouse2 = right click (not Mouse1).
+  // DOM Mouse0 = left click, Mouse2 = right click (not Mouse1).
+  // Standard FPS: LMB shoot (R2), RMB aim (L2). Remap in Keybinds if you want inverted.
   l2: ["Mouse2"],
   r2: ["Mouse0"],
-  l3: ["KeyC"],
+  l3: ["ShiftLeft", "ShiftRight", "KeyC"],
   r3: ["KeyV"],
   options: ["Tab"],
-  create: ["KeyG"],
+  create: ["KeyB"],
   dpadUp: ["KeyI", "Numpad8"],
   dpadDown: ["KeyK", "Numpad2"],
   dpadLeft: ["KeyJ", "Numpad4"],
@@ -134,11 +138,14 @@ export function loadKbmBinds(): KbmBinds {
   try {
     let raw = localStorage.getItem(KBM_STORAGE_KEY);
     if (!raw) {
-      // One-shot migrate from v1, then force LMB→R2 / RMB→L2 for BO2 shooters.
-      const v1 = localStorage.getItem(KBM_STORAGE_KEY_V1);
-      if (v1) {
-        raw = v1;
-        localStorage.removeItem(KBM_STORAGE_KEY_V1);
+      // One-shot migrate from older storage keys.
+      for (const old of [KBM_STORAGE_KEY_V2, KBM_STORAGE_KEY_V1]) {
+        const prev = localStorage.getItem(old);
+        if (prev) {
+          raw = prev;
+          localStorage.removeItem(old);
+          break;
+        }
       }
     }
     if (!raw) return base;
@@ -156,6 +163,15 @@ export function loadKbmBinds(): KbmBinds {
     for (const { action } of KBM_ACTIONS) {
       if (action === "r2" || action === "l2") continue;
       base[action] = base[action].filter((c) => c !== "Mouse0" && c !== "Mouse2");
+    }
+    // v2 had Shift→L1 (BO2 lethal). Force PC sprint/nade layout on migrate.
+    const shiftOnL1 = base.l1.some((c) => c === "ShiftLeft" || c === "ShiftRight");
+    if (shiftOnL1) {
+      base.l1 = base.l1.filter((c) => c !== "ShiftLeft" && c !== "ShiftRight");
+      if (base.l1.length === 0) base.l1 = ["KeyG"];
+      base.l3 = ensureCodes(ensureCodes(base.l3, "ShiftLeft"), "ShiftRight");
+      base.create = base.create.filter((c) => c !== "KeyG");
+      if (base.create.length === 0) base.create = ["KeyB"];
     }
     saveKbmBinds(base);
     return base;

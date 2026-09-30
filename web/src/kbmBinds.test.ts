@@ -31,6 +31,10 @@ describe("kbmBinds", () => {
     expect(loadKbmBinds().cross).toEqual(["Space"]);
     expect(loadKbmBinds().r2).toEqual(["Mouse0"]);
     expect(loadKbmBinds().l2).toEqual(["Mouse2"]);
+    expect(loadKbmBinds().l1).toEqual(["KeyG"]);
+    expect(loadKbmBinds().l3).toEqual(
+      expect.arrayContaining(["ShiftLeft", "ShiftRight"])
+    );
   });
 
   it("migrates v1 storage and forces LMB→R2 / RMB→L2 for shooters", () => {
@@ -50,6 +54,26 @@ describe("kbmBinds", () => {
     expect(loaded.l3).not.toContain("Mouse2");
     expect(localStorage.getItem(KBM_STORAGE_KEY)).toBeTruthy();
     expect(localStorage.getItem("couchlink.kbm.binds.v1")).toBeNull();
+  });
+
+  it("migrates v2 Shift→L1 (nade) into Shift→L3 sprint + G grenade", () => {
+    localStorage.setItem(
+      "couchlink.kbm.binds.v2",
+      JSON.stringify({
+        ...DEFAULT_KBM_BINDS,
+        l1: ["ShiftLeft", "ShiftRight"],
+        l3: ["KeyC"],
+        create: ["KeyG"],
+      })
+    );
+    const loaded = loadKbmBinds();
+    expect(loaded.l1).toEqual(["KeyG"]);
+    expect(loaded.l3).toEqual(
+      expect.arrayContaining(["ShiftLeft", "ShiftRight"])
+    );
+    expect(loaded.l1).not.toContain("ShiftLeft");
+    expect(loaded.create).not.toContain("KeyG");
+    expect(localStorage.getItem("couchlink.kbm.binds.v2")).toBeNull();
   });
 
   it("round-trips a remap through localStorage", () => {
