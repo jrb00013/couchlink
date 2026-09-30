@@ -179,6 +179,11 @@ export class CouchlinkPlayer {
   private lastSentL2 = 0;
   private lastSentR2 = 0;
   private padName = "none";
+  /** Cumulative `framesDropped` as of the last stats tick, to derive a delta for `client_link_stats`. */
+  private lastReportedFramesDropped = 0;
+  private lastReportedPacketsLost = 0;
+  private lastReportedPacketsReceived = 0;
+  private lastReportedFreezeCount = 0;
   /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
   private lastPadHz = 0;
   /** Last Gamepad.id announced to the host, so pad_info is sent on change… */
@@ -193,6 +198,9 @@ export class CouchlinkPlayer {
   private lastPathKey = "";
   /** Keyboard+mouse input source — injected by the UI, null if not active. */
   private kbm: KeyboardMouseInput | null = null;
+  /** Coalesce look-only pad flushes (buttons stay on onActivity). */
+  private lookFlushTimer: number | null = null;
+  private lastLookFlushAt = 0;
   /** Touch-screen controller — injected by the UI on mobile, null otherwise. */
   private touch: TouchGamepadInput | null = null;
   /** Previous inbound-rtp sample, for bitrate + loss deltas. */
@@ -219,9 +227,21 @@ export class CouchlinkPlayer {
 
   /** Attach or detach a keyboard/mouse input source. Call with null to disable. */
   setKbm(kbm: KeyboardMouseInput | null) {
-    if (this.kbm) this.kbm.onActivity = null;
+    if (this.kbm) {
+      this.kbm.onActivity = null;
+      this.kbm.onLookActivity = null;
+    }
+    if (this.lookFlushTimer != null) {
+      window.clearTimeout(this.lookFlushTimer);
+      this.lookFlushTimer = null;
+    }
     this.kbm = kbm;
-    if (kbm) kbm.onActivity = () => this.flushKbmPadImmediate();
+    if (kbm) {
+      // Buttons/keys: immediate (Ricardo-class Φ). Look: coalesce so we don't
+      // flood the unordered pad DC at raw mousemove Hz under load.
+      kbm.onActivity = () => this.flushKbmPadImmediate();
+      kbm.onLookActivity = () => this.scheduleLookFlush();
+    }
   }
 
   /** Attach or detach the mobile touch controller. Call with null to disable. */
@@ -486,6 +506,38 @@ export class CouchlinkPlayer {
             totalFreezesDuration: video.totalFreezesDuration,
             jbTarget: this.videoReceiver?.jitterBufferTarget ?? null,
           });
+          // Host link governor is blind on RTP/WebCodecs once CLVD sheds go to
+          // zero — report receive-side drops (and RTT) so it can step down.
+          // Matches live freeze pattern: host drop_pct=0 while friend freezes.
+          const droppedDelta = Math.max(
+            0,
+            video.framesDropped - this.lastReportedFramesDropped
+          );
+          this.lastReportedFramesDropped = video.framesDropped;
+          // Packet loss and freezes are what a lossy WAN actually shows: NACK/FEC
+          // hide loss from framesDropped while the picture still stalls on a
+          // retransmit. Cumulative counters → per-report deltas (clamped so a
+          // stats reset never goes negative).
+          const lostDelta = Math.max(0, video.packetsLost - this.lastReportedPacketsLost);
+          const recvDelta = Math.max(
+            0,
+            video.packetsReceived - this.lastReportedPacketsReceived
+          );
+          const freezeDelta = Math.max(0, video.freezeCount - this.lastReportedFreezeCount);
+          this.lastReportedPacketsLost = video.packetsLost;
+          this.lastReportedPacketsReceived = video.packetsReceived;
+          this.lastReportedFreezeCount = video.freezeCount;
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            send(this.ws, {
+              type: "client_link_stats",
+              frames_dropped_delta: droppedDelta,
+              jitter_buffer_ms: Math.round(video.jitterBufferMs),
+              rtt_ms: path?.rttMs ?? 0,
+              packets_lost_delta: lostDelta,
+              packets_received_delta: recvDelta,
+              freeze_count_delta: freezeDelta,
+            });
+          }
         }
       } catch (e) {
         cwarn("getStats failed", String(e));
@@ -1061,10 +1113,45 @@ export class CouchlinkPlayer {
 
   /** Event-driven kbm send — zero poll wait on button edges (Ricardo-class Φ). */
   private flushKbmPadImmediate() {
+    if (this.lookFlushTimer != null) {
+      window.clearTimeout(this.lookFlushTimer);
+      this.lookFlushTimer = null;
+    }
     const kbm = this.kbm;
     if (!kbm?.hasInput()) return;
+    // Physical pad seated: don't replace its frame with pure KBM — re-poll so
+    // mouse-look can overlay rx/ry onto the DualSense (or whatever) state.
+    const pads = navigator.getGamepads?.() ?? [];
+    const physical = selectPhysicalGamepads(
+      [...pads].filter((p): p is Gamepad => !!p)
+    );
+    if (physical[0]) {
+      this.pollAndSendPad();
+      return;
+    }
     this.seq = (this.seq + 1) >>> 0;
     this.emitPad(kbm.sample(this.seq));
+  }
+
+  /**
+   * Look-only flush — coalesce to ~8ms so mousemove doesn't flood the pad DC.
+   * Button `onActivity` still calls {@link flushKbmPadImmediate} and cancels this.
+   */
+  private scheduleLookFlush() {
+    const LOOK_COALESCE_MS = 8;
+    const now = performance.now();
+    if (now - this.lastLookFlushAt >= LOOK_COALESCE_MS) {
+      this.lastLookFlushAt = now;
+      this.flushKbmPadImmediate();
+      return;
+    }
+    if (this.lookFlushTimer != null) return;
+    const wait = Math.max(0, LOOK_COALESCE_MS - (now - this.lastLookFlushAt));
+    this.lookFlushTimer = window.setTimeout(() => {
+      this.lookFlushTimer = null;
+      this.lastLookFlushAt = performance.now();
+      this.flushKbmPadImmediate();
+    }, wait);
   }
 
   private pollAndSendPad() {
@@ -1158,7 +1245,14 @@ export class CouchlinkPlayer {
     }
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
-    const state: PadState = fromBrowserGamepad(gp, this.seq);
+    let state: PadState = fromBrowserGamepad(gp, this.seq);
+    // Mouse look → BO2 camera: while pointer-locked with mouse-look on, drive
+    // the right stick from the mouse even if a DualSense is still connected.
+    // Without this, plugging a pad permanently shadows KBM and friends who
+    // "put the controller on" lose camera look.
+    // Keys and mouse buttons merge too, not just look: a seated-but-idle pad
+    // must not swallow the keyboard (PC player: "can't hit any buttons").
+    if (this.kbm) state = this.kbm.overlay(state);
     this.emitPad(state);
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {

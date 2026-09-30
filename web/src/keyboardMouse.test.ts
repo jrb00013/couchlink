@@ -29,13 +29,24 @@ function installFakeDom() {
   };
   (globalThis as any).MouseEvent = class extends Event {
     button: number;
+    buttons: number;
     movementX: number;
     movementY: number;
-    constructor(type: string, init: { button?: number; movementX?: number; movementY?: number } = {}) {
+    constructor(
+      type: string,
+      init: { button?: number; buttons?: number; movementX?: number; movementY?: number } = {}
+    ) {
       super(type);
       this.button = init.button ?? 0;
       this.movementX = init.movementX ?? 0;
       this.movementY = init.movementY ?? 0;
+      // DOM buttons bitfield: 1=left, 2=right, 4=middle. Derive if omitted.
+      if (init.buttons != null) this.buttons = init.buttons;
+      else if (type === "mouseup") this.buttons = 0;
+      else if (this.button === 0) this.buttons = 1;
+      else if (this.button === 2) this.buttons = 2;
+      else if (this.button === 1) this.buttons = 4;
+      else this.buttons = 0;
     }
   };
   return fakeDocument;
@@ -50,12 +61,31 @@ describe("KeyboardMouseInput", () => {
 
   beforeEach(() => {
     installFakeDom();
-    kbm = new KeyboardMouseInput();
+    // Most look assertions need motion accepted; pass the flag explicitly.
+    // Default-on / disable / sampleLookAxes have their own tests below.
+    kbm = new KeyboardMouseInput({ mouseLookEnabled: true });
     kbm.start();
   });
 
   afterEach(() => {
     kbm.stop();
+  });
+
+  it("overlay lets keys and mouse buttons through an idle physical pad", () => {
+    const idle = { seq: 7, buttons: 0, lx: 128, ly: 128, rx: 128, ry: 128, l2: 0, r2: 0 };
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "Space"));
+    (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyW"));
+    const out = kbm.overlay(idle);
+    expect(out.buttons & BTN.CROSS).toBeTruthy();
+    expect(out.ly).toBe(0);
+    expect(out.lx).toBe(128);
+    expect(out.seq).toBe(7);
+  });
+
+  it("overlay keeps the pad's own stick and buttons when no key is down", () => {
+    const pad = { seq: 1, buttons: BTN.SQUARE, lx: 30, ly: 200, rx: 90, ry: 140, l2: 50, r2: 0 };
+    const out = kbm.overlay(pad);
+    expect(out).toEqual(pad);
   });
 
   it("moves the left stick while WASD is held", () => {
@@ -92,6 +122,37 @@ describe("KeyboardMouseInput", () => {
     expect(hits).toBe(2);
   });
 
+  it("BO2 shooter: left click = R2 shoot, right click = L2 aim", () => {
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousedown", { button: 0, buttons: 1 })
+    );
+    const shoot = kbm.sample(1);
+    expect(shoot.r2).toBe(255);
+    expect(shoot.buttons & BTN.R2).toBeTruthy();
+    expect(shoot.l2).toBe(0);
+
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mouseup", { button: 0, buttons: 0 })
+    );
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousedown", { button: 2, buttons: 2 })
+    );
+    const aim = kbm.sample(2);
+    expect(aim.l2).toBe(255);
+    expect(aim.buttons & BTN.L2).toBeTruthy();
+    expect(aim.r2).toBe(0);
+  });
+
+  it("keeps LMB shoot held when blur fires during pointer lock", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousedown", { button: 0, buttons: 1 })
+    );
+    (globalThis as any).window.dispatchEvent(new Event("blur"));
+    const state = kbm.sample(1);
+    expect(state.r2).toBe(255);
+  });
+
   it("releases keys on keyup", () => {
     (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyD"));
     (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyD"));
@@ -121,6 +182,127 @@ describe("KeyboardMouseInput", () => {
     (globalThis as any).window.dispatchEvent(keyEvent("keydown", "Space"));
     const after = kbm.sample(2);
     expect(after.buttons & BTN.CROSS).toBe(0);
+  });
+
+  it("mouse movement drives the right stick while pointer-locked, centered at 128", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    const move = (dx: number, dy: number) =>
+      (globalThis as any).window.dispatchEvent(
+        new (globalThis as any).MouseEvent("mousemove", { movementX: dx, movementY: dy })
+      );
+    move(50, -50);
+    const state = kbm.sample(1);
+    expect(state.rx).toBeGreaterThan(128);
+    expect(state.ry).toBeLessThan(128);
+  });
+
+  it("mouse look defaults on — pointer-locked movement drives the right stick", () => {
+    const defaultKbm = new KeyboardMouseInput();
+    defaultKbm.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 100, movementY: 0 })
+    );
+    const state = defaultKbm.sample(1);
+    expect(state.rx).toBeGreaterThan(128);
+    defaultKbm.stop();
+  });
+
+  it("mouse look can be disabled — ignores mouse movement even while pointer-locked", () => {
+    const disabledKbm = new KeyboardMouseInput({ mouseLookEnabled: false });
+    disabledKbm.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 100, movementY: 100 })
+    );
+    const state = disabledKbm.sample(1);
+    expect(state.rx).toBe(128);
+    expect(state.ry).toBe(128);
+    disabledKbm.stop();
+  });
+
+  it("sampleLookAxes overlays onto a physical-pad frame without touching buttons", () => {
+    const lookKbm = new KeyboardMouseInput({ mouseLookEnabled: true });
+    lookKbm.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 20, movementY: -15 })
+    );
+    const look = lookKbm.sampleLookAxes();
+    expect(look.rx).toBeGreaterThan(128);
+    expect(look.rx).toBeLessThan(255);
+    expect(look.ry).toBeLessThan(128);
+    // Hold within LOOK_HOLD_MS — next tick still deflected (game-rate latch).
+    const held = lookKbm.sampleLookAxes();
+    expect(held.rx).toBeGreaterThan(128);
+    lookKbm.stop();
+  });
+
+  it("setMouseLookEnabled toggles live and snaps the stick back to neutral when disabled mid-look", () => {
+    const toggling = new KeyboardMouseInput({ mouseLookEnabled: true });
+    toggling.start();
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+    );
+    expect(toggling.sample(1).rx).toBeGreaterThan(128);
+
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+    );
+    toggling.setMouseLookEnabled(false);
+    expect(toggling.sample(2).rx).toBe(128);
+
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 80, movementY: 0 })
+    );
+    expect(toggling.sample(3).rx).toBe(128);
+    toggling.stop();
+  });
+
+  it("ignores mouse movement while not pointer-locked", () => {
+    (globalThis as any).document.pointerLockElement = null;
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 100, movementY: 100 })
+    );
+    const state = kbm.sample(1);
+    expect(state.rx).toBe(128);
+    expect(state.ry).toBe(128);
+  });
+
+  it("right stick holds across 60Hz game polls then snaps after LOOK_HOLD_MS silence", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 25, movementY: 0 })
+    );
+    const t0 = performance.now();
+    const moving = kbm.sampleLookAxes(t0);
+    expect(moving.rx).toBeGreaterThan(128);
+    expect(moving.rx).toBeLessThan(255);
+    // Still within hold window — stick stays up for a 60Hz-paced read.
+    const held = kbm.sampleLookAxes(t0 + 8);
+    expect(held.rx).toBeGreaterThan(128);
+    // After LOOK_HOLD_MS of silence the stick snaps center (no mushy tail).
+    const settled = kbm.sampleLookAxes(t0 + 40);
+    expect(settled.rx).toBe(128);
+  });
+
+  it("setSensitivity scales right-stick deflection for the same mouse delta", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    kbm.setSensitivity(0.1);
+    expect(kbm.getSensitivity()).toBe(0.1);
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 50, movementY: 0 })
+    );
+    const low = kbm.sample(1);
+
+    kbm.setSensitivity(2);
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousemove", { movementX: 50, movementY: 0 })
+    );
+    const high = kbm.sample(2);
+
+    expect(high.rx - 128).toBeGreaterThan(low.rx - 128);
   });
 
   it("clears held keys when the tab is hidden", () => {

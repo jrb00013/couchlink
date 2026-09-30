@@ -42,6 +42,14 @@ pub struct LinkGov {
     clean_windows: u32,
     /// Bad windows in a row — hysteresis so one 9% blip does not step.
     bad_windows: u32,
+    /// Set once `note_client_congestion` fires (a real client-reported RTP
+    /// drop, not local DataChannel shed) and never cleared for the life of
+    /// this governor. Unlocks the bitrate rungs in `rungs_from` — see that
+    /// function's doc comment for why bitrate must stay off-limits for the
+    /// DataChannel/SCTP congestion case this file was originally written for.
+    client_congestion_seen: bool,
+    /// A client reported loss/freezes since the last `on_window`.
+    client_loss_window: bool,
 }
 
 /// Rung ladder: **hold bitrate**, step fps.
@@ -51,7 +59,54 @@ pub struct LinkGov {
 /// failed encode≥5000 and did not clear sheds; paint/S_p50 died on mushy
 /// IDRs. Stepping fps reduces messages/sec while keeping bits/frame healthy.
 fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
+    rungs_from_inner(baseline, false)
+}
+
+/// `rtp_congested` unlocks a final tier of rungs that cut bitrate.
+///
+/// The fps-only ladder above this comment was tuned against a specific past
+/// incident: DataChannel/SCTP congestion, where shed was message *rate*, not
+/// raw bandwidth, so cutting bitrate never helped and stepping fps did.
+///
+/// A client-reported RTP drop (`SignalMessage::ClientLinkStats`, see its doc
+/// comment) is a structurally different signal, independent of which rung is
+/// currently commanded: it fires whenever the browser's own jitter buffer is
+/// dropping frames on arrival, fps rungs having done nothing to stop it.
+/// Because the encoder's target bitrate is unconditional — every rung above
+/// holds it at
+/// `baseline.bitrate_kbps` — stepping fps down at a fixed bitrate does not
+/// reduce actual bits/sec at all; it just spreads the same bits over fewer,
+/// bigger frames. On a link that is genuinely bandwidth-constrained (not
+/// message-rate-constrained), that changes nothing, which is exactly the
+/// "the governor fired but it's still bad" case this closes. Once real
+/// client-reported congestion has been seen this session, three bitrate cuts
+/// below the fps floor.
+fn rungs_from_inner(baseline: &EncodeTarget, rtp_congested: bool) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
+    if rtp_congested {
+        // Client-reported loss means the pipe is too small for the *bits*, so cut
+        // bitrate first at full fps; fps steps (which keep bits/sec) come after,
+        // at the lowest bitrate.
+        let mut low = *baseline;
+        for pct in [80u32, 60, 40] {
+            low = EncodeTarget {
+                bitrate_kbps: ((baseline.bitrate_kbps as u64 * pct as u64) / 100) as u32,
+                ..*baseline
+            };
+            rungs.push(low);
+        }
+        let floor_fps = ((baseline.fps * 5) / 9).max(45).min(baseline.fps);
+        let mut fps = baseline.fps;
+        for _ in 0..4 {
+            let next = fps.saturating_sub((fps / 7).max(6)).max(floor_fps);
+            if next >= fps {
+                break;
+            }
+            fps = next;
+            rungs.push(EncodeTarget { fps, ..low });
+        }
+        return rungs;
+    }
     // Floor: ~55% of baseline (90→50) so sustained SCTP shed can clear while
     // holding 5 Mbps — 75% floor (90→67) never cleared v24's 20% shed.
     let floor_fps = ((baseline.fps * 5) / 9).max(45).min(baseline.fps);
@@ -75,6 +130,20 @@ fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
     rungs
 }
 
+/// Minimum packets in a report before its loss share means anything.
+const MIN_LOSS_SAMPLE: u32 = 200;
+/// Loss share (percent) that counts as congestion. 3.6% live froze the picture.
+const LOSS_TRIGGER_PCT: u32 = 2;
+/// Browser freezes in one report that count as congestion on their own.
+const FREEZE_TRIGGER: u32 = 2;
+
+/// Does one client report describe a congested link? Pure so it is unit-tested.
+pub fn client_report_is_congested(lost: u32, received: u32, freezes: u32) -> bool {
+    let total = lost.saturating_add(received);
+    (total >= MIN_LOSS_SAMPLE && lost as u64 * 100 >= LOSS_TRIGGER_PCT as u64 * total as u64)
+        || freezes >= FREEZE_TRIGGER
+}
+
 fn index_of(rungs: &[EncodeTarget], target: EncodeTarget) -> Option<usize> {
     rungs.iter().position(|r| *r == target)
 }
@@ -85,8 +154,29 @@ impl LinkGov {
             current: baseline,
             clean_windows: 0,
             bad_windows: 0,
+            client_congestion_seen: false,
+            client_loss_window: false,
             baseline,
         }
+    }
+
+    /// Record that a real client-reported RTP drop happened (see
+    /// `SignalMessage::ClientLinkStats`) — unlocks the bitrate rungs in
+    /// `rungs_from_inner` for the rest of this governor's life. Sticky by
+    /// design: once we've proven this link needs bitrate relief, a
+    /// momentarily quiet window should not silently re-forbid the one lever
+    /// that actually works for it.
+    pub fn note_client_congestion(&mut self) {
+        self.client_congestion_seen = true;
+    }
+
+    /// A client report showed packet loss / freezes this window. Makes the
+    /// current window count as bad even when host-side shed is under the
+    /// trigger (RTP never sheds), and unlocks the bitrate rungs. Cleared by
+    /// `on_window`, so it must be re-reported to keep stepping down.
+    pub fn note_client_loss(&mut self) {
+        self.client_congestion_seen = true;
+        self.client_loss_window = true;
     }
 
     /// Give the governor one window of link observations.
@@ -94,10 +184,11 @@ impl LinkGov {
     /// `shed` = frames dropped while pushing this window; `sent` = frames
     /// attempted (delivered + shed). Returns the target to command next.
     pub fn on_window(&mut self, shed: u32, sent: u32) -> EncodeTarget {
-        let rungs = rungs_from(&self.baseline);
+        let rungs = rungs_from_inner(&self.baseline, self.client_congestion_seen);
         let drop_pct = if sent > 0 { shed * 100 / sent } else { 0 };
+        let client_bad = std::mem::take(&mut self.client_loss_window);
 
-        if drop_pct > DOWN_TRIGGER_PCT {
+        if drop_pct > DOWN_TRIGGER_PCT || client_bad {
             self.clean_windows = 0;
             self.bad_windows += 1;
             if self.bad_windows >= DOWN_AFTER_WINDOWS {
@@ -184,6 +275,83 @@ mod tests {
         assert!(gov.current().fps <= P720.fps);
         assert_eq!(gov.current().width, 1280);
         assert_eq!(gov.current().height, 720);
+    }
+
+    #[test]
+    fn report_classifier_flags_loss_and_freezes_not_noise() {
+        assert!(client_report_is_congested(20, 480, 0), "4% loss");
+        assert!(!client_report_is_congested(2, 498, 0), "0.4% loss is noise");
+        assert!(!client_report_is_congested(5, 20, 0), "tiny sample is ignored");
+        assert!(client_report_is_congested(0, 500, 2), "repeated freezes");
+        assert!(!client_report_is_congested(0, 500, 1), "one freeze is a blip");
+    }
+
+    #[test]
+    fn client_loss_cuts_bitrate_first_at_full_fps() {
+        let mut gov = LinkGov::new(P720);
+        // Host-side shed is 0% (RTP never sheds) but the client keeps reporting loss.
+        for _ in 0..2 {
+            gov.note_client_loss();
+            gov.on_window(0, 300);
+        }
+        let t = gov.current();
+        assert_eq!(t.fps, P720.fps, "fps must hold while bitrate is cut");
+        assert_eq!(t.bitrate_kbps, 8_000, "first rung is 80% bitrate");
+        for _ in 0..40 {
+            gov.note_client_loss();
+            gov.on_window(0, 300);
+        }
+        assert_eq!(gov.current().bitrate_kbps, 4_000, "floor is 40% bitrate");
+        assert!(gov.current().fps >= 45);
+    }
+
+    #[test]
+    fn loss_flag_is_consumed_and_link_recovers() {
+        let mut gov = LinkGov::new(P720);
+        for _ in 0..2 {
+            gov.note_client_loss();
+            gov.on_window(0, 300);
+        }
+        assert!(gov.current().bitrate_kbps < P720.bitrate_kbps);
+        for _ in 0..20 {
+            gov.on_window(0, 300); // no more reports
+        }
+        assert_eq!(gov.current(), P720, "climbs back to baseline when clean");
+    }
+
+    /// The DataChannel-only path above must never touch bitrate (that's the
+    /// historical incident this file documents). But a real client-reported
+    /// RTP drop is a different signal — once seen, sustained shed must be
+    /// able to fall through the fps floor into the bitrate rungs, because at
+    /// a fixed bitrate, fps rungs alone don't reduce bits/sec at all.
+    #[test]
+    fn client_reported_congestion_unlocks_bitrate_floor() {
+        let mut gov = LinkGov::new(P720);
+        gov.note_client_congestion();
+        let mut lowest = P720;
+        for _ in 0..40 {
+            lowest = gov.on_window(40, 100);
+        }
+        assert!(
+            lowest.bitrate_kbps < P720.bitrate_kbps,
+            "client-reported congestion must eventually cut bitrate, got {lowest:?}"
+        );
+        assert!(lowest.fps >= 45, "fps floor is unchanged by the new tier");
+    }
+
+    /// Without ever seeing a client-reported drop, identical sustained shed
+    /// must behave exactly as before — same floor, bitrate untouched. This
+    /// is the regression guard for the historical SCTP incident: adding the
+    /// new tier must not change behavior for the case it doesn't apply to.
+    #[test]
+    fn no_client_congestion_seen_matches_pre_existing_floor() {
+        let mut gov = LinkGov::new(P720);
+        let mut lowest = P720;
+        for _ in 0..40 {
+            lowest = gov.on_window(40, 100);
+        }
+        assert_eq!(lowest.bitrate_kbps, P720.bitrate_kbps);
+        assert_eq!(lowest, *rungs_from(&P720).last().unwrap());
     }
 
     #[test]

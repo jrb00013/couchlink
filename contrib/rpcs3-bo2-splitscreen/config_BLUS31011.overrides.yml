@@ -1,0 +1,30 @@
+# Applied on top of the user's RPCS3 config when installing the BO2 pack.
+#
+# Co-play feel lives in the fork *binary* (couchlink-play / fix/vk-cb-chain-wait):
+# SPURS hang fix + HID pad lock + Vulkan CB reclaim/wait — so Multithreaded RSX
+# can stay on under split-screen / multi-pad / friend seats without present death.
+# Stage: switch-rpcs3.cmd couchlink-play   (see jrb00013/rpcs3 COUCHLINK_PLAY.md)
+#
+# Until that build is the active rpcs3.exe, keep Multithreaded RSX false here
+# (crash-safe). After couchlink-play is staged, flip Multithreaded RSX to true
+# for last-night stick/present snap (Frame limit Auto either way).
+Core:
+  SPU Block Size: Safe
+  Accurate SPU DMA: true
+  PPU Reservation Priority Over SPUs: true
+  Accurate Cache Line Stores: true
+  Accurate RSX reservation access: true
+  Disable SPU GETLLAR Spin Optimization: true
+  SPU Wake-Up Delay: 20
+  Max SPURS Threads: 4
+Video:
+  Multithreaded RSX: false
+  RSX FIFO Fetch Accuracy: Atomic
+  Accurate ZCULL stats: false
+  Relaxed ZCULL Sync: true
+  Frame limit: Auto
+  Resolution: 1280x720
+  Resolution Scale: 100
+  Exclusive Fullscreen Mode: Disable
+Miscellaneous:
+  Start games in fullscreen mode: false
