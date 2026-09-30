@@ -14,14 +14,14 @@ thread then deliberately writes to address `0x17` and kills the process
    multiplayer code maps in):
    - Force watchdog enable-flag read to 0 (`0x0041c3cc`: `lbz` → `li r3,0`)
    - NOP the intentional crash store (`0x0041c414`: `stw` → `nop`)
-2. **Per-game config** — crash-safe until CB-wait RPCS3 is staged:
-   **Multithreaded RSX off**, **Frame limit Auto**. The real fix is in
-   RPCS3 Vulkan (`fix/vk-cb-chain-wait`): reclaim/wait free CBs instead of
-   reusing a still-pending one (that freeze is what MT RSX + heavy present
-   triggered). After that build is active, turn **Multithreaded RSX on** again
-   for last-night stick/present feel. Also: Accurate SPU DMA, PPU reservation
-   priority over SPUs, Safe SPU block size, Max SPURS Threads 4, no exclusive
-   fullscreen (couchlink WGC capture).
+2. **Per-game config** — crash-safe until the **couchlink-play** fork binary is
+   staged (`switch-rpcs3.cmd couchlink-play`): **Multithreaded RSX off**,
+   **Frame limit Auto**. That build is the co-play line (SPURS hang fix + HID
+   pad lock + Vulkan CB reclaim/wait) so MT RSX + heavy present (split-screen /
+   multi-pad / friends) stays up. After it is active, turn **Multithreaded RSX
+   on** again for last-night stick/present feel. Also: Accurate SPU DMA, PPU
+   reservation priority over SPUs, Safe SPU block size, Max SPURS Threads 4,
+   no exclusive fullscreen (couchlink WGC capture).
 
 This does **not** claim to reverse-engineer Treyarch's job system. It removes
 the suicide and reduces the race window so split-screen can be *played and
