@@ -345,16 +345,18 @@ export class KeyboardMouseInput {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    this.mouseButtons |= 1 << e.button;
+    this.syncMouseButtonsFromEvent(e);
     this.bumpActivity();
   };
 
   private onMouseUp = (e: MouseEvent) => {
-    this.mouseButtons &= ~(1 << e.button);
+    this.syncMouseButtonsFromEvent(e);
     this.bumpActivity();
   };
 
   private onMouseMove = (e: MouseEvent) => {
+    // Keep button mask honest under pointer-lock (mouseup can be dropped).
+    this.syncMouseButtonsFromEvent(e);
     if (!document.pointerLockElement || !this.mouseLookEnabled) return;
     // Higher gain than /100: pixel motion must reach meaningful stick
     // deflection so FPS titles (BO2) feel 1:1 with the mouse.
@@ -366,14 +368,34 @@ export class KeyboardMouseInput {
     this.onLookActivity?.();
   };
 
+  /**
+   * DOM `buttons` bitfield → our MouseN mask.
+   * 1=left→Mouse0, 2=right→Mouse2, 4=middle→Mouse1.
+   * Prefer this over edge-only tracking: pointer-lock often drops mouseup.
+   */
+  private syncMouseButtonsFromEvent(e: MouseEvent) {
+    const b = e.buttons ?? 0;
+    let bits = 0;
+    if (b & 1) bits |= 1 << 0;
+    if (b & 2) bits |= 1 << 2;
+    if (b & 4) bits |= 1 << 1;
+    this.mouseButtons = bits;
+  }
+
   private onContextMenu = (e: Event) => {
     if (document.pointerLockElement) e.preventDefault();
   };
 
-  /** Window/tab losing focus means no keyup will ever arrive for held keys — release them all. */
+  /**
+   * Window/tab losing focus means no keyup will ever arrive for held keys —
+   * release keys. Do not clear mouse buttons while pointer-locked: lock
+   * transitions can fire blur and would wipe LMB shoot / RMB aim mid-fight.
+   */
   private onBlur = () => {
     this.keys.clear();
-    this.mouseButtons = 0;
+    if (!document.pointerLockElement) {
+      this.mouseButtons = 0;
+    }
     this.bumpActivity();
   };
 

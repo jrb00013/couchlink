@@ -30,6 +30,26 @@ describe("kbmBinds", () => {
   it("loads defaults when nothing is stored", () => {
     expect(loadKbmBinds().cross).toEqual(["Space"]);
     expect(loadKbmBinds().r2).toEqual(["Mouse0"]);
+    expect(loadKbmBinds().l2).toEqual(["Mouse2"]);
+  });
+
+  it("migrates v1 storage and forces LMB→R2 / RMB→L2 for shooters", () => {
+    localStorage.setItem(
+      "couchlink.kbm.binds.v1",
+      JSON.stringify({
+        ...DEFAULT_KBM_BINDS,
+        r2: ["KeyZ"],
+        l2: ["KeyX"],
+        l3: ["Mouse0", "Mouse2"],
+      })
+    );
+    const loaded = loadKbmBinds();
+    expect(loaded.r2).toContain("Mouse0");
+    expect(loaded.l2).toContain("Mouse2");
+    expect(loaded.l3).not.toContain("Mouse0");
+    expect(loaded.l3).not.toContain("Mouse2");
+    expect(localStorage.getItem(KBM_STORAGE_KEY)).toBeTruthy();
+    expect(localStorage.getItem("couchlink.kbm.binds.v1")).toBeNull();
   });
 
   it("round-trips a remap through localStorage", () => {

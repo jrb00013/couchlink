@@ -6,7 +6,9 @@
  * the game sees — PCSX2 is not reading the friend's keyboard.
  */
 
-export const KBM_STORAGE_KEY = "couchlink.kbm.binds.v1";
+export const KBM_STORAGE_KEY = "couchlink.kbm.binds.v2";
+/** Prior key — migrated once so stale v1 maps (wrong mouse→trigger) don't stick. */
+const KBM_STORAGE_KEY_V1 = "couchlink.kbm.binds.v1";
 
 /** KeyboardEvent.code or Mouse0 / Mouse1 / Mouse2. */
 export type KbmCode = string;
@@ -69,9 +71,10 @@ export const DEFAULT_KBM_BINDS: KbmBinds = {
   triangle: ["KeyE"],
   l1: ["ShiftLeft", "ShiftRight"],
   r1: ["KeyR"],
+  // BO2 / FPS: DOM Mouse0 = left click, Mouse2 = right click (not Mouse1).
   l2: ["Mouse2"],
   r2: ["Mouse0"],
-  l3: ["KeyC", "Mouse1"],
+  l3: ["KeyC"],
   r3: ["KeyV"],
   options: ["Tab"],
   create: ["KeyG"],
@@ -80,6 +83,9 @@ export const DEFAULT_KBM_BINDS: KbmBinds = {
   dpadLeft: ["KeyJ", "Numpad4"],
   dpadRight: ["KeyL", "Numpad6"],
 };
+
+/** Alias — Keybinds "Shooter defaults" and BO2-style FPS. */
+export const SHOOTER_KBM_BINDS: KbmBinds = DEFAULT_KBM_BINDS;
 
 /**
  * Fighting-game layout (Mortal Kombat): WASD + arrows drive the D-pad, the
@@ -126,7 +132,15 @@ export function cloneBinds(b: KbmBinds): KbmBinds {
 export function loadKbmBinds(): KbmBinds {
   const base = cloneBinds(DEFAULT_KBM_BINDS);
   try {
-    const raw = localStorage.getItem(KBM_STORAGE_KEY);
+    let raw = localStorage.getItem(KBM_STORAGE_KEY);
+    if (!raw) {
+      // One-shot migrate from v1, then force LMB→R2 / RMB→L2 for BO2 shooters.
+      const v1 = localStorage.getItem(KBM_STORAGE_KEY_V1);
+      if (v1) {
+        raw = v1;
+        localStorage.removeItem(KBM_STORAGE_KEY_V1);
+      }
+    }
     if (!raw) return base;
     const parsed = JSON.parse(raw) as Partial<Record<string, unknown>>;
     for (const { action } of KBM_ACTIONS) {
@@ -135,10 +149,24 @@ export function loadKbmBinds(): KbmBinds {
         base[action] = v as KbmCode[];
       }
     }
+    // Always keep FPS mouse→trigger mapping correct even if an old preset
+    // stole Left/Right click onto L3 or left them unbound.
+    base.r2 = ensureCodes(base.r2, "Mouse0");
+    base.l2 = ensureCodes(base.l2, "Mouse2");
+    for (const { action } of KBM_ACTIONS) {
+      if (action === "r2" || action === "l2") continue;
+      base[action] = base[action].filter((c) => c !== "Mouse0" && c !== "Mouse2");
+    }
+    saveKbmBinds(base);
     return base;
   } catch {
     return cloneBinds(DEFAULT_KBM_BINDS);
   }
+}
+
+function ensureCodes(codes: KbmCode[], required: KbmCode): KbmCode[] {
+  if (codes.includes(required)) return codes;
+  return [...codes, required];
 }
 
 export function saveKbmBinds(binds: KbmBinds): void {

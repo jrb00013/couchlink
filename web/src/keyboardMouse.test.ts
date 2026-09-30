@@ -29,13 +29,24 @@ function installFakeDom() {
   };
   (globalThis as any).MouseEvent = class extends Event {
     button: number;
+    buttons: number;
     movementX: number;
     movementY: number;
-    constructor(type: string, init: { button?: number; movementX?: number; movementY?: number } = {}) {
+    constructor(
+      type: string,
+      init: { button?: number; buttons?: number; movementX?: number; movementY?: number } = {}
+    ) {
       super(type);
       this.button = init.button ?? 0;
       this.movementX = init.movementX ?? 0;
       this.movementY = init.movementY ?? 0;
+      // DOM buttons bitfield: 1=left, 2=right, 4=middle. Derive if omitted.
+      if (init.buttons != null) this.buttons = init.buttons;
+      else if (type === "mouseup") this.buttons = 0;
+      else if (this.button === 0) this.buttons = 1;
+      else if (this.button === 2) this.buttons = 2;
+      else if (this.button === 1) this.buttons = 4;
+      else this.buttons = 0;
     }
   };
   return fakeDocument;
@@ -109,6 +120,37 @@ describe("KeyboardMouseInput", () => {
     (globalThis as any).window.dispatchEvent(keyEvent("keydown", "KeyE"));
     (globalThis as any).window.dispatchEvent(keyEvent("keyup", "KeyE"));
     expect(hits).toBe(2);
+  });
+
+  it("BO2 shooter: left click = R2 shoot, right click = L2 aim", () => {
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousedown", { button: 0, buttons: 1 })
+    );
+    const shoot = kbm.sample(1);
+    expect(shoot.r2).toBe(255);
+    expect(shoot.buttons & BTN.R2).toBeTruthy();
+    expect(shoot.l2).toBe(0);
+
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mouseup", { button: 0, buttons: 0 })
+    );
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousedown", { button: 2, buttons: 2 })
+    );
+    const aim = kbm.sample(2);
+    expect(aim.l2).toBe(255);
+    expect(aim.buttons & BTN.L2).toBeTruthy();
+    expect(aim.r2).toBe(0);
+  });
+
+  it("keeps LMB shoot held when blur fires during pointer lock", () => {
+    (globalThis as any).document.pointerLockElement = {};
+    (globalThis as any).window.dispatchEvent(
+      new (globalThis as any).MouseEvent("mousedown", { button: 0, buttons: 1 })
+    );
+    (globalThis as any).window.dispatchEvent(new Event("blur"));
+    const state = kbm.sample(1);
+    expect(state.r2).toBe(255);
   });
 
   it("releases keys on keyup", () => {
