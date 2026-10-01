@@ -12,7 +12,9 @@ while true; do
   st=$(gh run view "$RUN" --repo "$REPO" --json status,conclusion,jobs --jq '[.status,(.conclusion//""),([.jobs[]|select(.name=="RPCS3 Windows")|.status+"/"+(.conclusion//"")][0]//"")]|join(" ")' 2>/dev/null)
   echo "$(date +%T) $st"
   # the MSVC artifact is uploaded before the job fully finishes; accept it as soon as it exists
-  if gh api "repos/$REPO/actions/runs/$RUN/artifacts" --jq '.artifacts[].name' 2>/dev/null | grep -q 'RPCS3 Windows MSVC PDB'; then break; fi
+  arts=$(gh api "repos/$REPO/actions/runs/$RUN/artifacts" --jq '.artifacts[].name' 2>/dev/null)
+  # both artifacts must exist (the PDB is uploaded before the exe archive)
+  if grep -qx 'RPCS3 Windows MSVC PDB' <<<"$arts" && grep -qx 'RPCS3 for Windows (MSVC)' <<<"$arts"; then break; fi
   case "$st" in completed\ failure*|completed\ cancelled*) echo "run did not succeed: $st"; exit 1;; esac
   sleep 60
 done
