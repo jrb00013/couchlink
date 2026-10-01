@@ -19,3 +19,25 @@ PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
       - [ be32, 0x0041c3cc, 0x38600000 ]
       # 0041c414  stw r4,0(r3)        ->  nop
       - [ be32, 0x0041c414, 0x60000000 ]
+
+  "BO2 softlock: force SPURS wait complete then exit (couchlink)":
+    Games:
+      "Call of Duty: Black Ops II":
+        BLUS31011: [ 01.00 ]
+    Author: "couchlink"
+    Notes: |
+      main_thread wait at 0x73d690 exits when *r30 <= r31 (completion counter).
+      Livelock: counter never advances; usleep(50) + b back forever (stuck FPS).
+      Failed v1 (one-poll branch only): returned without updating *r30 → Backend
+      AV read 0x16 @ 0x737f40. Invariant the game already uses: done iff *r30<=r31.
+      After one progress attempt (bl 0x73d09c), store r31 into *r30 then exit —
+      callers/Backend see a consistent "complete" and continue. Needed for 4-pad
+      split-screen (friends as local pads). Dump: /mnt/c/Users/josep/bo2dump/wait_loop.73d000.hex
+    Patch Version: 2.0
+    Patch:
+      # was: li r11,0x8d / li r3,50 / sc (usleep) / b 0x73d6ec
+      # now: std r31,0(r30) / b 0x73d7b8 / nop / nop
+      - [ be32, 0x0073d7a8, 0xfbfe0000 ]
+      - [ be32, 0x0073d7ac, 0x4800000c ]
+      - [ be32, 0x0073d7b0, 0x60000000 ]
+      - [ be32, 0x0073d7b4, 0x60000000 ]

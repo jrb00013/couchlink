@@ -1,13 +1,15 @@
 # Applied on top of the user's RPCS3 config when installing the BO2 pack.
 #
-# Co-play feel lives in the fork *binary* (couchlink-play / fix/vk-cb-chain-wait):
-# SPURS hang fix + HID pad lock + Vulkan CB reclaim/wait — so Multithreaded RSX
-# can stay on under split-screen / multi-pad / friend seats without present death.
-# Stage: switch-rpcs3.cmd couchlink-play   (see jrb00013/rpcs3 COUCHLINK_PLAY.md)
+# KEEP Multithreaded RSX: false — even with the couchlink-play fork
+# (SPURS + HID + Vulkan CB reclaim). CB-wait stops *present death*
+# (`CB chain has run out of free entries`); it does NOT stop BO2's
+# SPURS wait-loop softlock. That shows up as a stuck FPS counter and
+# runaway `sys_timer_usleep` — often when opening the in-game settings
+# menu under MT RSX. Live softlocked 2026-09-30 with MT RSX on + CB-wait.
 #
-# Until that build is the active rpcs3.exe, keep Multithreaded RSX false here
-# (crash-safe). After couchlink-play is staged, flip Multithreaded RSX to true
-# for last-night stick/present snap (Frame limit Auto either way).
+# Stage couchlink-play anyway (`switch-rpcs3.cmd couchlink-play`) so a
+# future MT RSX experiment doesn't present-freeze; leave MT off here for
+# playable nights. Frame limit Auto either way.
 Core:
   SPU Block Size: Safe
   Accurate SPU DMA: true
