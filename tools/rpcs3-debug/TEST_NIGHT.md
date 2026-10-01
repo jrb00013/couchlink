@@ -35,3 +35,13 @@ Record for each run: minutes played, players, `summarize-stalls.sh` output. Comp
 **Engagement check:** after any session, `rpcs3-hang-diag.sh --guest` prints the line
 `stwcx./stdcx. failures ... (SPU back-offs for PPU priority, total: N)`. N = 0 means the change never ran (wrong build or option off).
 Also grep `RPCS3.log` for `PPU reservation contention`: it fires at >= 20k stwcx. failures per 10 s with the 4 hottest lines.
+
+### First numbers from build `19984-play4` (fix on), 2026-10-01 18:15, 2:07 into a fresh BO2 boot (no stall)
+
+- stwcx./stdcx. failures since boot: **14.3 million** (the previous build, fix not present, had ~1.0 million at 2:59). Hottest lines: `0x0269e080` 7.25M, `0x0267a000` 6.98M.
+- SPU back-offs: **44 million** (~350k/s). Each SPU spends roughly half its time in the 10 us back-off.
+- FPS held at 60; no stall during this window.
+
+Read: the change engages heavily and the PPU failure count went **up**, not down, so on those two lines the PPU is probably losing to something
+other than SPU polling (or the PPU simply retries faster now). Do not trust this change until the A/B says so. Switch with
+`tools/rpcs3-debug/set-prio.sh off` (then relaunch BO2) for run B.
