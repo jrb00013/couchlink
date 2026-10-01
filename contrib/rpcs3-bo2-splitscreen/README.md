@@ -14,14 +14,17 @@ thread then deliberately writes to address `0x17` and kills the process
    multiplayer code maps in):
    - Force watchdog enable-flag read to 0 (`0x0041c3cc`: `lbz` → `li r3,0`)
    - NOP the intentional crash store (`0x0041c414`: `stw` → `nop`)
-2. **Per-game config** — crash-safe until the **couchlink-play** fork binary is
-   staged (`switch-rpcs3.cmd couchlink-play`): **Multithreaded RSX off**,
-   **Frame limit Auto**. That build is the co-play line (SPURS hang fix + HID
-   pad lock + Vulkan CB reclaim/wait) so MT RSX + heavy present (split-screen /
-   multi-pad / friends) stays up. After it is active, turn **Multithreaded RSX
-   on** again for last-night stick/present feel. Also: Accurate SPU DMA, PPU
-   reservation priority over SPUs, Safe SPU block size, Max SPURS Threads 4,
-   no exclusive fullscreen (couchlink WGC capture).
+2. **Per-game config** — **Multithreaded RSX off**, **Frame limit Auto**,
+   permanently for BLUS31011. Also: Accurate SPU DMA, PPU reservation priority
+   over SPUs, Safe SPU block size, Max SPURS Threads 4, no exclusive fullscreen
+   (couchlink WGC capture).
+
+   Stage the **couchlink-play** fork binary (`switch-rpcs3.cmd couchlink-play`)
+   so Vulkan CB reclaim/wait + SPURS/HID fixes are present — that stops
+   *present death* (`CB chain has run out of free entries`). It does **not**
+   make MT RSX safe: with MT on, BO2 still softlocks in SPURS wait loops
+   (stuck FPS, runaway `sys_timer_usleep`), especially opening the in-game
+   settings menu. Keep MT RSX **false** even after couchlink-play is staged.
 
 This does **not** claim to reverse-engineer Treyarch's job system. It removes
 the suicide and reduces the race window so split-screen can be *played and
