@@ -92,6 +92,21 @@ now writes a small minidump (stacks + registers).
 
 ### Automatic capture (run it once, forget it)
 
+**Preferred: Windows-native watcher** (does not depend on WSL; the WSL<->Windows interop timed out during
+three consecutive BO2 stalls on 2026-10-01 and the WSL watcher captured only a log slice):
+
+```bash
+tools/rpcs3-debug/start-windows-watcher.sh          # installs to C:\Users\<you>\rpcs3-tools, runs hidden
+tools/rpcs3-debug/start-windows-watcher.sh --stop
+```
+
+Evidence lands in `C:\Users\<you>\rpcs3-stalls\<time>\` (`guest-threads.txt` incl. SPU threads and the stwcx.
+histogram on builds >= `40500ef`, `rpcs3.dmp` + `.names.csv`, `threads.txt`, `screenshot.png`, `log-slice.txt`).
+Windows PowerShell reads BOM-less scripts as ANSI: never put the log marker `·` (U+00B7) literally in a `.ps1`
+(it silently broke detection until the pipeline was tested against a synthetic stall).
+
+WSL watcher (fallback):
+
 ```bash
 tools/rpcs3-debug/rpcs3-stall-watch.sh --bg      # background; add --no-nudge to disable the 60s nudge
 ```
@@ -121,7 +136,8 @@ To name the `rpcs3.exe` offsets: `analyze-dump.py <dmp> <rpcs3.pdb>` with the PD
 **Status: strong evidence, not proven.** The BO2 pack had `Disable SPU GETLLAR Spin Optimization: true` (the
 throttle for exactly this SPU polling) with no documented reason. The pack now leaves it at the default (off=false),
 and the unproven SPURS force-complete game patch is disabled (BO2 crashed `Unknown STOP code 0x0` ~4 min in with it).
-Whether this removes the stalls is **untested**: compare stall frequency in `~/rpcs3-stalls/`. If it does not, the next
+**Result: it did not.** With spin optimization on (from 11:33) BO2 still stalled at 11:39 (30 s), 11:47 (~435 s) and 11:55 (~75 s).
+Whether anything else in the pack removes them is **untested**: compare stall frequency in `~/rpcs3-stalls/`. If it does not, the next
 step is the core reservation path (`PPUThread.cpp ppu_store_reservation`), not game patches.
 
 ## 3. Known causes and status
