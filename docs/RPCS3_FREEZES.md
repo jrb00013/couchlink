@@ -51,6 +51,24 @@ Three layers, cheapest first. All work on a **live, stuck** process.
 Avoid the **GDB stub** (`GDB Server: 127.0.0.1:2345`, `tools/bo2-re/gdb_dump.ps1`) for first response: it
 pauses the whole emulator on connect and is single-shot per boot.
 
+### Observed twice, unexplained: stalls ended after the process was disturbed
+
+MK story-mode cutscene end, two occurrences (`cellVdecEndSeq` -> normally `cellVdecClose` ~1 s later):
+
+| | EndSeq | Close | Gap | What happened right before Close |
+|---|---|---|---|---|
+| 1 | 1:21:21 | 1:23:19 | ~2 min | ran screenshot/thread-CPU diagnostics (no suspend) |
+| 2 | 1:43:16 | 1:46:58 | ~3m40s | a `--dump` suspended RPCS3 ~3 min; Close came as it resumed |
+
+Hypothesis (**unproven, 2 data points, one could be coincidence**): a timing/lost-wakeup in a guest wait
+(timer/cond/event) that is un-stuck by a pause of all threads. Cheap test next time it happens:
+`rpcs3-hang-diag.sh --nudge` (suspend 2 s then resume), or RPCS3 menu *Emulation > Pause* then *Resume*.
+Record in an issue whether the cutscene advanced within ~10 s. If yes, this points at lv2 timeout/wakeup
+handling; use `--guest` first (PC of the waiting thread), then `--nudge`.
+
+**Do not use `--dump --full`** on a live game: 37 GB written, game suspended 3 min, had to be killed. `--dump`
+now writes a small minidump (stacks + registers).
+
 ## 3. Known causes and status
 
 | Item | Status |
@@ -59,7 +77,7 @@ pauses the whole emulator on connect and is single-shot per boot.
 | Shader-interpreter precompile waiting forever on a stalled worker | Mitigated: 30 s no-progress watchdog in `VKShaderInterpreter.cpp` (`couchlink-play-19984`). On a cut-short precompile, remaining variants compile on demand. |
 | BO2 present freeze `CB chain has run out of free entries` | Fixed in `couchlink-play` (Vulkan CB wait/reclaim, ring 1024). |
 | BO2 softlock (wait loop at `0x73d6ec`) | Game patch in `contrib/rpcs3-bo2-splitscreen` (force-complete then exit). **Never run in-game yet.** The one-poll-exit variant crashed (`Access violation 0x16`). MT RSX must stay off for BO2. |
-| MK cutscene stall (~2 min) | Self-recovered. Cause unknown. Next occurrence: `rpcs3-hang-diag.sh --guest --dump --shot` while stuck. |
+| MK cutscene-end stall (2 min, 3m40s) | Recovers by itself or after a suspend/resume. Cause unknown. Next occurrence: `rpcs3-hang-diag.sh --guest --shot` (evidence), then `--nudge` (test the hypothesis). |
 | RSX `semaphore_acquire timed out` at ~0:40 | Consequence of a long RSX-thread stall (e.g. precompile), **not** a cause. Do not change TDR behavior for it. |
 
 Do not "fix" by editing config: per-game config changes did not change any of the above.

@@ -2,8 +2,9 @@
 # Diagnose a "frozen" RPCS3 WITHOUT restarting it. Run from WSL while the game is stuck.
 #   tools/rpcs3-debug/rpcs3-hang-diag.sh [--guest] [--dump] [--shot]
 # Prints a verdict: LOADING | GUEST_STALL | DEADLOCK | NOT_RUNNING | HEALTHY, plus evidence.
+#   --nudge suspend RPCS3 for 2s then resume (HYPOTHESIS: ends cutscene stalls; see docs), then recheck
 #   --guest ask RPCS3 (couchlink-play-19984 build+) to log every PPU thread context via dump_threads.trigger
-#   --dump  also write a full minidump (C:\Users\<you>\rpcs3-hang-<ts>.dmp) for native-thread analysis
+#   --dump  also write a small minidump (stacks+registers) to C:\Users\<you>\rpcs3-hang-<ts>.dmp (pauses RPCS3 a few s)
 #   --shot  also save a screenshot of the desktop into the log dir
 # Env: RPCS3_DIR (default /mnt/c/Users/josep/RPCS3)  STALL_SECS (default 30)
 set -uo pipefail
@@ -11,8 +12,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RPCS3_DIR="${RPCS3_DIR:-/mnt/c/Users/josep/RPCS3}"
 LOG="$RPCS3_DIR/log/RPCS3.log"
 STALL_SECS="${STALL_SECS:-30}"
-DUMP=0; SHOT=0; GUEST=0
-for a in "$@"; do case "$a" in --dump) DUMP=1;; --shot) SHOT=1;; --guest) GUEST=1;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
+DUMP=0; SHOT=0; GUEST=0; NUDGE=0
+for a in "$@"; do case "$a" in --dump) DUMP=1;; --shot) SHOT=1;; --guest) GUEST=1;; --nudge) NUDGE=1;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
 win() { wslpath -w "$1"; }
 PS() { powershell.exe -NoProfile -ExecutionPolicy Bypass "$@" 2>&1 | tr -d '\r'; }
 
@@ -105,6 +106,11 @@ if [ "$GUEST" = 1 ]; then
 fi
 
 if [ "$SHOT" = 1 ]; then s="$(PS -File "$(win "$HERE/screenshot.ps1")" -Out "C:\\Users\\$USER\\rpcs3-hang-shot.png")"; echo; echo "screenshot: $s"; fi
+
+if [ "$NUDGE" = 1 ]; then
+  echo; echo "== nudge =="; PS -File "$(win "$HERE/threads.ps1")" -Nudge 2
+  echo "  Rerun without --nudge in ~10s: did game-event silence drop and the cutscene advance?"
+fi
 
 echo; case "$title" in FPS:*) hasfps=1;; *) hasfps=0;; esac
 verdict=HEALTHY
