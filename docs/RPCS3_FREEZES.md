@@ -76,6 +76,9 @@ What the log proves about the two stalls (not a hypothesis):
 Open question: what condition the main thread spins on (suspect: completion of an SPURS/zlib asset-decompress job
 that is far slower than on hardware). Not proven.
 
+**Nudge hypothesis disproven (2026-10-01):** a suspend/resume at +31 s into a BO2 stall did nothing (it ended 323 s later).
+Hypothesis kept below only as history.
+
 Hypothesis (**unproven, 2 data points, one could be coincidence**): a timing/lost-wakeup in a guest wait
 (timer/cond/event) that is un-stuck by a pause of all threads. Cheap test next time it happens:
 `rpcs3-hang-diag.sh --nudge` (suspend 2 s then resume), or RPCS3 menu *Emulation > Pause* then *Resume*.
@@ -98,6 +101,27 @@ whether the stall ended within 15 s in `result.txt`. It also fires on very long 
 To name the `rpcs3.exe` offsets: `analyze-dump.py <dmp> <rpcs3.pdb>` with the PDB from the CI artifact
 `RPCS3 Windows MSVC PDB` of the **same** build you run (builds before `bb0b7b7` have none).
 
+### BO2 party/lobby stall: the guest thread dump (2026-10-01 11:23, build f01ba1ce)
+
+`rpcs3-hang-diag.sh --guest` produced the first real guest-side picture (`guest-threads-*.txt`):
+
+- `main_thread` is in `sys_timer_usleep(0x32)` with `LR=0x73d7a8`: the known BO2 wait loop at `0x73d690..0x73d7b4`
+  (polls a completion counter, 50 us sleeps).
+- `Secondary` is the **only PPU thread running** (all others wait in semaphores/event queues). It sits in
+  `0x73d5ac`: `lwarx r4 / addic r4,-1 / stwcx. / bne` - an atomic **decrement retry loop**. That decrement is
+  what `main_thread` waits for.
+- Six `CellSpursKernel` SPU threads are pegged at ~99% (polling lock lines with `GETLLAR`/`PUTLLC`), plus
+  `rsx::thread` and `main_thread` ~90-100%.
+- Emulator side: `ppu_store_reservation` fails `stwcx.` whenever the 128-byte line lock bits are held or the
+  reservation time moved (`vm::reservation_acquire`), so continuous SPU polling of the same line can starve a
+  PPU `lwarx/stwcx.` loop. Stalls last from ~20 s to ~6 min and end by themselves when the contention breaks.
+
+**Status: strong evidence, not proven.** The BO2 pack had `Disable SPU GETLLAR Spin Optimization: true` (the
+throttle for exactly this SPU polling) with no documented reason. The pack now leaves it at the default (off=false),
+and the unproven SPURS force-complete game patch is disabled (BO2 crashed `Unknown STOP code 0x0` ~4 min in with it).
+Whether this removes the stalls is **untested**: compare stall frequency in `~/rpcs3-stalls/`. If it does not, the next
+step is the core reservation path (`PPUThread.cpp ppu_store_reservation`), not game patches.
+
 ## 3. Known causes and status
 
 | Item | Status |
@@ -105,7 +129,7 @@ To name the `rpcs3.exe` offsets: `analyze-dump.py <dmp> <rpcs3.pdb>` with the PD
 | MK stalls ~0:41 into boot on **every 20078-based build** (hidfix, cbwait, plain 20078); fine on 19984-based builds | **Root cause unknown**, somewhere in upstream 19984..20078. Not config, HID lock, CB-wait, SPURS fix, or worker count (19984 also picks 12). Workaround: use the `19984-play` build (`switch-rpcs3.cmd couchlink-play`). |
 | Shader-interpreter precompile waiting forever on a stalled worker | Mitigated: 30 s no-progress watchdog in `VKShaderInterpreter.cpp` (`couchlink-play-19984`). On a cut-short precompile, remaining variants compile on demand. |
 | BO2 present freeze `CB chain has run out of free entries` | Fixed in `couchlink-play` (Vulkan CB wait/reclaim, ring 1024). |
-| BO2 softlock (wait loop at `0x73d6ec`) | Game patch in `contrib/rpcs3-bo2-splitscreen` (force-complete then exit). **Never run in-game yet.** The one-poll-exit variant crashed (`Access violation 0x16`). MT RSX must stay off for BO2. |
+| BO2 softlock (wait loop at `0x73d6ec`) | Not a game bug to patch around: the wait is for a counter the `Secondary` thread cannot decrement (stwcx. starvation, see above). The force-complete game patch is **disabled** (unproven, crash `Unknown STOP code 0x0` ~4 min in); the one-poll variant crashed earlier (`Access violation 0x16`). MT RSX must stay off for BO2. |
 | MK cutscene-end stall (2 min, 3m40s) | Recovers by itself or after a suspend/resume. Cause unknown. Next occurrence: `rpcs3-hang-diag.sh --guest --shot` (evidence), then `--nudge` (test the hypothesis). |
 | RSX `semaphore_acquire timed out` at ~0:40 | Consequence of a long RSX-thread stall (e.g. precompile), **not** a cause. Do not change TDR behavior for it. |
 

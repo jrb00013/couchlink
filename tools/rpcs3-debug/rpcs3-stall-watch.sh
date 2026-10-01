@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Background watcher: detects an RPCS3 guest stall by GAME-EVENT SILENCE and captures evidence
 # automatically, so nobody has to be at the keyboard (evidence dies with the process / the stall).
-#   tools/rpcs3-debug/rpcs3-stall-watch.sh [--no-nudge]        (run once; it daemonizes if --bg)
+#   tools/rpcs3-debug/rpcs3-stall-watch.sh [--nudge]        (run once; it daemonizes if --bg)
 #   tools/rpcs3-debug/rpcs3-stall-watch.sh --bg                start detached, log to /tmp/rpcs3-stall-watch.log
 # Per episode (silence >= STALL_SECS, default 30) writes ~/rpcs3-stalls/<timestamp>/ with:
 #   diag.txt (rpcs3-hang-diag.sh --shot --dump), log-slice.txt, threads-*.txt, result.txt (duration, nudge effect)
 # After NUDGE_AT (default 60) s of silence it suspends RPCS3 for 2 s then resumes (hypothesis test, see
-# docs/RPCS3_FREEZES.md) unless --no-nudge, and records whether the stall ended within 15 s.
+# docs/RPCS3_FREEZES.md) only with --nudge (off by default: disproven), and records whether the stall ended within 15 s.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RPCS3_DIR="${RPCS3_DIR:-/mnt/c/Users/josep/RPCS3}"; LOG="$RPCS3_DIR/log/RPCS3.log"
 STALL_SECS="${STALL_SECS:-30}"; NUDGE_AT="${NUDGE_AT:-60}"; OUT_ROOT="${STALL_OUT:-$HOME/rpcs3-stalls}"
-NUDGE=1; [ "${1:-}" = "--no-nudge" ] && NUDGE=0
+NUDGE=0; [ "${1:-}" = "--nudge" ] && NUDGE=1   # nudge disproven 2026-10-01 (stall ended 323s after it); off by default
 if [ "${1:-}" = "--bg" ]; then
   pgrep -f 'rpcs3-stall-watch\.sh$' | grep -qv "^$$\$" && { echo "already running"; exit 0; }
   setsid nohup "$0" > /tmp/rpcs3-stall-watch.log 2>&1 < /dev/null & disown; echo "started (log /tmp/rpcs3-stall-watch.log, evidence in $OUT_ROOT)"; exit 0
