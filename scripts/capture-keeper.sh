@@ -7,8 +7,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 LOGF=/tmp/capture-keeper.log
 case "${1:-}" in
-  --stop) for p in $(pgrep -f 'capture-keeper\.sh$'); do [ "$p" != "$$" ] && kill "$p" 2>/dev/null; done; echo stopped; exit 0;;
-  --bg) shift; for p in $(pgrep -f 'capture-keeper\.sh$'); do [ "$p" != "$$" ] && kill "$p" 2>/dev/null; done
+  --stop) for p in $(pgrep -f 'capture-keeper\.sh'); do [ "$p" != "$$" ] && kill "$p" 2>/dev/null; done; echo stopped; exit 0;;
+  --bg) shift; for p in $(pgrep -f 'capture-keeper\.sh'); do [ "$p" != "$$" ] && kill "$p" 2>/dev/null; done
         setsid nohup "$0" "$@" > "$LOGF" 2>&1 < /dev/null & disown; echo "started, log $LOGF"; exit 0;;
 esac
 NEEDLE="${1:-$(sed -n 's/^COUCHLINK_CAPTURE_WINDOW="\?\([^"]*\)"\?/\1/p' .env.couchlink | head -1)}"

@@ -24,7 +24,7 @@ if [ -s /tmp/couchlink-join-url.txt ]; then h=$(sed 's#\(https://[^/]*\)/.*#\1#'
   rx() { ss -ti state established '( sport = :9876 )' 2>/dev/null | grep -o 'bytes_received:[0-9]*' | head -1 | cut -d: -f2; }
   a=$(rx); sleep 3; b=$(rx)
   if [ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ]; then p PASS "capture flowing: $(( (b-a)/3/1024 )) KB/s into the host"; else p FAIL "capture NOT flowing (friends see no video): scripts/capture-keeper.sh --bg 31011  or restart-stack-for-game.sh bo2"; fi
-  pgrep -f 'capture-keeper\.sh$' >/dev/null && p PASS "capture keeper running" || p WARN "capture keeper not running: scripts/capture-keeper.sh --bg 31011"
+  pgrep -f 'capture-keeper\.sh' >/dev/null && p PASS "capture keeper running" || p WARN "capture keeper not running: scripts/capture-keeper.sh --bg 31011"
   grep -q 'window 31011\|31011' "$HOME/projects/couchlink/.env.couchlink" && p PASS "capture needle 31011 (BO2)" || p FAIL "capture needle is not 31011"
 else p FAIL "no join link: scripts/restart-stack-for-game.sh bo2"; fi
 echo; echo "result: $ok pass, $warn warn, $fail fail"
