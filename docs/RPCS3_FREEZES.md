@@ -1,5 +1,7 @@
 # RPCS3 "frozen" runbook (Mortal Kombat, BO2) and CouchLink stream-black runbook
 
+Open issues and the step-by-step diagnosis plan: `docs/RPCS3_STALL_DIAGNOSIS_PLAN.md`.
+
 Written after the 2026-09-30/10-01 incident. Most "freezes" that night were **not** deadlocks, and
 every restart destroyed the evidence. Read the table, run the script, **do not kill RPCS3 first**.
 
