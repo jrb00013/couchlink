@@ -4,6 +4,8 @@ Status as of 2026-10-01. Companion to `docs/RPCS3_FREEZES.md` (what happened, to
 Evidence levels are marked: **PROVEN** (observed in logs/dumps), **SUSPECTED** (fits the evidence, not tested),
 **UNKNOWN**.
 
+Issues live in the fork: https://github.com/jrb00013/rpcs3/issues (#3-#6).
+
 ## 1. What is wrong (and what is not)
 
 Co-op sessions on the RPCS3 fork (Windows, Vulkan, 24 host threads) intermittently "freeze": the picture stops or
@@ -12,10 +14,10 @@ happens. Nobody has found a hard deadlock; every stall so far ended on its own.
 
 | # | Problem | Evidence | Status |
 |---|---|---|---|
-| A | **BO2 (BLUS31011) lobby/party stalls**: PPU `Secondary` thread starves in a `lwarx/stwcx.` retry loop while SPURS SPU kernels poll; `main_thread` waits for the counter it decrements | Guest thread dump 2026-10-01 11:23 (`main_thread` `sys_timer_usleep(0x32)` at `LR=0x73d7a8`; `Secondary` at `0x73d5ac`; 6x `CellSpursKernel` ~99% CPU) | Mechanism **SUSPECTED**, observation **PROVEN** |
-| B | **MK (BLUS30522) stalls ~0:41 into boot on every 20078-based fork build**, fine on 19984-based | Reproduced on `20078`, `20078-hidfix`, `20078-cbwait`, passes on `19984-fix`/`19984-play*` | Regression window upstream 19984..20078, cause **UNKNOWN** |
-| C | **MK story-mode cutscene-end stalls** (118 s and 222 s): movie threads sit in `_sys_ppu_thread_exit`, `main_thread` silent-spins on `sys_timer_usleep`, `ZLibCellSpursKernel0` busy | Two occurrences in the log; both ended on their own | Cause **UNKNOWN** (may be the same class as A) |
-| D | **BO2 `SPU Unknown STOP code 0x0`** (SPURS kernel executed zeroed LS at `0x28984`) ~4 min in | One crash, with the SPURS force-complete game patch enabled | Cause **UNKNOWN**; patch now disabled |
+| A (issue #3) | **BO2 (BLUS31011) lobby/party stalls**: PPU `Secondary` thread starves in a `lwarx/stwcx.` retry loop while SPURS SPU kernels poll; `main_thread` waits for the counter it decrements | Guest thread dump 2026-10-01 11:23 (`main_thread` `sys_timer_usleep(0x32)` at `LR=0x73d7a8`; `Secondary` at `0x73d5ac`; 6x `CellSpursKernel` ~99% CPU) | Mechanism **SUSPECTED**, observation **PROVEN** |
+| B (issue #4) | **MK (BLUS30522) stalls ~0:41 into boot on every 20078-based fork build**, fine on 19984-based | Reproduced on `20078`, `20078-hidfix`, `20078-cbwait`, passes on `19984-fix`/`19984-play*` | Regression window upstream 19984..20078, cause **UNKNOWN** |
+| C (issue #5) | **MK story-mode cutscene-end stalls** (118 s and 222 s): movie threads sit in `_sys_ppu_thread_exit`, `main_thread` silent-spins on `sys_timer_usleep`, `ZLibCellSpursKernel0` busy | Two occurrences in the log; both ended on their own | Cause **UNKNOWN** (may be the same class as A) |
+| D (issue #6) | **BO2 `SPU Unknown STOP code 0x0`** (SPURS kernel executed zeroed LS at `0x28984`) ~4 min in | One crash, with the SPURS force-complete game patch enabled | Cause **UNKNOWN**; patch now disabled |
 
 Ruled out (with evidence): per-game config drift, HID lock, Vulkan CB-wait, SPURS `send_event` fix, compile-worker
 count (19984 also uses 12), shader-interpreter precompile as the sole cause (MK still stalls with it off), audio
