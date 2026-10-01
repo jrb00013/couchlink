@@ -8,4 +8,4 @@ PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
     "Call of Duty: Black Ops II":
       BLUS31011:
         "01.00":
-          Enabled: true
+          Enabled: false  # unproven: BO2 hit "SPU Unknown STOP code 0x0" ~4 min in with it on
