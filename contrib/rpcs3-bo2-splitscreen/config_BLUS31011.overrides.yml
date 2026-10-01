@@ -16,7 +16,9 @@ Core:
   PPU Reservation Priority Over SPUs: true
   Accurate Cache Line Stores: true
   Accurate RSX reservation access: true
-  Disable SPU GETLLAR Spin Optimization: true
+  # Spin optimization ON (default). 2026-10-01 BO2 stall dump: 6 SPURS kernels pegged ~99% while the PPU
+  # 'Secondary' thread starved in a lwarx/stwcx. retry loop; the pack had this OFF without documented evidence.
+  Disable SPU GETLLAR Spin Optimization: false
   SPU Wake-Up Delay: 20
   Max SPURS Threads: 4
 Video:

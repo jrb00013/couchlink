@@ -31,7 +31,7 @@ sed -i \
   -e 's/^  PPU Reservation Priority Over SPUs:.*/  PPU Reservation Priority Over SPUs: true/' \
   -e 's/^  Accurate Cache Line Stores:.*/  Accurate Cache Line Stores: true/' \
   -e 's/^  Accurate RSX reservation access:.*/  Accurate RSX reservation access: true/' \
-  -e 's/^  Disable SPU GETLLAR Spin Optimization:.*/  Disable SPU GETLLAR Spin Optimization: true/' \
+  -e 's/^  Disable SPU GETLLAR Spin Optimization:.*/  Disable SPU GETLLAR Spin Optimization: false/' \
   -e 's/^  SPU Wake-Up Delay:.*/  SPU Wake-Up Delay: 20/' \
   -e 's/^  Max SPURS Threads:.*/  Max SPURS Threads: 4/' \
   -e 's/^  RSX FIFO Fetch Accuracy:.*/  RSX FIFO Fetch Accuracy: Atomic/' \
