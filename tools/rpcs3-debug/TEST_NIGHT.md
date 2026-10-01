@@ -15,3 +15,23 @@ Send me that output plus: player count, whether anyone was in a party/lobby, any
 
 What counts as progress tonight (be honest in the notes): number of episodes per hour and median length with N players;
 whether stalls cluster in the lobby/party; whether the stwcx. histogram (build >= 40500ef) shows one hot line.
+
+## Tonight's A/B (build `19984-play4`, commit c96e609 on the fork)
+
+The build adds one emulator change: SPU `GETLLAR`/`PUTLLC` back off ~10 us on a 128-byte line where a PPU
+`stwcx.`/`stdcx.` failed in the last ~50 us, **only when `PPU Reservation Priority Over SPUs` is on** (BO2's config has it on).
+
+Baseline (build `19984-play2`, 2026-10-01 11:00-12:00, one player + lobby): **11 stall episodes/hour, median ~35 s, longest ~435 s.**
+
+| Run | Setting (`config/custom_configs/config_BLUS31011.yml`) | What to do |
+|---|---|---|
+| A (fix on) | `PPU Reservation Priority Over SPUs: true` (as installed) | Play >= 30 min, same kind of activity (lobby/party/match) |
+| B (fix off, only if A is unclear) | set it to `false`, relaunch BO2 | Same duration and activity |
+
+Record for each run: minutes played, players, `summarize-stalls.sh` output. Compare episodes/hour, median and max length.
+
+**Pass:** clearly fewer or much shorter stalls in A than the baseline/B (e.g. median under ~10 s, nothing over ~60 s).
+**Fail:** no change, or A is worse (SPU slowdown/low FPS): turn the option off and tell me. Do not conclude from one session.
+**Engagement check:** after any session, `rpcs3-hang-diag.sh --guest` prints the line
+`stwcx./stdcx. failures ... (SPU back-offs for PPU priority, total: N)`. N = 0 means the change never ran (wrong build or option off).
+Also grep `RPCS3.log` for `PPU reservation contention`: it fires at >= 20k stwcx. failures per 10 s with the 4 hottest lines.

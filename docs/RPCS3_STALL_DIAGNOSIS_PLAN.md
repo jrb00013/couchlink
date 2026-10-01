@@ -41,6 +41,14 @@ Not a stall signal: window-title FPS (kept saying ~60 while MK was frozen), `sys
 6. **Pack settings are unproven guesses.** `Disable SPU GETLLAR Spin Optimization`, `SPU Wake-Up Delay 20`,
    `Max SPURS Threads 4` (BO2 still runs 6 SPURS kernels), etc. came in one commit with no evidence. Each needs an A/B.
 
+## 2b. Fix candidate in flight (2026-10-01)
+
+Fork `couchlink-play-19984` @ `c96e609` (PR #2): `PPU Reservation Priority Over SPUs` now also covers the PPU
+`lwarx/stwcx.` path (SPU back-off when a PPU atomic recently failed on the line). Evidence it targets the right thing:
+instrumented-build dump showed ~1M `stwcx.` failures in the first 3 min on a handful of lines, including `0x0269e400`
+which CellSpursKernel1 was `PUTLLC`-ing. **Unverified**: needs the A/B in `tools/rpcs3-debug/TEST_NIGHT.md`.
+If it works, close issue #3 with the before/after numbers; if not, the histogram says which line to chase next.
+
 ## 3. Step-by-step diagnosis plan
 
 Rules: never restart before capturing; one variable per experiment; record every episode; label results
