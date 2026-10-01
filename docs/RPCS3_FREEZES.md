@@ -60,6 +60,22 @@ MK story-mode cutscene end, two occurrences (`cellVdecEndSeq` -> normally `cellV
 | 1 | 1:21:21 | 1:23:19 | ~2 min | ran screenshot/thread-CPU diagnostics (no suspend) |
 | 2 | 1:43:16 | 1:46:58 | ~3m40s | a `--dump` suspended RPCS3 ~3 min; Close came as it resumed |
 
+What the log proves about the two stalls (not a hypothesis):
+
+- The movie's own guest threads (`vdecStart`, `adecStart`, `aviDmuxStart`) finished at ~1:43:17 and then sat
+  in `_sys_ppu_thread_exit` for **222 s** (`'_sys_ppu_thread_exit' aborted (222.221264s)`), i.e. nobody joined them.
+- The game's `main_thread` logged **nothing** for those 222 s (every normal syscall is logged at W level) while
+  burning ~90% of a core, and resumed at 1:46:58.07 with `UnloadSlot`/`LoadMap` work. So the main thread was in a
+  silent spin (`sys_timer_usleep`, ~60k/s) waiting for a condition, then moved on.
+- The `ZLibCellSpursKernel0` SPU thread (SPURS zlib kernel, created at boot) is the other busy thread in
+  stall/load samples. Healthy-play dumps show both `main_thread` and `RenderingThread` executing the same
+  `rpcs3.exe` function (offset `+0xed4385`), and the zlib SPU thread executing `rpcs3.exe+0xdf5492` (emulator
+  code, not JIT). Naming those needs the PDB of the exact binary (see below).
+- Not the vdec HLE: no "waiting for a consumer for 5 seconds" error, no SPU recompiles in the window.
+
+Open question: what condition the main thread spins on (suspect: completion of an SPURS/zlib asset-decompress job
+that is far slower than on hardware). Not proven.
+
 Hypothesis (**unproven, 2 data points, one could be coincidence**): a timing/lost-wakeup in a guest wait
 (timer/cond/event) that is un-stuck by a pause of all threads. Cheap test next time it happens:
 `rpcs3-hang-diag.sh --nudge` (suspend 2 s then resume), or RPCS3 menu *Emulation > Pause* then *Resume*.
@@ -68,6 +84,19 @@ handling; use `--guest` first (PC of the waiting thread), then `--nudge`.
 
 **Do not use `--dump --full`** on a live game: 37 GB written, game suspended 3 min, had to be killed. `--dump`
 now writes a small minidump (stacks + registers).
+
+### Automatic capture (run it once, forget it)
+
+```bash
+tools/rpcs3-debug/rpcs3-stall-watch.sh --bg      # background; add --no-nudge to disable the 60s nudge
+```
+
+On the first 30 s of game-event silence it writes `~/rpcs3-stalls/<time>/`: `diag.txt`, screenshot,
+`log-slice.txt`, `threads-1.txt`, a small minidump + `dump-threads.txt` (every thread name + RIP, executing vs waiting;
+needs `python3 -m venv ~/.venvs/md && ~/.venvs/md/bin/pip install minidump`), and after 60 s it nudges and records
+whether the stall ended within 15 s in `result.txt`. It also fires on very long boot-time loading screens (expected).
+To name the `rpcs3.exe` offsets: `analyze-dump.py <dmp> <rpcs3.pdb>` with the PDB from the CI artifact
+`RPCS3 Windows MSVC PDB` of the **same** build you run (builds before `bb0b7b7` have none).
 
 ## 3. Known causes and status
 

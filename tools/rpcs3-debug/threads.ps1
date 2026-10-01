@@ -43,5 +43,10 @@ if ($Dump) {
   $mode = if ($Full) { "full" } else { "" }
   rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump $p.Id $Dump $mode
   Start-Sleep -Seconds 3
+  if (Test-Path $Dump) {
+    icacls $Dump /grant "$($env:USERNAME):F" | Out-Null   # comsvcs writes a DACL WSL cannot read
+    $b2 = @{}; foreach ($t in (Get-Process -Id $p.Id).Threads) { $b2[$t.Id] = [TN]::Name([uint32]$t.Id) }
+    $b2.GetEnumerator() | ForEach-Object { "$($_.Key),$($_.Value)" } | Set-Content "$Dump.names.csv"
+  }
   if (Test-Path $Dump) { "dump: $Dump ($([math]::Round((Get-Item $Dump).Length/1MB)) MB)" } else { "dump FAILED (needs same-user rights)" }
 }
