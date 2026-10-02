@@ -16,5 +16,6 @@ scripts/restart-stack-for-game.sh bo2 2>&1 | grep -vE '^$' | tail -6
 echo "==> starting capture keeper"
 scripts/capture-keeper.sh --bg 31011
 sleep 20
+echo "==> live monitor (run it as a Claude Code Monitor, or in a terminal): python3 -u tools/rpcs3-debug/live-monitor.py"
 echo "==> preflight"
 tools/rpcs3-debug/preflight-bo2.sh
