@@ -147,6 +147,12 @@ export class CouchlinkPlayer {
   private webcodecsPath = false;
   private clvdAsm = new ClvdAssembler();
   private heartbeatTimer: number | null = null;
+  /** Signaling auto-reconnect (a tunnel/network blip used to leave the page on "Closed" until a manual refresh). */
+  private lastConnectArgs: { url: string; sid: string; pin: string } | null = null;
+  private manualDisconnect = false;
+  private wsReconnectTimer: number | null = null;
+  private wsReconnectAttempts = 0;
+  private wsOpenedAt = 0;
   private statsTimer: number | null = null;
   private lastStats: { delay: number; count: number; decoded: number } | null =
     null;
@@ -251,6 +257,8 @@ export class CouchlinkPlayer {
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
     clog("connect()", { signalingUrl, sessionId, pinLen: pin.length });
+    this.manualDisconnect = false;
+    this.lastConnectArgs = { url: signalingUrl, sid: sessionId, pin };
     this.lastOfferEpoch = 0;
     this.mediaHealthy = false;
     this.webcodecsPath = false;
@@ -277,6 +285,7 @@ export class CouchlinkPlayer {
     this.cb.onState("connecting", `Opening ${url}`);
     const ws = new WebSocket(url);
     this.ws = ws;
+    let everOpened = false;
 
     this.connectTimer = window.setTimeout(() => {
       if (ws.readyState === WebSocket.CONNECTING) {
@@ -292,6 +301,8 @@ export class CouchlinkPlayer {
       clog("websocket open");
       if (this.connectTimer) clearTimeout(this.connectTimer);
       this.connectTimer = null;
+      everOpened = true;
+      this.wsOpenedAt = Date.now();
       this.cb.onState("registering");
       this.sendRegister(ws);
       this.startHeartbeat(ws);
@@ -318,15 +329,44 @@ export class CouchlinkPlayer {
       clog("websocket close", { code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
       if (this.connectTimer) clearTimeout(this.connectTimer);
       if (ev.code !== 1000 && this.ws === ws) {
-        this.cb.onState("error", ev.reason || `Closed (${ev.code})`);
+        // Only reconnect a socket that was up (or is already in a retry sequence); a wrong URL on first connect keeps its error.
+        if (!this.manualDisconnect && this.lastConnectArgs && (everOpened || this.wsReconnectAttempts > 0)) {
+          this.scheduleWsReconnect(ev.code);
+        } else {
+          this.cb.onState("error", ev.reason || `Closed (${ev.code})`);
+        }
       } else if (this.ws === ws) {
         this.cb.onState("disconnected");
       }
     };
   }
 
+  /**
+   * The signaling socket closed unexpectedly (tunnel hiccup, network blip, idle timeout...). Reconnect through the normal
+   * join flow with backoff (1s, 2s, 4s ... 10s). The attempt counter resets once a socket stayed up > 20 s, so a flapping
+   * tunnel backs off instead of hammering. Never runs after an explicit disconnect().
+   */
+  private scheduleWsReconnect(code: number) {
+    if (this.wsReconnectTimer || !this.lastConnectArgs) return;
+    if (this.wsOpenedAt && Date.now() - this.wsOpenedAt > 20_000) this.wsReconnectAttempts = 0;
+    const delay = Math.min(1000 * 2 ** this.wsReconnectAttempts, 10_000);
+    this.wsReconnectAttempts++;
+    cwarn("signaling closed unexpectedly - reconnecting", { code, attempt: this.wsReconnectAttempts, delay });
+    this.cb.onState("connecting", `Connection lost (${code}) - reconnecting (attempt ${this.wsReconnectAttempts})...`);
+    this.wsReconnectTimer = window.setTimeout(() => {
+      this.wsReconnectTimer = null;
+      if (this.manualDisconnect || !this.lastConnectArgs) return;
+      const a = this.lastConnectArgs;
+      this.connect(a.url, a.sid, a.pin);
+    }, delay);
+  }
+
   disconnect() {
     clog("disconnect()");
+    this.manualDisconnect = true;
+    if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
+    this.wsReconnectTimer = null;
+    this.wsReconnectAttempts = 0;
     this.cleanup();
     this.cb.onState("disconnected");
   }
