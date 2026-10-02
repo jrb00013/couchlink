@@ -12,7 +12,7 @@ $ErrorActionPreference = "Continue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $log = Join-Path $RpcsDir "log\RPCS3.log"
 New-Item -ItemType Directory -Force -Path $OutRoot | Out-Null
-$noise = 'cellAudio|cellMic|sys_event|sys_mmapper|DualSense|Performance|Syscall Usage|PERF:'
+$noise = 'cellAudio|cellMic|sys_event|sys_mmapper|DualSense|Performance|Syscall Usage|PERF:|RSX: (Add program|Program compiled)|SPU: (Building|New SPU block)'
 # The log line marker is U+00B7. Windows PowerShell reads a BOM-less script as ANSI, so never put it in source.
 $dot = [regex]::Escape([string][char]0xB7)
 $lineRe = '^' + $dot + '[A-Z!] (\d+):(\d+):([\d.]+) '

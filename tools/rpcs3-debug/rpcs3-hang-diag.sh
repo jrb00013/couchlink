@@ -77,7 +77,7 @@ import re
 def secs(ts):
     h,m,x=ts.split(':'); return int(h)*3600+int(m)*60+float(x)
 t=[l for l in open('/tmp/rpcs3-diag-tail.txt',errors='replace') if re.match(r'^·[A-Z!] \d+:',l)]
-noise=re.compile(r'cellAudio|cellMic|sys_event|sys_mmapper|DualSense|Performance|Syscall Usage|PERF:')
+noise=re.compile(r'cellAudio|cellMic|sys_event|sys_mmapper|DualSense|Performance|Syscall Usage|PERF:|RSX: (Add program|Program compiled)|SPU: (Building|New SPU block)')
 last=[l for l in t if not noise.search(l)]
 now=re.sub(r'^·[A-Z!] ','',t[-1]).split()[0] if t else None
 ev=re.sub(r'^·[A-Z!] ','',last[-1]).split()[0] if last else None

@@ -22,7 +22,7 @@ silence() { # seconds between newest log line and newest non-audio game event; 0
 import re,sys
 def secs(ts):
     h,m,x=ts.split(":"); return int(h)*3600+int(m)*60+float(x)
-noise=re.compile(r"cellAudio|cellMic|sys_event|sys_mmapper|DualSense|Performance|Syscall Usage|PERF:")
+noise=re.compile(r"cellAudio|cellMic|sys_event|sys_mmapper|DualSense|Performance|Syscall Usage|PERF:|RSX: (Add program|Program compiled)|SPU: (Building|New SPU block)")
 t=[l for l in sys.stdin if re.match(r"^·[A-Z!] \d+:",l)]
 g=[l for l in t if not noise.search(l)]
 if not t or not g: print(0)
