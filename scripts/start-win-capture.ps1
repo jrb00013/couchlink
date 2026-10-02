@@ -97,13 +97,38 @@ if ($Source -eq "window") {
 }
 
 Write-Host "Windows capture: source=$Source connect=$Connect ${MaxWidth}x${MaxHeight} @ ${BitrateKbps}kbps"
+
+# Capture log (a hung win-capture used to leave no trace): everything the exe prints, timestamped, plus a 5 s
+# heartbeat of its CPU time / threads / memory / handles. A hang shows as a flat CPU line while the process lives.
+# Logs: %LOCALAPPDATA%\couchlink\logs\win-capture-<time>.log (newest 10 kept).
+$LogDir = Join-Path $env:LOCALAPPDATA "couchlink\logs"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+Get-ChildItem $LogDir -Filter "win-capture-*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -Skip 9 | Remove-Item -Force -ErrorAction SilentlyContinue
+$CapLog = Join-Path $LogDir ("win-capture-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+function Write-CapLog([string]$m) { try { Add-Content -Path $CapLog -Value ("{0} {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $m) } catch {} }
+Write-CapLog "launcher: bin=$Bin args=$($argList -join ' ')"
+$hb = Start-Job -ArgumentList $CapLog -ScriptBlock {
+    param($log)
+    $last = $null
+    while ($true) {
+        Start-Sleep -Seconds 5
+        $p = Get-Process couchlink-win-capture -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $p) { Add-Content $log ("{0} HB no capture process" -f (Get-Date -Format "HH:mm:ss.fff")); continue }
+        $cpu = [math]::Round($p.TotalProcessorTime.TotalSeconds, 2)
+        $d = if ($null -ne $last) { [math]::Round($cpu - $last, 2) } else { 0 }
+        $last = $cpu
+        Add-Content $log ("{0} HB pid={1} cpu={2}s (+{3}) threads={4} ws={5}MB handles={6} responding={7}" -f (Get-Date -Format "HH:mm:ss.fff"), $p.Id, $cpu, $d, $p.Threads.Count, [int]($p.WorkingSet64 / 1MB), $p.HandleCount, $p.Responding)
+    }
+}
+function Invoke-Cap { & $Bin @argList 2>&1 | ForEach-Object { Write-CapLog "$_" ; "$_" } }
 try {
     if ($Source -eq "window") {
         # Title match can race the emulator: host start must not require PCSX2 to
         # already exist. Retry until the window appears (or capture ends cleanly).
         while ($true) {
-            & $Bin @argList
+            Invoke-Cap
             $code = $LASTEXITCODE
+            Write-CapLog "capture exited code=$code"
             if ($null -eq $code -or $code -eq 0) { break }
             # 75 = the captured window was destroyed (emulator restarted or the
             # game was closed). Relaunching re-resolves the title against the
@@ -118,9 +143,10 @@ try {
             Start-Sleep -Seconds 2
         }
     } else {
-        & $Bin @argList
+        Invoke-Cap
     }
 } finally {
+    if ($null -ne $hb) { Stop-Job $hb -ErrorAction SilentlyContinue; Remove-Job $hb -Force -ErrorAction SilentlyContinue }
     if ($null -ne $mutex) {
         try { $mutex.ReleaseMutex() } catch {}
         $mutex.Dispose()
