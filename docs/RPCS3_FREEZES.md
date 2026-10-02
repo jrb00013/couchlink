@@ -30,7 +30,11 @@ Facts that cost hours:
   seconds, stalled cutscene = 66 s of nothing except audio-port churn.
 - A stall's **cutscene end** looks like: `cellVdecEndSeq` then, normally, `cellVdecClose` ~1 s later. In the
   stall `cellVdecClose` came ~2 min later.
-- The `Exclusive Fullscreen Mode: Prefer borderless fullscreen` CFG error at boot is cosmetic.
+- **Not cosmetic (corrected 2026-10-01):** the boot error `invalid enum` for `Exclusive Fullscreen Mode: Prefer borderless fullscreen`
+  means RPCS3 ignored the setting (valid values now: Automatic | Disable | Enable) and used exclusive fullscreen. Symptom:
+  pressing F11 stops frames reaching viewers until F11 is pressed again. Fix: `Exclusive Fullscreen Mode: Disable`
+  (`link-emulator-pad.sh` now writes that). Check `RPCS3.log` for `requesting full screen exclusive mode`.
+  The capture log (`%LOCALAPPDATA%\couchlink\logs\win-capture-*.log`, heartbeat every 5 s) shows a hung capture as flat CPU.
 - WSL launching Windows `.exe` can time out (`UtilAcceptVsock accept4 failed 110`); the script retries and
   falls back to log freshness. `wsl --shutdown` fixes it but kills the CouchLink stack.
 

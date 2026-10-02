@@ -100,18 +100,26 @@ Write-Host "Windows capture: source=$Source connect=$Connect ${MaxWidth}x${MaxHe
 
 # Capture log (a hung win-capture used to leave no trace): everything the exe prints, timestamped, plus a 5 s
 # heartbeat of its CPU time / threads / memory / handles. A hang shows as a flat CPU line while the process lives.
-# Logs: %LOCALAPPDATA%\couchlink\logs\win-capture-<time>.log (newest 10 kept).
+# Logs: %LOCALAPPDATA%\couchlink\logs\win-capture-<time>.log (newest ~6 launches kept, each <= 10 MB).
 $LogDir = Join-Path $env:LOCALAPPDATA "couchlink\logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-Get-ChildItem $LogDir -Filter "win-capture-*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -Skip 9 | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem $LogDir -Filter "win-capture-*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -Skip 12 | Remove-Item -Force -ErrorAction SilentlyContinue
 $CapLog = Join-Path $LogDir ("win-capture-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-function Write-CapLog([string]$m) { try { Add-Content -Path $CapLog -Value ("{0} {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $m) } catch {} }
+$CapLogMax = 5MB   # per file; on overflow the file is moved to <name>.old (one generation) so a launch uses <= 10 MB
+$script:CapLogN = 0
+function Write-CapLog([string]$m) {
+    try {
+        if ((++$script:CapLogN % 200) -eq 0 -and (Test-Path $CapLog) -and (Get-Item $CapLog).Length -gt $CapLogMax) { Move-Item $CapLog "$CapLog.old" -Force }
+        Add-Content -Path $CapLog -Value ("{0} {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $m)
+    } catch {}
+}
 Write-CapLog "launcher: bin=$Bin args=$($argList -join ' ')"
 $hb = Start-Job -ArgumentList $CapLog -ScriptBlock {
     param($log)
     $last = $null
     while ($true) {
         Start-Sleep -Seconds 5
+        if ((Test-Path $log) -and (Get-Item $log).Length -gt 5MB) { Move-Item $log "$log.old" -Force }
         $p = Get-Process couchlink-win-capture -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $p) { Add-Content $log ("{0} HB no capture process" -f (Get-Date -Format "HH:mm:ss.fff")); continue }
         $cpu = [math]::Round($p.TotalProcessorTime.TotalSeconds, 2)

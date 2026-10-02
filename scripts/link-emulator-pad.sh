@@ -251,7 +251,10 @@ ensure_rpcs3_keep_pads_connected() {
 # an encoded stream, not the host's monitor.
 ensure_rpcs3_borderless_fullscreen() {
   local root_cfg="$1" tmp
-  local want="Prefer borderless fullscreen"
+  # "Disable", not the old "Prefer borderless fullscreen": current RPCS3 only accepts Automatic|Disable|Enable and logs
+  # `invalid enum` for the old string, silently falling back to default exclusive fullscreen - F11 then rebuilds the
+  # swapchain and win-capture stops getting frames (2026-10-01). Disable = never exclusive, i.e. borderless as intended.
+  local want="Disable"
   [[ -n "$root_cfg" && -f "$root_cfg" ]] || { RPCS3_FULLSCREEN=missing; return 0; }
   if awk -v w="    Exclusive Fullscreen Mode: $want" '
         { line = $0; sub(/\r$/, "", line) }
