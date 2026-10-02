@@ -54,6 +54,10 @@ Three layers, cheapest first. All work on a **live, stuck** process.
    matching `rpcs3.pdb` (CI uploads artifact `RPCS3 Windows MSVC PDB`, added in `bb0b7b7`) and resolve
    RVAs with `tools/rpcs3-debug/symbolize.py rpcs3.pdb 0x7ab562 ...`. Needs WinDbg/VS to open the dump.
 
+**Do not use the GDB stub on a live session (2026-10-02, cost a BO2 session):** a failed/aborted client makes the stub thread die with
+`GDB: Error during socket read` -> `Emulation has been frozen!` and RPCS3 stays paused. Its error check in `gdb_dump.ps1` also treated hex
+data starting with `e` as an error (fixed with a case-sensitive `^E[0-9A-F]{2}$`).
+
 Avoid the **GDB stub** (`GDB Server: 127.0.0.1:2345`, `tools/bo2-re/gdb_dump.ps1`) for first response: it
 pauses the whole emulator on connect and is single-shot per boot.
 
