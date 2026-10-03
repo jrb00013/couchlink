@@ -153,6 +153,13 @@ export class CouchlinkPlayer {
   private wsReconnectTimer: number | null = null;
   private wsReconnectAttempts = 0;
   private wsOpenedAt = 0;
+  /** Video stall watchdog (picture frozen while ICE still says "connected" - needed a manual refresh before). */
+  private stallPc: RTCPeerConnection | null = null;
+  private stallDecoded = -1;
+  private stallBytes = -1;
+  private stallSince = 0;
+  private stallKeyframeSent = false;
+  private lastStallRecoverAt = 0;
   private statsTimer: number | null = null;
   private lastStats: { delay: number; count: number; decoded: number } | null =
     null;
@@ -528,6 +535,7 @@ export class CouchlinkPlayer {
         const stats = await pc.getStats();
         const path = this.logSelectedPath(stats);
         const video = this.collectInbound(stats);
+        this.checkVideoStall(pc, video);
         this.cb.onTelemetry?.({
           path,
           video,
@@ -583,6 +591,54 @@ export class CouchlinkPlayer {
         cwarn("getStats failed", String(e));
       }
     }, 2000);
+  }
+
+  /**
+   * Video stall watchdog. 2026-10-03: a friend's picture froze mid-game while the host was streaming at 56 fps and the
+   * capture was healthy; ICE still reported "connected", so nothing recovered it and he had to refresh (and lost his game).
+   * If no new frame was decoded for 5 s (tab visible, media was healthy before), ask for a keyframe; if it is still frozen
+   * after 12 s, rebuild the peer through the existing media-recover path (request_offer), at most once per 20 s.
+   */
+  private checkVideoStall(pc: RTCPeerConnection, video: { framesDecoded: number; bytesReceived: number } | null) {
+    if (!video || typeof document === "undefined" || document.visibilityState !== "visible") {
+      this.stallSince = 0;
+      return;
+    }
+    const now = Date.now();
+    if (this.stallPc !== pc) {
+      // New peer connection: start tracking from scratch.
+      this.stallPc = pc;
+      this.stallDecoded = video.framesDecoded;
+      this.stallBytes = video.bytesReceived;
+      this.stallSince = 0;
+      this.stallKeyframeSent = false;
+      return;
+    }
+    if (video.framesDecoded > this.stallDecoded) {
+      this.stallDecoded = video.framesDecoded;
+      this.stallBytes = video.bytesReceived;
+      this.stallSince = 0;
+      this.stallKeyframeSent = false;
+      return;
+    }
+    // No new decoded frame since the last poll. Only treat it as a stall after the stream was proven to work.
+    if (!this.mediaHealthy || this.stallDecoded <= 0) return;
+    if (!this.stallSince) this.stallSince = now;
+    const stalledMs = now - this.stallSince;
+    const bytesMoving = video.bytesReceived > this.stallBytes;
+    this.stallBytes = video.bytesReceived;
+    if (stalledMs >= 5000 && !this.stallKeyframeSent) {
+      this.stallKeyframeSent = true;
+      cwarn("video stalled 5s - requesting keyframe", { bytesMoving, decoded: this.stallDecoded });
+      this.requestVideoKeyframe();
+    }
+    if (stalledMs >= 12000 && now - this.lastStallRecoverAt > 20000) {
+      this.lastStallRecoverAt = now;
+      this.stallSince = 0;
+      this.stallKeyframeSent = false;
+      cwarn("video stalled 12s - recovering media", { bytesMoving, decoded: this.stallDecoded });
+      this.scheduleMediaRecover("video stalled");
+    }
   }
 
   private pinJitterBuffer() {
