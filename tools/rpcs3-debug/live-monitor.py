@@ -122,8 +122,13 @@ def main():
                     r = re.search(r"starvation refreshes=(\d+)", l)
                     last["stcx"], last["back"], last["ref"] = (f.group(1) if f else ""), (b.group(1) if b else ""), (r.group(1) if r else "")
                     causes = re.search(r"cumulative by cause: ([^)]*)\)", l)
-                    print("%s CONTENTION: %s stcx failures/10s, SPU back-offs=%s, refreshes=%s | %s" % (
-                        wall, last["stcx"], last["back"] or "?", last["ref"] or "n/a", causes.group(1) if causes else "no cause split (older build)"), flush=True)
+                    # Quiet by default: one line per minute, plus whenever the refresh count changes or during a stall.
+                    changed = last["ref"] != last.get("ref_printed")
+                    if (changed and not state["stall"] and int(last["ref"] or 0) - int(last.get("ref_n", 0) or 0) >= 50) or now - last.get("t_printed", 0) >= 120:
+                        last["ref_n"] = last["ref"]
+                        last["ref_printed"], last["t_printed"] = last["ref"], now
+                        print("%s CONTENTION: %s stcx failures/10s, SPU back-offs=%s, refreshes=%s | %s" % (
+                            wall, last["stcx"], last["back"] or "?", last["ref"] or "n/a", causes.group(1) if causes else "no cause split (older build)"), flush=True)
             if l.startswith("·F "):
                 k = "F" + l[:60]
                 if k not in seen_contention:
