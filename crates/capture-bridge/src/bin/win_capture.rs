@@ -13,6 +13,7 @@ mod run {
     use clap::{Parser, ValueEnum};
     use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
+    use couchlink_capture_bridge::encode_target::{fallback_after_failed_build, plan_target_change, TargetPlan};
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
     use couchlink_capture_bridge::audio::{write_audio_frame, AudioFrame};
     use couchlink_capture_bridge::{window_matches, write_frame_with_format, FrameFormat};
@@ -340,6 +341,12 @@ mod run {
             // so the reported latency is capture-to-encoded, not just encode time.
             let mut submitted_at: Option<Instant> = None;
             let mut enc_us: Vec<u64> = Vec::with_capacity(512);
+            // Last (fps, bitrate) an encoder was successfully built with, and the last target a build REJECTED. A rebuild that fails
+            // must not kill the stream (2026-10-03: governor stepped 10000 -> 4000 kbps, the rebuild was rejected, no frames, the host
+            // dropped the capture every 1.5 s and the friend's picture froze): fall back to the last good settings and do not retry the
+            // rejected target until the host commands something else.
+            let mut last_good: Option<(u32, u32)> = None;
+            let mut rejected: Option<(u32, u32)> = None;
             'build: loop {
                 let Some((w, h, pixels, _t)) = seed.take().or_else(|| raw_rx.recv().ok()) else {
                     return;
@@ -347,21 +354,39 @@ mod run {
                 // The host may have commanded fps/bitrate since the last build —
                 // re-read them so a SET_TARGET lands on the next encoder, and mark
                 // what we built so a later change rebuilds again.
-                let fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
-                let bitrate_bps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed) * 1000;
+                let mut fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
+                let mut bitrate_bps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed) * 1000;
                 // Prefer the device-backed encoder so textures can go straight in;
                 // fall back to the system-memory encoder if it will not take a device.
                 let zero_copy_wanted = matches!(pixels, Surface::Texture(_));
-                let built = if zero_copy_wanted {
-                    HardwareEncoder::new_with_device(&device.0, w, h, fps, bitrate_bps).or_else(|e| {
-                        warn!("encoder refused the D3D11 device ({e:#}) — system memory it is");
+                let try_build = |fps: u32, bitrate_bps: u32| {
+                    if zero_copy_wanted {
+                        HardwareEncoder::new_with_device(&device.0, w, h, fps, bitrate_bps).or_else(|e| {
+                            warn!("encoder refused the D3D11 device ({e:#}) — system memory it is");
+                            HardwareEncoder::new(w, h, fps, bitrate_bps)
+                        })
+                    } else {
                         HardwareEncoder::new(w, h, fps, bitrate_bps)
-                    })
-                } else {
-                    HardwareEncoder::new(w, h, fps, bitrate_bps)
+                    }
                 };
+                let mut built = try_build(fps, bitrate_bps);
+                if built.is_err() {
+                    if let Some((good_fps, good_bps)) = fallback_after_failed_build((fps, bitrate_bps), last_good) {
+                        let why = built.as_ref().err().map(|e| format!("{e:#}")).unwrap_or_default();
+                        warn!(
+                            "encoder rebuild at {fps} fps / {} kbps failed ({why}) — keeping the last working {good_fps} fps / {} kbps",
+                            bitrate_bps / 1000,
+                            good_bps / 1000
+                        );
+                        rejected = Some((fps, bitrate_bps));
+                        fps = good_fps;
+                        bitrate_bps = good_bps;
+                        built = try_build(fps, bitrate_bps);
+                    }
+                }
                 let mut encoder = match built {
                     Ok(e) => {
+                        last_good = Some((fps, bitrate_bps));
                         if !e.is_zero_copy() {
                             ZERO_COPY_OK.store(false, Ordering::Relaxed);
                         }
@@ -473,12 +498,29 @@ mod run {
                             // so rebuild then too.
                             let now_fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
                             let now_kbps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed);
-                            if now_fps != fps || now_kbps * 1000 != bitrate_bps {
-                                info!(
-                                    "encode target now {fw}x{fh}@{now_fps} ({now_kbps} kbps) — rebuilding encoder"
-                                );
-                                seed = Some((fw, fh, surface, captured_at));
-                                continue 'build;
+                            match plan_target_change((fps, bitrate_bps), (now_fps, now_kbps * 1000), rejected) {
+                                TargetPlan::Keep => {}
+                                // The link governor's normal move: apply it to the running encoder. No teardown, no IDR, no
+                                // gap, no latency spike.
+                                TargetPlan::ApplyBitrate(bps) => match encoder.set_bitrate(bps) {
+                                    Ok(()) => {
+                                        info!("encode bitrate now {now_kbps} kbps — applied to the running encoder (no rebuild)");
+                                        bitrate_bps = bps;
+                                        last_good = Some((fps, bitrate_bps));
+                                    }
+                                    Err(e) => {
+                                        info!(
+                                            "encode target now {fw}x{fh}@{now_fps} ({now_kbps} kbps) — runtime change refused ({e:#}), rebuilding encoder"
+                                        );
+                                        seed = Some((fw, fh, surface, captured_at));
+                                        continue 'build;
+                                    }
+                                },
+                                TargetPlan::Rebuild => {
+                                    info!("encode target now {fw}x{fh}@{now_fps} ({now_kbps} kbps) — rebuilding encoder");
+                                    seed = Some((fw, fh, surface, captured_at));
+                                    continue 'build;
+                                }
                             }
                             let submitted = match &surface {
                                 // A texture arriving at a system-memory encoder means

@@ -7,6 +7,7 @@
 //! the format is negotiated per frame rather than assumed.
 
 pub mod color;
+pub mod encode_target;
 #[cfg(windows)]
 pub mod keep_rendering;
 #[cfg(windows)]
