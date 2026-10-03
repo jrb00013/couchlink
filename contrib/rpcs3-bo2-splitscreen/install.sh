@@ -37,6 +37,7 @@ sed -i \
   -e 's/^  RSX FIFO Fetch Accuracy:.*/  RSX FIFO Fetch Accuracy: Atomic/' \
   -e 's/^  Accurate ZCULL stats:.*/  Accurate ZCULL stats: false/' \
   -e 's/^  Relaxed ZCULL Sync:.*/  Relaxed ZCULL Sync: true/' \
+  -e 's/^  PPU Reservation Priority Over SPUs:.*/  PPU Reservation Priority Over SPUs: true\n  PPU Starvation CAS Refresh: true/' \
   -e 's/^  Frame limit:.*/  Frame limit: Auto/' \
   -e 's/^  Multithreaded RSX:.*/  Multithreaded RSX: false/' \
   -e 's/^  Resolution:.*/  Resolution: 1280x720/' \
