@@ -194,6 +194,7 @@ couchlink_watch_cloudflared() {
   local root="$1"
   local local_port="${2:-8443}"
   local state pid url fail
+  local edge_fails=0
   state="$(couchlink_cf_state_dir)"
   # Disown from job control noise; run.sh tracks us via COUCHLINK_TUNNEL_PIDS.
   while true; do
@@ -216,9 +217,21 @@ couchlink_watch_cloudflared() {
 
     pid="$(tr -d ' \r\n' <"$state/pid" 2>/dev/null || true)"
     url="$(tr -d ' \r\n' <"$state/url" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && couchlink_cf_edge_ok "$url"; then
-      continue
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      if couchlink_cf_edge_ok "$url"; then
+        edge_fails=0
+        continue
+      fi
+      # Process alive but the probe failed. A restarted quick tunnel gets a NEW hostname and drops every connected friend, so
+      # never act on a single blip (2026-10-03: one failed DNS/curl probe killed a healthy tunnel 6 minutes after start).
+      # Require several consecutive failures (default 4 x 20 s) before giving up on a live process.
+      edge_fails=$((edge_fails + 1))
+      echo "==> cloudflared edge probe failed ($edge_fails/${COUCHLINK_CF_EDGE_FAILS:-4}) — pid=$pid still alive, waiting" >&2
+      if (( edge_fails < ${COUCHLINK_CF_EDGE_FAILS:-4} )); then
+        continue
+      fi
     fi
+    edge_fails=0
 
     echo "==> cloudflared dead or unreachable (pid=${pid:-none} url=${url:-none}) — restarting" >&2
     if [[ -n "$pid" ]]; then
