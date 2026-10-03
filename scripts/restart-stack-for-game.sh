@@ -15,6 +15,11 @@ esac
 TRANSPORT=tcp; [ "${2:-}" = "--hyperv" ] && TRANSPORT=hyperv
 LOG="/tmp/couchlink-stack-$(date +%Y%m%d-%H%M%S).log"
 
+# A host built from the wrong branch silently dropped every browser stats report all night (2026-10-03: 'unknown variant client_link_stats'),
+# leaving the link governor blind. Always start from binaries built from THIS checkout (incremental, seconds when current).
+echo "==> building host + signaling from $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
+cargo build --release -p couchlink-host -p couchlink-signaling 2>&1 | grep -E '^error|Finished' | head -3
+
 echo "==> stopping old stack (exact-name matches only; never pkill -f a pattern this shell contains)"
 for n in couchlink-signaling couchlink-host turnserver cloudflared; do
   for p in $(pgrep -x "$n" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
@@ -46,6 +51,9 @@ if [ "$TRANSPORT" = tcp ]; then
   echo "==> waiting for capture to attach on :9876"
   ok=0; for _ in $(seq 1 20); do sleep 3; ss -tan 2>/dev/null | grep -q ':9876.*ESTAB' && { ok=1; break; }; done
   if [ "$ok" = 1 ]; then echo "capture ESTABLISHED"; else echo "WARNING: capture not attached; check 'tasklist.exe | grep couchlink-win-capture' and $LOG" >&2; fi
+fi
+if sed 's/\x1b\[[0-9;]*m//g' "$LOG" 2>/dev/null | grep -aq 'unknown variant `client_link_stats`'; then
+  echo "WARNING: host cannot decode client_link_stats (stale/wrong-branch host binary): the link governor is blind. Rebuild and restart." >&2
 fi
 host=$(sed 's#\(https://[^/]*\)/.*#\1#' /tmp/couchlink-join-url.txt)
 echo "tunnel: $(curl -s -o /dev/null -w '%{http_code}' "$host/")  (200 = reachable)"
