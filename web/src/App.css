@@ -1083,152 +1083,240 @@ button.ghost {
   text-align: right;
 }
 
-/* ── Mobile layout ─────────────────────────────────────────────── */
+/* ── Mobile layout ───────────────────────────────────────────────
+   Cloud-streaming style (Xbox / GFN / Remote Play): video is full stage;
+   translucent controls sit ON the picture. Desktop stays display:contents. */
 
-/* The fullscreen target on mobile wraps the stage + touch controller. On
-   desktop it is a transparent wrapper (display: contents) so nothing about
-   the existing layout changes. */
 .mobile-game {
   display: contents;
 }
 
 .mobile-game.is-mobile {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: 0.65rem;
-  min-height: 0;
-}
-
-/* Docked: the controller sits below the video, full opacity.
-   Sized like a real gamepad — width follows a fixed ~2.15:1 ratio off the
-   viewport height (clamped), never the full screen width, so the shoulder
-   row at the top never collides with the D-pad / face clusters at the bottom
-   even on short landscape screens. */
-.touch-dock {
-  position: relative;
-  width: min(100%, calc(clamp(280px, 42vh, 340px) * 2.15));
-  margin-inline: auto;
-  height: clamp(280px, 42vh, 340px);
-  border-radius: 18px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  background: rgba(8, 12, 18, 0.6);
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-touch-callout: none;
-}
-
-/* Fullscreen: the controller overlays the video at low opacity. */
-.mobile-game.is-mobile.is-fullscreen {
+  --touch-scale: 0.82;
+  --touch-btn: calc(48px * var(--touch-scale));
+  --touch-btn-font: calc(1.05rem * var(--touch-scale));
+  --touch-gap: calc(0.4rem * var(--touch-scale));
+  --touch-stick-ring: calc(88px * var(--touch-scale));
+  --touch-stick-knob: calc(40px * var(--touch-scale));
   display: block;
-  position: fixed;
+  position: relative;
+  min-height: 0;
+  isolation: isolate;
+}
+
+.mobile-game.is-mobile .stage-wrap {
+  position: relative;
+  width: 100%;
+  min-height: min(52vh, 420px);
+  aspect-ratio: 16 / 9;
+  max-height: min(58vh, 520px);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.mobile-game.is-mobile .stage-wrap > .stage,
+.mobile-game.is-mobile .stage-wrap > video.stage,
+.mobile-game.is-mobile .stage-wrap > canvas.stage {
+  position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
   background: #000;
 }
 
-.mobile-game.is-mobile.is-fullscreen .stage-wrap {
+/* Overlay pad: always on top of video (never a separate dock that eats height). */
+.touch-dock {
   position: absolute;
   inset: 0;
-  min-height: 0;
-  border-radius: 0;
-  border: none;
-}
-
-.mobile-game.is-mobile.is-fullscreen .touch-dock {
-  position: absolute;
-  inset: 0;
+  z-index: 4;
   width: auto;
   height: auto;
   margin: 0;
   border: none;
-  border-radius: 0;
-  opacity: 0.55;
+  border-radius: inherit;
+  overflow: hidden;
   background: transparent;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  pointer-events: none;
+  padding:
+    max(0.35rem, env(safe-area-inset-top))
+    max(0.35rem, env(safe-area-inset-right))
+    max(0.35rem, env(safe-area-inset-bottom))
+    max(0.35rem, env(safe-area-inset-left));
 }
 
-/* Landscape side-mode: phone on its side, video fills, sticks/buttons as
-   left/right rails. CSS fullscreen even when the Fullscreen API is denied
-   (typical on iOS Safari without a tap). */
-.shell.is-mobile.is-side .meta,
-.shell.is-mobile.is-side .dt-toggle,
-.shell.is-mobile.is-side .dt-panel {
-  display: none;
+.mobile-game.is-mobile .touch-dock {
+  /* Parent is .mobile-game; cover the stage-wrap box only. */
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: auto;
+  /* Match stage-wrap height: dock is sibling of stage-wrap inside mobile-game */
+  /* Use same box as stage-wrap via stretching to mobile-game which sizes to stage */
 }
 
+/* mobile-game sizes to stage-wrap; dock overlays it */
+.mobile-game.is-mobile > .stage-wrap {
+  z-index: 1;
+}
+
+.mobile-game.is-mobile > .touch-dock {
+  z-index: 5;
+}
+
+/* Soft vignette so sticks read without hiding the stream (Xbox TAK style). */
+.mobile-game.is-mobile:not(.is-side) .touch-dock {
+  background:
+    linear-gradient(180deg, rgba(4, 10, 16, 0.35) 0%, transparent 22%),
+    linear-gradient(0deg, rgba(4, 10, 16, 0.45) 0%, transparent 38%);
+}
+
+/* Fullscreen / landscape side: fixed viewport, video fills, rails left/right. */
+.mobile-game.is-mobile.is-fullscreen,
 .mobile-game.is-mobile.is-side {
+  display: block;
+  position: fixed;
+  inset: 0;
   z-index: 40;
   width: 100dvw;
   height: 100dvh;
   height: 100svh;
+  max-height: none;
+  background: #000;
+  --touch-scale: 1;
 }
 
+.shell.is-mobile.is-side .meta,
+.shell.is-mobile.is-side .dt-toggle,
+.shell.is-mobile.is-side .dt-panel,
+.shell.is-mobile.is-side .brand,
+.shell.is-mobile.is-side .join,
+.shell.is-mobile.is-side header {
+  display: none;
+}
+
+.mobile-game.is-mobile.is-fullscreen .stage-wrap,
 .mobile-game.is-mobile.is-side .stage-wrap {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+  border: none;
   background: #000;
 }
 
-.mobile-game.is-mobile.is-side .stage {
-  min-height: 0;
+.mobile-game.is-mobile.is-fullscreen .stage,
+.mobile-game.is-mobile.is-side .stage,
+.mobile-game.is-mobile.is-fullscreen .stage-wrap > video.stage,
+.mobile-game.is-mobile.is-side .stage-wrap > video.stage,
+.mobile-game.is-mobile.is-fullscreen .stage-wrap > canvas.stage,
+.mobile-game.is-mobile.is-side .stage-wrap > canvas.stage {
+  position: absolute !important;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
   object-fit: contain;
+  display: block;
 }
 
+.mobile-game.is-mobile.is-fullscreen .stage.is-hidden,
+.mobile-game.is-mobile.is-side .stage.is-hidden {
+  display: none !important;
+}
+
+.mobile-game.is-mobile.is-fullscreen .touch-dock,
 .mobile-game.is-mobile.is-side .touch-dock {
-  opacity: 1;
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
   background:
-    linear-gradient(90deg, rgba(4, 10, 16, 0.72) 0%, rgba(4, 10, 16, 0.28) 18%, transparent 32%),
-    linear-gradient(270deg, rgba(4, 10, 16, 0.72) 0%, rgba(4, 10, 16, 0.28) 18%, transparent 32%);
-  padding:
-    max(0.4rem, env(safe-area-inset-top))
-    max(0.4rem, env(safe-area-inset-right))
-    max(0.4rem, env(safe-area-inset-bottom))
-    max(0.4rem, env(safe-area-inset-left));
+    linear-gradient(90deg, rgba(4, 10, 16, 0.55) 0%, rgba(4, 10, 16, 0.18) 16%, transparent 30%),
+    linear-gradient(270deg, rgba(4, 10, 16, 0.55) 0%, rgba(4, 10, 16, 0.18) 16%, transparent 30%);
 }
 
 .mobile-game.is-mobile.is-side .touch-zone {
-  width: min(34%, 260px);
+  width: min(36%, 280px);
 }
 
 .mobile-game.is-mobile.is-side .touch-btns-dpad {
-  left: max(0.5rem, env(safe-area-inset-left));
-  bottom: max(0.7rem, env(safe-area-inset-bottom));
+  left: max(0.45rem, env(safe-area-inset-left));
+  bottom: max(0.65rem, env(safe-area-inset-bottom));
 }
 
 .mobile-game.is-mobile.is-side .touch-btns-face {
-  right: max(0.5rem, env(safe-area-inset-right));
-  bottom: max(0.7rem, env(safe-area-inset-bottom));
+  right: max(0.45rem, env(safe-area-inset-right));
+  bottom: max(0.65rem, env(safe-area-inset-bottom));
 }
 
 .mobile-game.is-mobile.is-side .touch-btns-shoulder-l {
-  left: max(0.5rem, env(safe-area-inset-left));
-  top: max(0.5rem, env(safe-area-inset-top));
+  left: max(0.45rem, env(safe-area-inset-left));
+  top: max(0.45rem, env(safe-area-inset-top));
 }
 
 .mobile-game.is-mobile.is-side .touch-btns-shoulder-r {
-  right: max(0.5rem, env(safe-area-inset-right));
-  top: max(0.5rem, env(safe-area-inset-top));
+  right: max(0.45rem, env(safe-area-inset-right));
+  top: max(0.45rem, env(safe-area-inset-top));
 }
 
 .mobile-game.is-mobile.is-side .touch-btns-menu {
+  bottom: max(0.45rem, env(safe-area-inset-bottom));
+}
+
+/* Portrait: tuck clusters into the lower third; leave center clear for video. */
+.mobile-game.is-mobile:not(.is-side):not(.is-fullscreen) .touch-zone {
+  top: 42%;
+  width: 48%;
+}
+
+.mobile-game.is-mobile:not(.is-side):not(.is-fullscreen) .touch-btns-shoulder {
+  top: max(0.4rem, env(safe-area-inset-top));
+}
+
+.mobile-game.is-mobile:not(.is-side):not(.is-fullscreen) .touch-btns-dpad {
+  left: max(0.5rem, env(safe-area-inset-left));
+  bottom: max(0.55rem, env(safe-area-inset-bottom));
+}
+
+.mobile-game.is-mobile:not(.is-side):not(.is-fullscreen) .touch-btns-face {
+  right: max(0.5rem, env(safe-area-inset-right));
+  bottom: max(0.55rem, env(safe-area-inset-bottom));
+}
+
+.mobile-game.is-mobile:not(.is-side):not(.is-fullscreen) .touch-btns-menu {
   bottom: max(0.5rem, env(safe-area-inset-bottom));
 }
 
 .tilt-hint {
   position: absolute;
   left: 50%;
-  bottom: 0.85rem;
+  top: 0.65rem;
+  bottom: auto;
   transform: translateX(-50%);
-  z-index: 3;
+  z-index: 6;
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(8, 14, 22, 0.82);
+  background: rgba(8, 14, 22, 0.72);
   color: var(--ink);
   border-radius: 999px;
-  padding: 0.45rem 0.9rem;
-  font-size: 0.78rem;
+  padding: 0.4rem 0.85rem;
+  font-size: 0.75rem;
   letter-spacing: 0.02em;
   cursor: pointer;
+  pointer-events: auto;
 }
 
 .tilt-hint-icon {
@@ -1237,14 +1325,16 @@ button.ghost {
   transform: rotate(90deg);
 }
 
-.is-mobile.is-side .tilt-hint {
+.is-mobile.is-side .tilt-hint,
+.mobile-game.is-mobile.is-side .tilt-hint {
   display: none;
 }
 
-/* Touch controller internals. */
+/* Touch controller internals — translucent glass, interactive hit targets. */
 .touch-overlay {
   position: absolute;
   inset: 0;
+  pointer-events: none;
 }
 
 .touch-zone {
@@ -1252,6 +1342,7 @@ button.ghost {
   top: 0;
   bottom: 0;
   width: 50%;
+  pointer-events: auto;
 }
 
 .touch-zone-left {
@@ -1272,46 +1363,58 @@ button.ghost {
   position: absolute;
   top: 0;
   left: 0;
-  width: 96px;
-  height: 96px;
+  width: var(--touch-stick-ring, 88px);
+  height: var(--touch-stick-ring, 88px);
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.35);
-  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  background: radial-gradient(
+    circle at center,
+    rgba(255, 255, 255, 0.14),
+    rgba(255, 255, 255, 0.03)
+  );
+  backdrop-filter: blur(2px);
   opacity: 0;
   transition: opacity 80ms linear;
   pointer-events: none;
 }
 
 .touch-stick-origin.is-active {
-  opacity: 1;
+  opacity: 0.95;
 }
 
 .touch-stick-knob {
   position: absolute;
   top: 0;
   left: 0;
-  width: 44px;
-  height: 44px;
+  width: var(--touch-stick-knob, 40px);
+  height: var(--touch-stick-knob, 40px);
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.55);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
   pointer-events: none;
 }
 
 .touch-btns {
   position: absolute;
   display: grid;
-  gap: 0.5rem;
+  gap: var(--touch-gap, 0.4rem);
+  pointer-events: none;
 }
 
 .touch-btns button {
-  min-width: 56px;
-  min-height: 56px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  min-width: var(--touch-btn, 48px);
+  min-height: var(--touch-btn, 48px);
+  width: var(--touch-btn, 48px);
+  height: var(--touch-btn, 48px);
   border-radius: 50%;
-  border: 1.5px solid rgba(255, 255, 255, 0.3);
-  background: rgba(16, 24, 34, 0.5);
-  color: var(--ink);
-  font-size: 1.2rem;
+  border: 1.5px solid rgba(255, 255, 255, 0.32);
+  background: rgba(12, 18, 28, 0.38);
+  backdrop-filter: blur(3px);
+  color: rgba(240, 244, 250, 0.92);
+  font-size: var(--touch-btn-font, 1.05rem);
   font-weight: 700;
   line-height: 1;
   touch-action: none;
@@ -1321,22 +1424,21 @@ button.ghost {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  pointer-events: auto;
 }
 
 .touch-btns button.is-pressed {
-  background: rgba(62, 207, 142, 0.65);
+  background: rgba(62, 207, 142, 0.55);
   border-color: var(--accent);
   color: #04140c;
   transform: scale(0.94);
 }
 
-/* D-pad: bottom-left. */
 .touch-btns-dpad {
-  left: 1.6rem;
-  bottom: 1.6rem;
+  left: 1.1rem;
+  bottom: 1.1rem;
   grid-template-columns: repeat(3, auto);
   grid-template-rows: repeat(3, auto);
-  gap: 0.5rem;
 }
 
 .touch-btns-dpad [data-touch-btn="dpad_up"] { grid-area: 1 / 2; }
@@ -1344,13 +1446,11 @@ button.ghost {
 .touch-btns-dpad [data-touch-btn="dpad_down"] { grid-area: 2 / 2; }
 .touch-btns-dpad [data-touch-btn="dpad_right"] { grid-area: 2 / 3; }
 
-/* Face buttons: bottom-right (△ top, ✕ bottom). */
 .touch-btns-face {
-  right: 1.6rem;
-  bottom: 1.6rem;
+  right: 1.1rem;
+  bottom: 1.1rem;
   grid-template-columns: repeat(3, auto);
   grid-template-rows: repeat(3, auto);
-  gap: 0.55rem;
 }
 
 .touch-btns-face [data-touch-btn="triangle"] { grid-area: 1 / 2; }
@@ -1358,39 +1458,54 @@ button.ghost {
 .touch-btns-face [data-touch-btn="circle"] { grid-area: 2 / 3; }
 .touch-btns-face [data-touch-btn="cross"] { grid-area: 3 / 2; }
 
-/* Shoulders/triggers: top corners. */
 .touch-btns-shoulder {
-  top: 1.2rem;
+  top: 0.85rem;
   display: flex;
-  gap: 0.6rem;
+  gap: calc(0.45rem * var(--touch-scale, 1));
 }
 
 .touch-btns-shoulder button {
-  min-width: 62px;
-  min-height: 40px;
+  min-width: calc(58px * var(--touch-scale, 1));
+  width: auto;
+  min-height: calc(36px * var(--touch-scale, 1));
+  height: calc(36px * var(--touch-scale, 1));
   border-radius: 10px;
-  font-size: 0.92rem;
+  font-size: calc(0.85rem * var(--touch-scale, 1));
+  padding: 0 0.55rem;
 }
 
-.touch-btns-shoulder-l { left: 1.4rem; }
-.touch-btns-shoulder-r { right: 1.4rem; }
+.touch-btns-shoulder-l { left: 1rem; }
+.touch-btns-shoulder-r { right: 1rem; }
 
-/* Options/Create: bottom-centre between the sticks. */
 .touch-btns-menu {
   left: 50%;
-  bottom: 1.8rem;
+  bottom: 1.2rem;
   transform: translateX(-50%);
   display: flex;
-  gap: 0.8rem;
+  gap: calc(0.65rem * var(--touch-scale, 1));
 }
 
 .touch-btns-menu button {
-  min-width: 46px;
-  min-height: 46px;
-  font-size: 0.92rem;
+  min-width: calc(42px * var(--touch-scale, 1));
+  width: calc(42px * var(--touch-scale, 1));
+  min-height: calc(42px * var(--touch-scale, 1));
+  height: calc(42px * var(--touch-scale, 1));
+  font-size: calc(0.85rem * var(--touch-scale, 1));
 }
 
-/* Mobile chrome: keep the page clean, hide the desktop-only bits. */
+/* Hide audio chrome over the stream on mobile — volume still via OS / mute if needed */
+.is-mobile .audio-controls {
+  opacity: 0.55;
+  z-index: 7;
+  pointer-events: auto;
+}
+
+.is-mobile.is-side .audio-controls {
+  top: max(0.35rem, env(safe-area-inset-top));
+  right: 50%;
+  transform: translateX(50%);
+}
+
 .is-mobile .brand p {
   display: none;
 }
@@ -1413,12 +1528,12 @@ button.ghost {
 }
 
 @media (max-width: 720px) {
-  .is-mobile .shell,
-  .is-mobile .stage-wrap,
-  .is-mobile .stage {
+  .is-mobile .shell {
     min-height: 0;
   }
-  .is-mobile .stage-wrap {
-    min-height: 38vh;
+
+  .mobile-game.is-mobile:not(.is-side):not(.is-fullscreen) .stage-wrap {
+    min-height: 42vh;
+    max-height: 56vh;
   }
 }

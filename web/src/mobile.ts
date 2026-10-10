@@ -2,14 +2,26 @@
  * Mobile-device detection for the touch-controller layout.
  *
  * Desktop layout is untouched; this only decides whether to render the
- * touch controller and the mobile fullscreen shell. Coarse pointer is the
- * strongest signal (touch is the primary input). A phone also has a small
- * viewport, so we require it when touch is present but the pointer is not
- * flagged coarse (e.g. a hybrid device).
+ * touch controller and the mobile fullscreen shell.
  *
- * `?mobile=1` forces the mobile layout (handy on a desktop browser), and
- * `?mobile=0` forces the desktop layout (handy on a real phone).
+ * Once a session is detected as mobile (coarse pointer or small touch
+ * viewport), we sticky that for the tab via sessionStorage so rotating to
+ * landscape (innerWidth often > 820) does not drop the mobile shell and
+ * unmount the pad / collapse the video. `?mobile=0` still forces desktop.
  */
+
+const STICKY_KEY = "couchlink-mobile-layout";
+
+function stickyStorage(): Storage | null {
+  try {
+    const fromWindow = typeof window !== "undefined" ? window.sessionStorage : undefined;
+    if (fromWindow) return fromWindow;
+    if (typeof sessionStorage !== "undefined") return sessionStorage;
+  } catch {
+    /* private mode / missing */
+  }
+  return null;
+}
 
 export function detectMobile(): boolean {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
@@ -22,7 +34,28 @@ export function detectMobile(): boolean {
   const coarse = window.matchMedia?.("(pointer: coarse)").matches ?? false;
   const touch = navigator.maxTouchPoints > 0;
   const small = window.innerWidth <= 820;
-  return coarse || (touch && small);
+  const store = stickyStorage();
+
+  if (coarse || (touch && small)) {
+    try {
+      store?.setItem(STICKY_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+
+  // Landscape phones often report width > 820; keep mobile if this tab
+  // already chose the mobile layout and the device still has touch.
+  if (touch) {
+    try {
+      if (store?.getItem(STICKY_KEY) === "1") return true;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return false;
 }
 
 /** Phone turned on its side — the play posture for mobile side-mode. */
@@ -107,6 +140,15 @@ export async function lockLandscape(): Promise<void> {
 export function unlockOrientation(): void {
   try {
     screen.orientation?.unlock?.();
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Test helper — clear sticky mobile flag between unit tests. */
+export function resetMobileStickyForTests(): void {
+  try {
+    stickyStorage()?.removeItem(STICKY_KEY);
   } catch {
     /* ignore */
   }
