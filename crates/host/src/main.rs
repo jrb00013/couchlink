@@ -341,9 +341,11 @@ async fn route_slot_msg(
         }
         SignalMessage::RequestOffer { slot } => {
             if let Some(conn) = slots.lock().await.get(&slot) {
-                info!("player requested offer (slot {slot}, renegotiate, no peer rebuild)");
+                // ICE-restart offer: browser is the answerer so its restartIce()
+                // alone cannot renegotiate; host must mint new ICE credentials.
+                warn!("player requested offer (slot {slot}, ICE-restart renegotiate)");
                 *force_idr = true;
-                if let Err(e) = conn.host.create_and_send_offer(signal_out).await {
+                if let Err(e) = conn.host.create_and_send_offer_ice_restart(signal_out).await {
                     warn!("request_offer failed: {e}");
                 }
             } else {
