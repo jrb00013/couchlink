@@ -46,7 +46,7 @@ foreach ($k in $Ranges.Keys) {
   for ($o = 0; $o -lt $len; $o += 0x200) {
     $n = [Math]::Min(0x200, $len - $o)
     $r = Send ("m{0:x},{1:x}" -f ($addr + $o), $n)
-    if ($r -match '^E') { throw "read error $r at $('{0:x}' -f ($addr+$o)) ($k)" }
+    if ($r -cmatch '^E[0-9A-F]{2}$') { throw "read error $r at $('{0:x}' -f ($addr+$o)) ($k)" }
     [void]$hex.Append($r)
   }
   Set-Content -NoNewline -Path "$Out\$k.$a.hex" -Value $hex.ToString()

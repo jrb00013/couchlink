@@ -37,6 +37,7 @@ sed -i \
   -e 's/^  RSX FIFO Fetch Accuracy:.*/  RSX FIFO Fetch Accuracy: Atomic/' \
   -e 's/^  Accurate ZCULL stats:.*/  Accurate ZCULL stats: false/' \
   -e 's/^  Relaxed ZCULL Sync:.*/  Relaxed ZCULL Sync: true/' \
+  -e 's/^  PPU Reservation Priority Over SPUs:.*/  PPU Reservation Priority Over SPUs: true\n  PPU Starvation CAS Refresh: true/' \
   -e 's/^  Frame limit:.*/  Frame limit: Auto/' \
   -e 's/^  Multithreaded RSX:.*/  Multithreaded RSX: false/' \
   -e 's/^  Resolution:.*/  Resolution: 1280x720/' \
@@ -45,9 +46,19 @@ sed -i \
   -e 's/^  Start games in fullscreen mode:.*/  Start games in fullscreen mode: false/' \
   "$OUT"
 
+# Hard assert — never leave MT RSX on for BO2 (settings-menu softlock).
+if ! grep -qE '^  Multithreaded RSX: false[[:space:]]*$' "$OUT"; then
+  echo "error: failed to force Multithreaded RSX: false in $OUT" >&2
+  exit 1
+fi
+
 echo "Installed BO2 split-screen pack into $RPCS3_DIR"
 echo "  patches/BLUS31011_patch.yml"
 echo "  config/patch_config.yml (Enabled: true)"
 echo "  config/custom_configs/config_BLUS31011.yml"
+echo "  Multithreaded RSX forced OFF (do not re-enable — menu softlock)"
 echo "Reboot BO2 for patches/config to take effect."
-echo "Verify: Manage → Game Patches → 'BO2 split-screen: disable hang-detect watchdog'"
+echo "Verify Game Patches:"
+echo "  - BO2 split-screen: disable hang-detect watchdog (couchlink)"
+echo "  - BO2 softlock: force SPURS wait complete then exit (couchlink)"
+echo "Also stage couchlink-play: switch-rpcs3.cmd couchlink-play"

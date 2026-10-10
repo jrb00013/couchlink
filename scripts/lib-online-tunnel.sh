@@ -77,21 +77,86 @@ couchlink_ensure_cloudflared() {
   printf '%s' "$bin"
 }
 
-# Quick tunnel → https://*.trycloudflare.com (secure context for WebCodecs).
-# Sets COUCHLINK_CF_URL and appends PID to COUCHLINK_TUNNEL_PIDS.
-couchlink_start_cloudflared() {
+# Persistent state for the active quick tunnel + watchdog.
+# Quick tunnels (trycloudflare.com) have no uptime guarantee — we keep a
+# watchdog that restarts cloudflared when the process dies or the hostname
+# goes NXDOMAIN, and rewrites the friend join URL onto the new host.
+couchlink_cf_state_dir() {
+  printf '%s' "${COUCHLINK_CF_STATE_DIR:-/tmp/couchlink-cf}"
+}
+
+couchlink_cf_join_file() {
+  printf '%s' "${COUCHLINK_JOIN_URL_FILE:-/tmp/couchlink-join-url.txt}"
+}
+
+# True when the trycloudflare edge still resolves and accepts TCP/TLS.
+# Origin 5xx is fine (signaling blip) — NXDOMAIN / connect failure is not.
+couchlink_cf_edge_ok() {
+  local url="$1"
+  local host code
+  [[ -n "$url" ]] || return 1
+  host="${url#https://}"
+  host="${host%%/*}"
+  if command -v getent >/dev/null 2>&1; then
+    getent hosts "$host" >/dev/null 2>&1 || return 1
+  fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 \
+    -A 'couchlink-cf-watchdog' "${url}/" 2>/dev/null || true)"
+  [[ -n "$code" && "$code" != "000" ]]
+}
+
+# Swap every *.trycloudflare.com host in the published join URL onto `new_base`.
+couchlink_cf_rewrite_join_hosts() {
+  local new_base="$1"
+  local join_file new_host join
+  join_file="$(couchlink_cf_join_file)"
+  [[ -f "$join_file" ]] || return 0
+  new_host="${new_base#https://}"
+  new_host="${new_host%%/*}"
+  [[ -n "$new_host" ]] || return 0
+  join="$(tr -d '\r\n' <"$join_file")"
+  [[ "$join" == *trycloudflare.com* ]] || return 0
+  join="$(printf '%s' "$join" | sed -E \
+    -e "s|https://[A-Za-z0-9.-]+\\.trycloudflare\\.com|https://${new_host}|g" \
+    -e "s|wss://[A-Za-z0-9.-]+\\.trycloudflare\\.com|wss://${new_host}|g" \
+    -e "s|wss%3A%2F%2F[A-Za-z0-9.-]+\\.trycloudflare\\.com|wss%3A%2F%2F${new_host}|g")"
+  printf '%s\n' "$join" >"$join_file"
+  echo "==> cloudflared restarted — new friend join URL:" >&2
+  echo "$join" >&2
+  if command -v clip.exe >/dev/null 2>&1; then
+    printf '%s' "$join" | clip.exe 2>/dev/null || true
+  fi
+}
+
+# Spawn one cloudflared quick tunnel. Does not start the watchdog.
+# Sets COUCHLINK_CF_URL / COUCHLINK_CF_PID and records state under couchlink_cf_state_dir.
+couchlink_spawn_cloudflared() {
   local root="$1"
   local local_port="${2:-8443}"
-  local cf
+  local cf state log pid url i
+  local ha_conn retries
   cf="$(couchlink_ensure_cloudflared "$root")" || return 1
 
-  local log
+  state="$(couchlink_cf_state_dir)"
+  mkdir -p "$state"
   log="$(mktemp /tmp/couchlink-cloudflared.XXXXXX.log)"
-  "$cf" tunnel --url "http://127.0.0.1:${local_port}" --no-autoupdate >"$log" 2>&1 &
-  local pid=$!
 
-  local i url=""
-  for i in $(seq 1 40); do
+  # Quick tunnels force ha-connections=1 on Cloudflare's side (flag is accepted
+  # but ignored — see cloudflared Settings log). retries still helps; the
+  # watchdog below is what recovers from death / NXDOMAIN.
+  ha_conn="${COUCHLINK_CF_HA_CONNECTIONS:-4}"
+  retries="${COUCHLINK_CF_RETRIES:-15}"
+
+  "$cf" tunnel \
+    --url "http://127.0.0.1:${local_port}" \
+    --ha-connections "$ha_conn" \
+    --retries "$retries" \
+    --no-autoupdate \
+    >"$log" 2>&1 &
+  pid=$!
+
+  url=""
+  for i in $(seq 1 50); do
     url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$log" 2>/dev/null | head -1 || true)"
     if [[ -n "$url" ]]; then
       break
@@ -110,10 +175,112 @@ couchlink_start_cloudflared() {
     return 1
   fi
 
+  printf '%s\n' "$pid" >"$state/pid"
+  printf '%s\n' "$url" >"$state/url"
+  printf '%s\n' "$log" >"$state/log"
+  printf '%s\n' "$local_port" >"$state/port"
+  rm -f "$state/stop"
+
   declare -ga COUCHLINK_TUNNEL_PIDS=("${COUCHLINK_TUNNEL_PIDS[@]:-}" "$pid")
   export COUCHLINK_CF_URL="$url"
+  export COUCHLINK_CF_PID="$pid"
   echo "==> cloudflared HTTPS invite: $url"
   return 0
+}
+
+# Restart loop: if cloudflared dies or the trycloudflare hostname NXDOMAINs,
+# spawn a fresh quick tunnel and rewrite the published join URL onto it.
+couchlink_watch_cloudflared() {
+  local root="$1"
+  local local_port="${2:-8443}"
+  local state pid url fail
+  local edge_fails=0
+  state="$(couchlink_cf_state_dir)"
+  # Disown from job control noise; run.sh tracks us via COUCHLINK_TUNNEL_PIDS.
+  while true; do
+    sleep "${COUCHLINK_CF_WATCH_SECS:-20}"
+    [[ -f "$state/stop" ]] && exit 0
+
+    # If signaling is gone, the session is over — exit quietly.
+    if ! timeout 0.25 bash -c "echo >/dev/tcp/127.0.0.1/${local_port}" 2>/dev/null; then
+      fail=0
+      for _ in 1 2 3; do
+        sleep 2
+        if timeout 0.25 bash -c "echo >/dev/tcp/127.0.0.1/${local_port}" 2>/dev/null; then
+          fail=0
+          break
+        fi
+        fail=1
+      done
+      [[ "$fail" == "1" ]] && exit 0
+    fi
+
+    pid="$(tr -d ' \r\n' <"$state/pid" 2>/dev/null || true)"
+    url="$(tr -d ' \r\n' <"$state/url" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      if couchlink_cf_edge_ok "$url"; then
+        edge_fails=0
+        continue
+      fi
+      # Process alive but the probe failed. A restarted quick tunnel gets a NEW hostname and drops every connected friend, so
+      # never act on a single blip (2026-10-03: one failed DNS/curl probe killed a healthy tunnel 6 minutes after start).
+      # Require several consecutive failures (default 4 x 20 s) before giving up on a live process.
+      edge_fails=$((edge_fails + 1))
+      echo "==> cloudflared edge probe failed ($edge_fails/${COUCHLINK_CF_EDGE_FAILS:-4}) — pid=$pid still alive, waiting" >&2
+      if (( edge_fails < ${COUCHLINK_CF_EDGE_FAILS:-4} )); then
+        continue
+      fi
+    fi
+    edge_fails=0
+
+    echo "==> cloudflared dead or unreachable (pid=${pid:-none} url=${url:-none}) — restarting" >&2
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+
+    if ! couchlink_spawn_cloudflared "$root" "$local_port"; then
+      echo "==> cloudflared restart failed — retrying in 30s" >&2
+      sleep 30
+      continue
+    fi
+    export COUCHLINK_INVITE_SIGNALING="${COUCHLINK_CF_URL/https:/wss:}/ws"
+    couchlink_cf_rewrite_join_hosts "$COUCHLINK_CF_URL"
+  done
+}
+
+# Quick tunnel → https://*.trycloudflare.com (secure context for WebCodecs).
+# Sets COUCHLINK_CF_URL and appends PIDs (cloudflared + watchdog) to COUCHLINK_TUNNEL_PIDS.
+couchlink_start_cloudflared() {
+  local root="$1"
+  local local_port="${2:-8443}"
+  local state wpid
+
+  couchlink_spawn_cloudflared "$root" "$local_port" || return 1
+
+  if [[ "${COUCHLINK_CF_WATCHDOG:-1}" != "1" ]]; then
+    return 0
+  fi
+
+  state="$(couchlink_cf_state_dir)"
+  couchlink_watch_cloudflared "$root" "$local_port" &
+  wpid=$!
+  printf '%s\n' "$wpid" >"$state/watchdog.pid"
+  declare -ga COUCHLINK_TUNNEL_PIDS=("${COUCHLINK_TUNNEL_PIDS[@]:-}" "$wpid")
+  echo "==> cloudflared keepalive watchdog pid=$wpid (restarts on death/NXDOMAIN)"
+  return 0
+}
+
+couchlink_stop_cloudflared_watchdog() {
+  local state wpid pid
+  state="$(couchlink_cf_state_dir)"
+  mkdir -p "$state"
+  : >"$state/stop"
+  wpid="$(tr -d ' \r\n' <"$state/watchdog.pid" 2>/dev/null || true)"
+  pid="$(tr -d ' \r\n' <"$state/pid" 2>/dev/null || true)"
+  [[ -n "$wpid" ]] && kill "$wpid" 2>/dev/null || true
+  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
 }
 
 couchlink_ensure_bore() {
