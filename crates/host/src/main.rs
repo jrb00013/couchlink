@@ -864,42 +864,50 @@ async fn main() -> Result<()> {
                                 freeze_count_delta,
                             ) {
                                 link_gov.note_client_loss();
-                                info!(
+                                // warn: COUCHLINK_VERBOSE=0 filters info! — need this live.
+                                warn!(
                                     "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
                                      {freeze_count_delta} freeze(s), jb {jitter_buffer_ms}ms — \
-                                     link governor stepping down",
+                                     link governor marking window bad",
                                     packets_lost_delta.saturating_add(packets_received_delta)
                                 );
                             }
                             // See the SignalMessage doc comment: this is the only
                             // congestion signal the governor gets once RTP is the
                             // live present path, since RTP sends never shed on
-                            // their own. Feed drops into `dropped_frames`; also
-                            // treat catastrophic RTT as congestion (live case:
-                            // drop_pct=0 host-side while friend rtt≈862ms felt frozen).
-                            const RTT_CONGESTION_MS: u32 = 250;
-                            let mut reacted = false;
+                            // their own. Feed drops into `dropped_frames`.
                             if frames_dropped_delta > 0 {
                                 dropped_frames += frames_dropped_delta as u64;
                                 link_gov.note_client_congestion();
-                                reacted = true;
-                                info!(
+                                warn!(
                                     "slot {slot}: client reports {frames_dropped_delta} frame(s) \
                                      dropped, jitter buffer {jitter_buffer_ms}ms — counted toward \
                                      link governor"
                                 );
                             }
-                            if rtt_ms >= RTT_CONGESTION_MS {
-                                // Synthetic shed so on_window sees pressure even when
-                                // the browser isn't dropping (input lag / surplus blowout).
+                            // RTT is the load-bearing signal when host shed is 0% but
+                            // the friend's ICE RTT has ballooned (Ricardo 8112ms live).
+                            // note_client_rtt marks the window bad + holds climb; slam
+                            // on catastrophic RTT applies the bitrate floor immediately.
+                            if let Some(slam) = link_gov.note_client_rtt(rtt_ms) {
+                                commanded_target = slam.clone();
+                                capturer.set_target(slam.clone());
+                                warn!(
+                                    "slot {slot}: client rtt {rtt_ms}ms (≥{} slam) — commanded \
+                                     encoder {}x{}@{} ({} kbps) immediately (jb={jitter_buffer_ms}ms)",
+                                    link_gov::RTT_SLAM_MS,
+                                    slam.width,
+                                    slam.height,
+                                    slam.fps,
+                                    slam.bitrate_kbps
+                                );
+                            } else if rtt_ms >= link_gov::RTT_CONGESTION_MS {
                                 dropped_frames += 8;
-                                link_gov.note_client_congestion();
-                                if !reacted {
-                                    info!(
-                                        "slot {slot}: client rtt {rtt_ms}ms (≥{RTT_CONGESTION_MS}) \
-                                         — treating as link congestion (jb={jitter_buffer_ms}ms)"
-                                    );
-                                }
+                                warn!(
+                                    "slot {slot}: client rtt {rtt_ms}ms (≥{}) — marking link \
+                                     congested (jb={jitter_buffer_ms}ms)",
+                                    link_gov::RTT_CONGESTION_MS
+                                );
                             }
                         }
                         SignalMessage::Heartbeat => {
@@ -1000,7 +1008,8 @@ async fn main() -> Result<()> {
                                     if decided != commanded_target {
                                         commanded_target = decided;
                                         capturer.set_target(decided.clone());
-                                        info!(
+                                        // warn so COUCHLINK_VERBOSE=0 still surfaces steps.
+                                        warn!(
                                             "link governor: commanded encoder {}x{}@{} ({} kbps) after {}% sheds",
                                             decided.width, decided.height, decided.fps,
                                             decided.bitrate_kbps, drop_pct
