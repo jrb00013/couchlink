@@ -14,6 +14,9 @@ Core:
   SPU Block Size: Safe
   Accurate SPU DMA: true
   PPU Reservation Priority Over SPUs: true
+  # BO2 only: lets a starved lwarx/stwcx. proceed after 256 straight failures (SPURS false-sharing livelock). Needs the
+  # couchlink-play fork build >= aba01af; older builds ignore the key. Do NOT enable globally: it turns LL/SC into CAS (ABA risk).
+  PPU Starvation CAS Refresh: true
   Accurate Cache Line Stores: true
   Accurate RSX reservation access: true
   Disable SPU GETLLAR Spin Optimization: true

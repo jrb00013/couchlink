@@ -566,6 +566,15 @@ async fn main() -> Result<()> {
 
     // Always surface the invite — this is what the friend needs.
     println!("friend join URL:\n{join}");
+    // Stable path the CF watchdog / copy-join-url.sh refresh when the
+    // trycloudflare hostname rotates mid-session.
+    {
+        let path = std::env::var("COUCHLINK_JOIN_URL_FILE")
+            .unwrap_or_else(|_| "/tmp/couchlink-join-url.txt".into());
+        if let Err(e) = std::fs::write(&path, format!("{join}\n")) {
+            tracing::warn!("failed to write join URL file {path}: {e}");
+        }
+    }
     if verbose {
         info!("friend join URL: {join}");
         if mesh.as_deref() == Some("headscale") || (hs_url.is_some() && ts_key.is_some()) {
