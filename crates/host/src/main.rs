@@ -566,6 +566,15 @@ async fn main() -> Result<()> {
 
     // Always surface the invite — this is what the friend needs.
     println!("friend join URL:\n{join}");
+    // Stable path the CF watchdog / copy-join-url.sh refresh when the
+    // trycloudflare hostname rotates mid-session.
+    {
+        let path = std::env::var("COUCHLINK_JOIN_URL_FILE")
+            .unwrap_or_else(|_| "/tmp/couchlink-join-url.txt".into());
+        if let Err(e) = std::fs::write(&path, format!("{join}\n")) {
+            tracing::warn!("failed to write join URL file {path}: {e}");
+        }
+    }
     if verbose {
         info!("friend join URL: {join}");
         if mesh.as_deref() == Some("headscale") || (hs_url.is_some() && ts_key.is_some()) {
@@ -838,6 +847,59 @@ async fn main() -> Result<()> {
                                 conn.host.set_present_path(&path);
                             } else {
                                 warn!("present_path for unknown slot {slot} dropped");
+                            }
+                        }
+                        SignalMessage::ClientLinkStats {
+                            frames_dropped_delta,
+                            jitter_buffer_ms,
+                            rtt_ms,
+                            packets_lost_delta,
+                            packets_received_delta,
+                            freeze_count_delta,
+                            slot,
+                        } => {
+                            if link_gov::client_report_is_congested(
+                                packets_lost_delta,
+                                packets_received_delta,
+                                freeze_count_delta,
+                            ) {
+                                link_gov.note_client_loss();
+                                info!(
+                                    "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
+                                     {freeze_count_delta} freeze(s), jb {jitter_buffer_ms}ms — \
+                                     link governor stepping down",
+                                    packets_lost_delta.saturating_add(packets_received_delta)
+                                );
+                            }
+                            // See the SignalMessage doc comment: this is the only
+                            // congestion signal the governor gets once RTP is the
+                            // live present path, since RTP sends never shed on
+                            // their own. Feed drops into `dropped_frames`; also
+                            // treat catastrophic RTT as congestion (live case:
+                            // drop_pct=0 host-side while friend rtt≈862ms felt frozen).
+                            const RTT_CONGESTION_MS: u32 = 250;
+                            let mut reacted = false;
+                            if frames_dropped_delta > 0 {
+                                dropped_frames += frames_dropped_delta as u64;
+                                link_gov.note_client_congestion();
+                                reacted = true;
+                                info!(
+                                    "slot {slot}: client reports {frames_dropped_delta} frame(s) \
+                                     dropped, jitter buffer {jitter_buffer_ms}ms — counted toward \
+                                     link governor"
+                                );
+                            }
+                            if rtt_ms >= RTT_CONGESTION_MS {
+                                // Synthetic shed so on_window sees pressure even when
+                                // the browser isn't dropping (input lag / surplus blowout).
+                                dropped_frames += 8;
+                                link_gov.note_client_congestion();
+                                if !reacted {
+                                    info!(
+                                        "slot {slot}: client rtt {rtt_ms}ms (≥{RTT_CONGESTION_MS}) \
+                                         — treating as link congestion (jb={jitter_buffer_ms}ms)"
+                                    );
+                                }
                             }
                         }
                         SignalMessage::Heartbeat => {

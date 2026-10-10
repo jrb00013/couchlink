@@ -26,7 +26,14 @@ import { usePlayerCallbacks } from "./usePlayerCallbacks";
 import DebugDrawer, { type PresentSummary } from "./DebugDrawer";
 import { KeyboardMouseInput } from "./keyboardMouse";
 import { KeybindsModal } from "./KeybindsModal";
-import { loadKbmBinds, type KbmBinds } from "./kbmBinds";
+import {
+  loadKbmBinds,
+  loadKbmMouseLookEnabled,
+  loadKbmSensitivity,
+  saveKbmMouseLookEnabled,
+  saveKbmSensitivity,
+  type KbmBinds,
+} from "./kbmBinds";
 import {
   detectLandscape,
   detectMobile,
@@ -176,6 +183,18 @@ export default function App() {
   const [kbmActive, setKbmActive] = useState(false);
   const [keybindsOpen, setKeybindsOpen] = useState(false);
   const [kbmBinds, setKbmBinds] = useState<KbmBinds>(() => loadKbmBinds());
+  const [kbmSensitivity, setKbmSensitivityState] = useState<number>(() => loadKbmSensitivity());
+  const setKbmSensitivity = (v: number) => {
+    setKbmSensitivityState(v);
+    saveKbmSensitivity(v);
+  };
+  const [kbmMouseLookEnabled, setKbmMouseLookEnabledState] = useState<boolean>(() =>
+    loadKbmMouseLookEnabled()
+  );
+  const setKbmMouseLookEnabled = (v: boolean) => {
+    setKbmMouseLookEnabledState(v);
+    saveKbmMouseLookEnabled(v);
+  };
   const [pointerLocked, setPointerLocked] = useState(false);
   const kbmRef = useRef<KeyboardMouseInput | null>(null);
   const [kbmInput, setKbmInput] = useState<KeyboardMouseInput | null>(null);
@@ -725,13 +744,17 @@ export default function App() {
     playerRef.current?.connect(signalingUrl, invite.sessionId, invite.pin);
   }, [invite.auto, invite.sessionId, invite.pin, signalingUrl]);
 
-  // Create/destroy keyboard+mouse input and wire it into the player
+  // Create/destroy keyboard+mouse input and wire it into the player.
+  // Lock target MUST be the visible stage wrap — canvasRef starts as
+  // `.stage.is-hidden` (display:none), so clicks never reached requestPointerLock.
   useEffect(() => {
-    const canvas = canvasRef.current ?? stageRef.current ?? undefined;
+    const lockEl = stageRef.current ?? canvasRef.current ?? undefined;
     if (kbmActive) {
       const kbm = new KeyboardMouseInput({
-        lockTarget: canvas ?? null,
+        lockTarget: lockEl ?? null,
         binds: kbmBinds,
+        mouseSensitivity: kbmSensitivity,
+        mouseLookEnabled: kbmMouseLookEnabled,
       });
       kbmRef.current = kbm;
       setKbmInput(kbm);
@@ -758,6 +781,14 @@ export default function App() {
   useEffect(() => {
     kbmRef.current?.setBinds(kbmBinds);
   }, [kbmBinds]);
+
+  useEffect(() => {
+    kbmRef.current?.setSensitivity(kbmSensitivity);
+  }, [kbmSensitivity]);
+
+  useEffect(() => {
+    kbmRef.current?.setMouseLookEnabled(kbmMouseLookEnabled);
+  }, [kbmMouseLookEnabled]);
 
   // Re-detect mobile + landscape so side-mode follows a phone tilt.
   useEffect(() => {
@@ -879,9 +910,13 @@ export default function App() {
     .filter((p) => p.slot !== 0 && p.slot !== mySlot)
     .sort((a, b) => a.slot - b.slot);
 
+  // Keep KBM alive on desktop even with a DualSense seated — mouse-look
+  // overlays rx/ry onto the pad while pointer-locked (see pollAndSendPad).
+  // Previously hasPhysicalPad killed KBM entirely, so "put the controller on"
+  // permanently blocked mouse → BO2 camera.
   useEffect(() => {
-    setKbmActive(!hasPhysicalPad && !isMobile);
-  }, [hasPhysicalPad, isMobile]);
+    setKbmActive(!isMobile);
+  }, [isMobile]);
 
   const applyPastedLink = () => {
     try {
@@ -1150,7 +1185,7 @@ export default function App() {
                 ),
               )}
             </div>
-            {!hasPhysicalPad && (
+            {!isMobile && (
               <div className="kbm-row">
                 <button
                   type="button"
@@ -1165,10 +1200,14 @@ export default function App() {
         )}
       </div>
 
-      {keybindsOpen && !hasPhysicalPad && (
+      {keybindsOpen && !isMobile && (
         <KeybindsModal
           binds={kbmBinds}
           onChange={setKbmBinds}
+          sensitivity={kbmSensitivity}
+          onSensitivityChange={setKbmSensitivity}
+          mouseLookEnabled={kbmMouseLookEnabled}
+          onMouseLookEnabledChange={setKbmMouseLookEnabled}
           onClose={() => setKeybindsOpen(false)}
         />
       )}

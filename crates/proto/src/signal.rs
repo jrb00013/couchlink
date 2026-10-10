@@ -132,6 +132,43 @@ pub enum SignalMessage {
         #[serde(default)]
         slot: u8,
     },
+    /// Player reports its own receive-side video health for this stats window.
+    ///
+    /// The host's link governor (`link_gov.rs`) only ever saw congestion on
+    /// the CLVD DataChannel push path — the RTP video track is written
+    /// unconditionally with no shed/backpressure signal of its own, so once a
+    /// session promotes to the WebCodecs present path (full RTP paint, CLVD
+    /// down to input_wm tips only), the governor went structurally blind: RTP
+    /// sends report "delivered" even while the browser's own jitter buffer
+    /// balloons and it drops frames on arrival. This closes that loop with
+    /// the browser's own `getStats()` numbers, which the host has no way to
+    /// see otherwise.
+    ClientLinkStats {
+        /// Frames the browser dropped since its last report (not cumulative).
+        frames_dropped_delta: u32,
+        /// Current receiver jitter buffer size, milliseconds — informational
+        /// (logged), not yet fed into the governor's step decision.
+        jitter_buffer_ms: u32,
+        /// WebRTC `currentRoundTripTime` in ms. Optional so older clients omit it.
+        /// Host treats sustained high RTT as congestion even when drop delta is 0
+        /// (input feels frozen while video still paints — live 862ms case).
+        #[serde(default)]
+        rtt_ms: u32,
+        /// RTP packets lost / received since the last report (not cumulative).
+        /// Packet loss is the congestion signal that `frames_dropped_delta` misses:
+        /// NACK/FEC hide loss from the frame counter while the picture still
+        /// freezes waiting on a retransmit (live: 3.6% loss, 44 freezes, 0 drops).
+        #[serde(default)]
+        packets_lost_delta: u32,
+        #[serde(default)]
+        packets_received_delta: u32,
+        /// Browser `freezeCount` growth since the last report.
+        #[serde(default)]
+        freeze_count_delta: u32,
+        /// Player slot reporting (stamped by the signaling server).
+        #[serde(default)]
+        slot: u8,
+    },
     /// Host announces stream ready (codec / resolution).
     StreamInfo {
         width: u32,

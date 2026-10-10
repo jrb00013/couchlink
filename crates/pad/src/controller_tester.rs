@@ -18,8 +18,8 @@ mod tests {
         decode_clpd, dualsense_bt_neutral_report, dualsense_usb_neutral_report,
         dualsense_usb_press, dualsense_usb_with_sticks, encode_clpd, simulate_dualsense_frame,
         simulate_steam_frame, simulate_switch_frame, simulate_xbox_frame, steam_neutral_report,
-        steam_press, switch_neutral_report, switch_press, xbox_neutral_report, xbox_press,
-        xbox_with_sticks, SimButton, DUALSENSE_ONLY_BUTTONS, SHARED_BUTTONS,
+        steam_press, switch_neutral_report, switch_press, xbox_legacy_press, xbox_neutral_report,
+        xbox_press, xbox_with_sticks, SimButton, DUALSENSE_ONLY_BUTTONS, SHARED_BUTTONS,
     };
     use crate::steam_controller::{KNOWN_PIDS as STEAM_PIDS, VALVE_VID};
     use crate::switch::{KNOWN_PIDS as SWITCH_PIDS, NINTENDO_VID, PRODUCT_NAME as SWITCH_NAME};

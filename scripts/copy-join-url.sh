@@ -6,6 +6,8 @@
 #   JOIN_URL='https://…' ./scripts/copy-join-url.sh
 set -euo pipefail
 
+JOIN_FILE="${COUCHLINK_JOIN_URL_FILE:-/tmp/couchlink-join-url.txt}"
+
 find_join_url() {
   local log="$1"
   rg -o 'https://[^[:space:]]+trycloudflare\.com/\?s=[^[:space:]]+' "$log" 2>/dev/null | tail -1 \
@@ -19,14 +21,14 @@ pick_stack_log() {
     printf '%s\n' "$HOST_LOG"
     return
   fi
-  for f in /tmp/couchlink-stack-v{30..1}.log /tmp/couchlink-stack.log; do
+  for f in /tmp/couchlink-stack-v{40..1}.log /tmp/couchlink-stack.log; do
     [[ -f "$f" ]] || continue
     if [[ -n "$(find_join_url "$f")" ]]; then
       printf '%s\n' "$f"
       return
     fi
   done
-  for f in /tmp/couchlink-stack-v{30..1}.log /tmp/couchlink-stack.log; do
+  for f in /tmp/couchlink-stack-v{40..1}.log /tmp/couchlink-stack.log; do
     [[ -f "$f" ]] && printf '%s\n' "$f" && return
   done
 }
@@ -54,6 +56,10 @@ copy_to_clipboard() {
 }
 
 JOIN_URL="${JOIN_URL:-}"
+# Prefer the live file (kept current by host + CF keepalive watchdog).
+if [[ -z "$JOIN_URL" && -f "$JOIN_FILE" ]]; then
+  JOIN_URL="$(tr -d '\r\n' <"$JOIN_FILE")"
+fi
 if [[ -z "$JOIN_URL" ]]; then
   log="$(pick_stack_log || true)"
   if [[ -n "${log:-}" ]]; then
