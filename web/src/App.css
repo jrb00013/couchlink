@@ -288,7 +288,8 @@ button.ghost {
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(4px);
-  z-index: 5;
+  /* Above pads viz / stage so My screen · Full split stays clickable. */
+  z-index: 20;
 }
 
 .split-view-toggle {
