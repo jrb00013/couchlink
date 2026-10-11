@@ -96,7 +96,11 @@ export function detectSeamsSync(
       ];
     }
   } else if (hSeam.score >= FLOOR) {
-    const mid = hSeam.idx / height;
+    let T = hSeam.idx;
+    let B = hSeam.idx;
+    while (T > y0 && Math.abs(row[T] - row[T - 1]) < 8) T--;
+    while (B < y1 && Math.abs(row[B] - row[B + 1]) < 8) B++;
+    const mid = (T + B) / 2 / height;
     layout = "horizontal";
     score = hSeam.score;
     regions = [
