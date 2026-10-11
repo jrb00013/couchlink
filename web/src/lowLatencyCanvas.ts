@@ -6,6 +6,8 @@
 //! newest frame as soon as it arrives.
 
 import { clog, cwarn } from "./log";
+import type { NormRect } from "./proto";
+import { clampRect } from "./splitTypes";
 
 export function canUseLowLatencyCanvas(): boolean {
   return (
@@ -56,8 +58,20 @@ export class LowLatencyCanvasView {
    * already moved on (new track, or stopped) does not restart a stale one. */
   private generation = 0;
   private restarts = 0;
+  /** Normalized crop; null = full frame (legacy path). */
+  private cropRect: NormRect | null = null;
+  /** When true and cropRect is null, paint black (never flash full split). */
+  private isolationArmed = false;
 
   constructor(private canvas: HTMLCanvasElement) {}
+
+  setCrop(rect: NormRect | null) {
+    this.cropRect = rect ? clampRect(rect) : null;
+  }
+
+  setIsolationArmed(armed: boolean) {
+    this.isolationArmed = armed;
+  }
 
   setStatsHandler(cb: ((s: PresentStats) => void) | null) {
     this.onStats = cb;
@@ -209,13 +223,37 @@ export class LowLatencyCanvasView {
     if (!ctx) return;
     const w = frame.displayWidth || frame.codedWidth;
     const h = frame.displayHeight || frame.codedHeight;
-    if (w > 0 && h > 0 && (this.canvas.width !== w || this.canvas.height !== h)) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-      this.lastW = w;
-      this.lastH = h;
+    if (this.isolationArmed && !this.cropRect) {
+      if (this.canvas.width < 2) {
+        this.canvas.width = 2;
+        this.canvas.height = 2;
+      }
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      return;
     }
-    ctx.drawImage(frame, 0, 0);
+    const crop = this.cropRect;
+    if (crop && w > 0 && h > 0) {
+      const sw = Math.max(1, Math.floor(crop.w * w));
+      const sh = Math.max(1, Math.floor(crop.h * h));
+      const sx = Math.floor(crop.x * w);
+      const sy = Math.floor(crop.y * h);
+      if (this.canvas.width !== sw || this.canvas.height !== sh) {
+        this.canvas.width = sw;
+        this.canvas.height = sh;
+        this.lastW = sw;
+        this.lastH = sh;
+      }
+      ctx.drawImage(frame, sx, sy, sw, sh, 0, 0, sw, sh);
+    } else {
+      if (w > 0 && h > 0 && (this.canvas.width !== w || this.canvas.height !== h)) {
+        this.canvas.width = w;
+        this.canvas.height = h;
+        this.lastW = w;
+        this.lastH = h;
+      }
+      ctx.drawImage(frame, 0, 0);
+    }
     this.painted += 1;
     const paintMs = performance.now();
     const ageMs = Math.max(0, paintMs - recvMs);

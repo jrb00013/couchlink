@@ -307,6 +307,30 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                     relay_to_host(&store, sid, &SignalMessage::RequestOffer { slot });
                 }
             }
+            // Player → host: stamp slot (kaleidoscope seats / #90).
+            SignalMessage::SplitScreenSet {
+                enabled,
+                view_mode,
+                layout,
+                regions,
+                rescan,
+                ..
+            } => {
+                if let (Some(sid), Some(slot)) = (session_id.as_deref(), player_slot) {
+                    relay_to_host(
+                        &store,
+                        sid,
+                        &SignalMessage::SplitScreenSet {
+                            enabled,
+                            view_mode,
+                            layout,
+                            regions,
+                            rescan,
+                            slot,
+                        },
+                    );
+                }
+            }
             // --- host → player: route by the slot the host stamped ---
             SignalMessage::Offer { slot, .. } => {
                 if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
@@ -318,8 +342,10 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
                     }
                 }
             }
-            // Shared stream telemetry fans out to every connected player.
-            SignalMessage::StreamInfo { .. } | SignalMessage::HostStats { .. } => {
+            // Shared stream telemetry + split-seat config fan out to every player.
+            SignalMessage::StreamInfo { .. }
+            | SignalMessage::HostStats { .. }
+            | SignalMessage::SplitScreenConfig { .. } => {
                 if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
                     store.broadcast_to_players(sid, &text);
                 }

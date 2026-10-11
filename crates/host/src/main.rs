@@ -14,6 +14,7 @@ mod nat_punch;
 mod ricardo_playable_ab;
 mod scale;
 mod signaling_client;
+mod split_seat;
 mod wan3_math;
 mod webrtc_peer;
 
@@ -617,6 +618,14 @@ async fn main() -> Result<()> {
     .await?;
 
     let signal_out = signaling.outbound.clone();
+    let split_seat_state = Arc::new(Mutex::new(split_seat::SplitSeatState::default()));
+    {
+        let st = Arc::clone(&split_seat_state);
+        let out = signal_out.clone();
+        tokio::spawn(split_seat::serve_control(st, out));
+    }
+    // Publish initial kaleidoscope config (master may be env-enabled).
+    split_seat::broadcast_config(&split_seat_state, &signal_out).await;
     {
         let (kind, id) = host_physical_pad();
         let _ = signal_out.send(SignalMessage::PadInfo {
@@ -722,6 +731,8 @@ async fn main() -> Result<()> {
                     &mut force_idr,
                 )
                 .await?;
+                // Late joiners must see current kaleidoscope master/regions.
+                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                 break;
             }
             SignalMessage::Error { message } => warn!("signal error: {message}"),
@@ -805,6 +816,7 @@ async fn main() -> Result<()> {
                             // else that arrived during the drain.
                             let (joins, deferred) =
                                 take_queued_joins(&mut signaling.inbound, slot, epoch);
+                            let had_joins = !joins.is_empty();
                             for (slot, epoch) in joins {
                                 handle_slot_join(
                                     slot,
@@ -818,6 +830,9 @@ async fn main() -> Result<()> {
                                     &mut force_idr,
                                 )
                                 .await?;
+                            }
+                            if had_joins {
+                                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                             }
                             // Re-handle non-join messages that arrived during the
                             // drain (answers for a *replaced* peer are dropped by
@@ -841,6 +856,32 @@ async fn main() -> Result<()> {
                                     emulator_pad::apply(&kind, &id, slot)
                                 });
                             }
+                        }
+                        SignalMessage::SplitScreenSet {
+                            enabled,
+                            view_mode,
+                            layout,
+                            regions,
+                            rescan,
+                            slot,
+                        } => {
+                            let msg = SignalMessage::SplitScreenSet {
+                                enabled,
+                                view_mode: view_mode.clone(),
+                                layout: layout.clone(),
+                                regions: regions.clone(),
+                                rescan,
+                                slot,
+                            };
+                            {
+                                let mut st = split_seat_state.lock().await;
+                                split_seat::apply_player_set(&mut st, &msg);
+                                info!(
+                                    "slot {slot}: split_screen_set enabled={enabled} \
+                                     view={view_mode} layout={layout} rescan={rescan}"
+                                );
+                            }
+                            split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                         }
                         SignalMessage::PresentPath { path, slot } => {
                             if let Some(conn) = slots.lock().await.get(&slot) {

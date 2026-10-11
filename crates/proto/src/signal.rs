@@ -228,6 +228,61 @@ pub enum SignalMessage {
         #[serde(default)]
         shm_gate_trips: bool,
     },
+    /// Player → host: request split-seat isolation intent / report detected regions.
+    /// Signaling stamps `slot` from the connection; never trust a client-supplied slot.
+    SplitScreenSet {
+        /// Player wants isolation (own seat crop) when host master is on.
+        enabled: bool,
+        /// `own` = crop to seat region; `full` = show entire split layout.
+        #[serde(default = "default_view_mode")]
+        view_mode: String,
+        /// Detected layout: `none`, `horizontal`, `vertical`, `grid2x2`.
+        #[serde(default)]
+        layout: String,
+        /// Normalized regions `[0,1]` in seat order (P1..P4), length 0..=4.
+        #[serde(default)]
+        regions: Vec<NormRect>,
+        /// Ask host/oracle to rescan seams.
+        #[serde(default)]
+        rescan: bool,
+        #[serde(default)]
+        slot: u8,
+    },
+    /// Host → all players: authoritative split-seat config for the session.
+    SplitScreenConfig {
+        /// Host master switch — clients may only isolate when true.
+        master_enabled: bool,
+        /// Host's own view: `own` or `full`.
+        #[serde(default = "default_view_mode")]
+        host_view_mode: String,
+        #[serde(default)]
+        layout: String,
+        #[serde(default)]
+        regions: Vec<NormRect>,
+        /// Seat index (1..=4) → region index into `regions` (0-based).
+        #[serde(default)]
+        seat_region: Vec<u8>,
+        /// Force clients to re-run detection.
+        #[serde(default)]
+        rescan: bool,
+    },
+}
+
+fn default_view_mode() -> String {
+    "full".into()
+}
+
+/// Normalized axis-aligned rect in frame space. All fields clamped to `[0,1]` by clients.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct NormRect {
+    #[serde(default)]
+    pub x: f32,
+    #[serde(default)]
+    pub y: f32,
+    #[serde(default)]
+    pub w: f32,
+    #[serde(default)]
+    pub h: f32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -424,6 +479,86 @@ mod tests {
                 assert_eq!(slot, 2);
                 assert_eq!(kind, "dualsense");
                 assert_eq!(id, "DualSense Wireless Controller");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_screen_set_round_trips() {
+        let m = SignalMessage::SplitScreenSet {
+            enabled: true,
+            view_mode: "own".into(),
+            layout: "horizontal".into(),
+            regions: vec![
+                NormRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
+                NormRect {
+                    x: 0.5,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
+            ],
+            rescan: false,
+            slot: 1,
+        };
+        let s = m.to_json().unwrap();
+        assert!(s.contains("\"type\":\"split_screen_set\""));
+        let back = SignalMessage::from_json(&s).unwrap();
+        match back {
+            SignalMessage::SplitScreenSet {
+                enabled,
+                view_mode,
+                layout,
+                regions,
+                slot,
+                ..
+            } => {
+                assert!(enabled);
+                assert_eq!(view_mode, "own");
+                assert_eq!(layout, "horizontal");
+                assert_eq!(regions.len(), 2);
+                assert_eq!(slot, 1);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_screen_config_round_trips() {
+        let m = SignalMessage::SplitScreenConfig {
+            master_enabled: true,
+            host_view_mode: "own".into(),
+            layout: "grid2x2".into(),
+            regions: vec![NormRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.5,
+                h: 0.5,
+            }],
+            seat_region: vec![0, 1, 2, 3],
+            rescan: true,
+        };
+        let s = m.to_json().unwrap();
+        assert!(s.contains("\"type\":\"split_screen_config\""));
+        let back = SignalMessage::from_json(&s).unwrap();
+        match back {
+            SignalMessage::SplitScreenConfig {
+                master_enabled,
+                host_view_mode,
+                layout,
+                rescan,
+                ..
+            } => {
+                assert!(master_enabled);
+                assert_eq!(host_view_mode, "own");
+                assert_eq!(layout, "grid2x2");
+                assert!(rescan);
             }
             other => panic!("wrong variant: {other:?}"),
         }

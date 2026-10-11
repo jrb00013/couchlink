@@ -21,6 +21,7 @@ export function usePlayerCallbacks(handlers: {
   onPlayersStatus?: PlayerCallbacks["onPlayersStatus"];
   onPlayerPadInfo?: PlayerCallbacks["onPlayerPadInfo"];
   onPlayerLeft?: PlayerCallbacks["onPlayerLeft"];
+  onSplitScreenConfig?: PlayerCallbacks["onSplitScreenConfig"];
   onTelemetry?: (t: PlayerTelemetry) => void;
 }): PlayerCallbacks {
   const handlersRef = useRef(handlers);
@@ -45,6 +46,8 @@ export function usePlayerCallbacks(handlers: {
       onPlayerPadInfo: (slot, kind, id) =>
         handlersRef.current.onPlayerPadInfo?.(slot, kind, id),
       onPlayerLeft: (slot) => handlersRef.current.onPlayerLeft?.(slot),
+      onSplitScreenConfig: (msg) =>
+        handlersRef.current.onSplitScreenConfig?.(msg),
       onTelemetry: (t) => handlersRef.current.onTelemetry?.(t),
     };
   }

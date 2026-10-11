@@ -13,4 +13,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev pkg-config
-      - run: cargo test --workspace
+      # host-panel is an egui desktop binary (extra GUI libs); keep CI lean.
+      - run: cargo test --workspace --exclude couchlink-host-panel
+      - name: web unit tests
+        working-directory: web
+        run: |
+          npm ci
+          npm test -- --run src/splitSeat.test.ts src/splitDetector.test.ts src/splitNonRegression.test.ts
