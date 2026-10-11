@@ -178,3 +178,53 @@ pub async fn broadcast_config(
     s.rescan = false;
     let _ = signal_out.send(msg);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use couchlink_proto::NormRect;
+
+    #[test]
+    fn default_master_off_matches_pre_kaleidoscope() {
+        std::env::remove_var("COUCHLINK_SPLIT_SEAT_MASTER");
+        let s = SplitSeatState::default();
+        assert!(!s.master_enabled);
+        assert!(s.regions.is_empty());
+        assert_eq!(s.layout, "none");
+    }
+
+    #[test]
+    fn player_set_cannot_arm_master_or_touch_encode() {
+        let mut s = SplitSeatState::default();
+        let msg = SignalMessage::SplitScreenSet {
+            enabled: true,
+            view_mode: "own".into(),
+            layout: "vertical".into(),
+            regions: vec![
+                NormRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
+                NormRect {
+                    x: 0.5,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
+            ],
+            rescan: false,
+            slot: 1,
+        };
+        apply_player_set(&mut s, &msg);
+        assert_eq!(s.layout, "vertical");
+        assert_eq!(s.regions.len(), 2);
+        // Master stays false — only host control / env can arm isolation.
+        assert!(!s.master_enabled);
+        let json = s.to_config_msg().to_json().unwrap();
+        assert!(!json.contains("bitrate"));
+        assert!(!json.contains("\"fps\""));
+        assert!(!json.contains("preset"));
+    }
+}
