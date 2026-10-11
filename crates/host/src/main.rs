@@ -731,6 +731,8 @@ async fn main() -> Result<()> {
                     &mut force_idr,
                 )
                 .await?;
+                // Late joiners must see current kaleidoscope master/regions.
+                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                 break;
             }
             SignalMessage::Error { message } => warn!("signal error: {message}"),
@@ -814,6 +816,7 @@ async fn main() -> Result<()> {
                             // else that arrived during the drain.
                             let (joins, deferred) =
                                 take_queued_joins(&mut signaling.inbound, slot, epoch);
+                            let had_joins = !joins.is_empty();
                             for (slot, epoch) in joins {
                                 handle_slot_join(
                                     slot,
@@ -827,6 +830,9 @@ async fn main() -> Result<()> {
                                     &mut force_idr,
                                 )
                                 .await?;
+                            }
+                            if had_joins {
+                                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                             }
                             // Re-handle non-join messages that arrived during the
                             // drain (answers for a *replaced* peer are dropped by
