@@ -20,6 +20,9 @@ import { classifyPresentStuck, type PresentStuckReason } from "./presentPromote"
 import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
 import type { ControllerKind } from "./controllerKind";
 import { seatForRemoteSlot } from "./seat";
+import { cropForClient, parseSplitConfig } from "./splitSeat";
+import { runOracle } from "./splitOracle";
+import type { SplitSeatConfig, ViewMode } from "./splitTypes";
 import { KeyboardMouseViz } from "./KeyboardMouseViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
@@ -147,6 +150,11 @@ export default function App() {
   /** This browser's own player slot, assigned by the session on registration. */
   const [mySlot, setMySlot] = useState<number | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
+  /** Kaleidoscope: host master enable + regions; local view toggle when armed. */
+  const [splitConfig, setSplitConfig] = useState<SplitSeatConfig | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("own");
+  const splitConfigRef = useRef<SplitSeatConfig | null>(null);
+  splitConfigRef.current = splitConfig;
 
   function presentPhotonFields() {
     const rtt = rttRef.current;
@@ -293,10 +301,27 @@ export default function App() {
     }, 15000);
   }
 
+  function applySplitCropToViews() {
+    const master = !!splitConfigRef.current?.masterEnabled;
+    const crop = cropForClient({
+      masterEnabled: master,
+      viewMode,
+      regions: splitConfigRef.current?.regions ?? [],
+      seatRegion: splitConfigRef.current?.seatRegion ?? [0, 1, 2, 3],
+      mySlot,
+    });
+    const armed = master && viewMode === "own";
+    viewRef.current?.setIsolationArmed(armed);
+    wcRef.current?.setIsolationArmed(armed);
+    viewRef.current?.setCrop(crop);
+    wcRef.current?.setCrop(crop);
+  }
+
   function ensureWebCodecs(): boolean {
     if (preferLegacyVideo() || !canUseWebCodecs() || !wcCanvasRef.current) return false;
     if (!wcRef.current) {
       wcRef.current = new WebCodecsCanvasView(wcCanvasRef.current);
+      applySplitCropToViews();
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
         if (!promotedRef.current) {
@@ -709,7 +734,69 @@ export default function App() {
         return next;
       });
     },
+    onSplitScreenConfig: (msg) => {
+      const cfg = parseSplitConfig(msg);
+      setSplitConfig(cfg);
+      clog(
+        "split_screen_config",
+        cfg.masterEnabled,
+        cfg.layout,
+        cfg.regions.length,
+        cfg.rescan,
+      );
+    },
   });
+
+  // Apply crop + paint-gate to both present paths when isolation is armed.
+  useEffect(() => {
+    const master = !!splitConfig?.masterEnabled;
+    const crop = cropForClient({
+      masterEnabled: master,
+      viewMode,
+      regions: splitConfig?.regions ?? [],
+      seatRegion: splitConfig?.seatRegion ?? [0, 1, 2, 3],
+      mySlot,
+    });
+    viewRef.current?.setIsolationArmed(master && viewMode === "own");
+    wcRef.current?.setIsolationArmed(master && viewMode === "own");
+    viewRef.current?.setCrop(crop);
+    wcRef.current?.setCrop(crop);
+  }, [splitConfig, viewMode, mySlot]);
+
+  // Periodic / rescan oracle — off paint path; only when master enabled.
+  useEffect(() => {
+    if (!splitConfig?.masterEnabled) return;
+    let cancelled = false;
+    const tick = async (forceRescan: boolean) => {
+      if (cancelled) return;
+      const src = wcCanvasRef.current?.width
+        ? wcCanvasRef.current
+        : canvasRef.current;
+      if (!src || src.width < 2) return;
+      try {
+        const result = await runOracle({
+          source: src,
+          activeSeatHint: seatForRemoteSlot(mySlot),
+        });
+        if (cancelled || result.layout === "none") return;
+        playerRef.current?.sendSplitScreenSet({
+          enabled: true,
+          viewMode,
+          layout: result.layout,
+          regions: result.regions,
+          rescan: forceRescan,
+        });
+      } catch (e) {
+        cwarn("split oracle failed", e);
+      }
+    };
+    if (splitConfig.rescan) void tick(true);
+    const id = window.setInterval(() => void tick(false), 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [splitConfig?.masterEnabled, splitConfig?.rescan, mySlot, viewMode]);
 
   useEffect(() => {
     const player = new CouchlinkPlayer(playerCallbacks);
@@ -1066,6 +1153,36 @@ export default function App() {
             <video ref={videoRef} className="stage" playsInline muted autoPlay />
             <audio ref={audioRef} autoPlay playsInline style={{ display: "none" }} />
             <div className="audio-controls">
+              {splitConfig?.masterEnabled && (
+                <div className="split-view-toggle" role="group" aria-label="Split view">
+                  <button
+                    type="button"
+                    className={viewMode === "own" ? "is-active" : undefined}
+                    onClick={() => {
+                      setViewMode("own");
+                      playerRef.current?.sendSplitScreenSet({
+                        enabled: true,
+                        viewMode: "own",
+                      });
+                    }}
+                  >
+                    My screen
+                  </button>
+                  <button
+                    type="button"
+                    className={viewMode === "full" ? "is-active" : undefined}
+                    onClick={() => {
+                      setViewMode("full");
+                      playerRef.current?.sendSplitScreenSet({
+                        enabled: true,
+                        viewMode: "full",
+                      });
+                    }}
+                  >
+                    Full split
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 className="audio-mute-btn"

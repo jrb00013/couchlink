@@ -82,6 +82,8 @@ export interface PlayerCallbacks {
   /** A fellow player (not the host) left — drop their entry from any
    * per-player display instead of leaving a stale "connected" row. */
   onPlayerLeft?: (slot: number) => void;
+  /** Host broadcast: split-seat master enable + regions (kaleidoscope). */
+  onSplitScreenConfig?: (msg: Extract<SignalMessage, { type: "split_screen_config" }>) => void;
   /** Full getStats-derived telemetry snapshot, ~2s tick. */
   onTelemetry?: (t: PlayerTelemetry) => void;
 }
@@ -1441,8 +1443,30 @@ export class CouchlinkPlayer {
       case "player_pad_info":
         this.cb.onPlayerPadInfo?.(msg.slot, msg.kind, msg.id ?? "");
         break;
+      case "split_screen_config":
+        this.cb.onSplitScreenConfig?.(msg);
+        break;
       case "pong":
         break;
     }
+  }
+
+  /** Player → host: view mode / detector regions (slot stamped by signaling). */
+  sendSplitScreenSet(opts: {
+    enabled: boolean;
+    viewMode?: "own" | "full";
+    layout?: string;
+    regions?: { x: number; y: number; w: number; h: number }[];
+    rescan?: boolean;
+  }) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    send(this.ws, {
+      type: "split_screen_set",
+      enabled: opts.enabled,
+      view_mode: opts.viewMode,
+      layout: opts.layout,
+      regions: opts.regions,
+      rescan: opts.rescan,
+    });
   }
 }

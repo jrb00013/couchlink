@@ -90,7 +90,28 @@ export type SignalMessage =
       handoff_copy_ms?: number;
       handoff_wait_p95_ms?: number;
       shm_gate_trips?: boolean;
+    }
+  | {
+      type: "split_screen_set";
+      enabled: boolean;
+      view_mode?: "own" | "full";
+      layout?: string;
+      regions?: NormRect[];
+      rescan?: boolean;
+      slot?: number;
+    }
+  | {
+      type: "split_screen_config";
+      master_enabled: boolean;
+      host_view_mode?: "own" | "full";
+      layout?: string;
+      regions?: NormRect[];
+      seat_region?: number[];
+      rescan?: boolean;
     };
+
+/** Normalized crop rect in frame space (0..1). */
+export type NormRect = { x: number; y: number; w: number; h: number };
 
 export function send(ws: WebSocket, msg: SignalMessage) {
   ws.send(JSON.stringify(msg));
