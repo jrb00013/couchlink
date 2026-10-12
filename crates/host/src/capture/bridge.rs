@@ -103,6 +103,12 @@ pub struct WindowsBridge {
     /// When the last frame (of any kind, including a stale-frame no-op) was
     /// actually pulled off the socket. Drives `FRAME_STALE_AFTER`.
     last_frame_at: Instant,
+    /// When the current TCP session was accepted. Hung-alive detection uses
+    /// `max(last_frame_at, session_started_at)` so a real reconnect after the
+    /// host waited for launch still gets a full `FRAME_STALE_AFTER` to deliver
+    /// its first frame — without treating accept itself as "healthy" (that
+    /// was the black-WebCodecs hang: refreshing `last_frame_at` on accept).
+    session_started_at: Instant,
     /// See `HyperVBridge::ever_connected` — same startup/picker race.
     ever_connected: bool,
     /// See `HyperVBridge::pending_audio` — same demux, same cap.
@@ -149,6 +155,7 @@ impl WindowsBridge {
         }
         let disconnected_at = stream.is_none().then(Instant::now);
         let ever_connected = stream.is_some();
+        let now = Instant::now();
         Ok(Self {
             listener,
             stream,
@@ -163,7 +170,8 @@ impl WindowsBridge {
             frames_received: 0,
             disconnected_at,
             last_respawn: None,
-            last_frame_at: Instant::now(),
+            last_frame_at: now,
+            session_started_at: now,
             ever_connected,
             pending_audio: VecDeque::new(),
         })
@@ -228,6 +236,9 @@ impl WindowsBridge {
                 }
                 self.stream = Some(stream);
                 self.ever_connected = true;
+                // Grace for first frame on this socket — do not touch
+                // last_frame_at / disconnected_at (hung writer must still trip).
+                self.session_started_at = Instant::now();
                 true
             }
             Err(_) => false,
@@ -454,11 +465,19 @@ impl WindowsBridge {
                 // hung (GPU/driver stall, deadlocked message pump, ...) rather
                 // than crashed or disconnected. Route a long silence through the
                 // same respawn path a real disconnect uses.
-                if self.last_frame_at.elapsed() >= FRAME_STALE_AFTER {
+                //
+                // Anchor to the newer of last_frame_at and session_started_at:
+                // a hung writer that redials must still die after FRAME_STALE,
+                // but a brand-new accept after the host waited for launch must
+                // not inherit a multi-second-stale last_frame_at and get killed
+                // before the first NAL lands (live 2026-10-12: encode OK, host
+                // FORCE-killed mid-handshake → Connection reset loop).
+                let healthy_at = self.last_frame_at.max(self.session_started_at);
+                if healthy_at.elapsed() >= FRAME_STALE_AFTER {
                     tracing::warn!(
                         "no frame from win-capture in {:?} (socket still open — \
                          likely hung, not disconnected) — treating as dead",
-                        self.last_frame_at.elapsed()
+                        healthy_at.elapsed()
                     );
                     self.stream = None;
                     self.disconnected_at.get_or_insert_with(Instant::now);
@@ -560,6 +579,10 @@ mod tests {
     /// reset `last_frame_at` / cleared `disconnected_at` on accept, so
     /// `FRAME_STALE_AFTER` never accumulated and FORCE-kill never ran while
     /// friends stared at "webcodecs video".
+    ///
+    /// Accept *does* start a fresh session clock so a real post-launch
+    /// reconnect gets grace for the first frame — hung writers still die once
+    /// that grace elapses with no frame.
     #[test]
     fn silent_tcp_reconnect_does_not_mark_capture_healthy() {
         use std::net::TcpListener;
@@ -587,14 +610,16 @@ mod tests {
             disconnected_at: Some(outage_start),
             last_respawn: None,
             last_frame_at: stale,
+            session_started_at: stale,
             ever_connected: true,
             pending_audio: VecDeque::new(),
         };
 
         // Writer dials but never sends a frame — the hung-alive signature.
+        // Hold the socket open past FRAME_STALE_AFTER so the hang path can fire.
         let writer = std::thread::spawn(move || {
             let _stream = TcpStream::connect(addr).unwrap();
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(FRAME_STALE_AFTER + Duration::from_millis(800));
         });
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -607,17 +632,28 @@ mod tests {
             "accept must not clear the outage clock before a frame arrives"
         );
         let last_before = bridge.last_frame_at;
+        assert!(
+            bridge.session_started_at > last_before,
+            "accept must start a session clock (grace for first frame)"
+        );
 
-        // One more poll: still no frame → hang path drops the socket and
-        // schedules a FORCE relaunch (COUCHLINK_ROOT unset → spawn is a no-op).
+        // Immediate poll must NOT kill — session grace just started.
         let _ = bridge.capture();
+        assert!(
+            bridge.stream.is_some(),
+            "must not kill during post-accept first-frame grace"
+        );
         assert!(
             bridge.last_frame_at == last_before,
             "silent reconnect must not refresh last_frame_at"
         );
+
+        // After FRAME_STALE_AFTER with no frame → FORCE relaunch.
+        std::thread::sleep(FRAME_STALE_AFTER + Duration::from_millis(50));
+        let _ = bridge.capture();
         assert!(
             bridge.last_respawn.is_some(),
-            "hung-alive must FORCE-respawn without waiting for another grace period"
+            "hung-alive must FORCE-respawn once session grace elapses with no frame"
         );
 
         writer.join().unwrap();
@@ -651,6 +687,7 @@ mod tests {
             disconnected_at: Some(Instant::now()),
             last_respawn: None,
             last_frame_at: Instant::now(),
+            session_started_at: Instant::now(),
             ever_connected: false,
             pending_audio: VecDeque::new(),
         };

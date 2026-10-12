@@ -87,6 +87,8 @@ pub struct HyperVBridge {
     disconnected_at: Option<Instant>,
     last_respawn: Option<Instant>,
     last_frame_at: Instant,
+    /// See `bridge::WindowsBridge::session_started_at` — same first-frame grace.
+    session_started_at: Instant,
     /// Floor between non-blocking connect attempts so the host select loop
     /// is not spent inside `poll(250ms)` on every idle tick while win-capture
     /// is still coming up.
@@ -161,6 +163,7 @@ impl HyperVBridge {
             disconnected_at,
             last_respawn: None,
             last_frame_at: Instant::now(),
+            session_started_at: Instant::now(),
             last_connect_attempt: None,
             ever_connected,
             wait_ns: 0,
@@ -209,6 +212,7 @@ impl HyperVBridge {
         }
         self.stream = Some(stream);
         self.ever_connected = true;
+        self.session_started_at = Instant::now();
         true
     }
 
@@ -394,11 +398,12 @@ impl HyperVBridge {
                 // win-capture leaves the vsock stream open and just stops
                 // sending, so no read error is ever raised to trip
                 // `maybe_respawn` on its own.
-                if self.last_frame_at.elapsed() >= FRAME_STALE_AFTER {
+                let healthy_at = self.last_frame_at.max(self.session_started_at);
+                if healthy_at.elapsed() >= FRAME_STALE_AFTER {
                     tracing::warn!(
                         "no frame from win-capture in {:?} (Hyper-V socket still open — \
                          likely hung, not disconnected) — treating as dead",
-                        self.last_frame_at.elapsed()
+                        healthy_at.elapsed()
                     );
                     self.stream = None;
                     self.disconnected_at.get_or_insert_with(Instant::now);
