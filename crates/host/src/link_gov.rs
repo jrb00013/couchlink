@@ -25,8 +25,15 @@ use couchlink_capture_bridge::EncodeTarget;
 /// 2% was noise: three WAN viewers shed a couple of frames every window.
 /// 8% matches Joel live: 6% HUD must not step; 9–14% windows must.
 const DOWN_TRIGGER_PCT: u32 = 8;
+/// Host shed this high means the pipe cannot carry the *bits* (WAN/TURN),
+/// not just SCTP message rate — unlock bitrate rungs even without a client
+/// ClientLinkStats report. Live 2026-10-12: 10–18% shed at locked 10 Mbps
+/// froze friends on "media lost" while fps-only ladder held bitrate.
+const SEVERE_SHED_PCT: u32 = 12;
 /// Consecutive bad windows before stepping down.
 const DOWN_AFTER_WINDOWS: u32 = 2;
+/// Severe shed steps on the first bad window (don't wait ~10s while frozen).
+const SEVERE_DOWN_AFTER_WINDOWS: u32 = 1;
 /// Clean windows before climbing. Two (~10s) recovers fps after a CLVD blip
 /// without the old 40s stuck-at-floor climb while bitrate was wrong.
 const UP_AFTER_CLEAN_WINDOWS: u32 = 2;
@@ -184,14 +191,27 @@ impl LinkGov {
     /// `shed` = frames dropped while pushing this window; `sent` = frames
     /// attempted (delivered + shed). Returns the target to command next.
     pub fn on_window(&mut self, shed: u32, sent: u32) -> EncodeTarget {
-        let rungs = rungs_from_inner(&self.baseline, self.client_congestion_seen);
         let drop_pct = if sent > 0 { shed * 100 / sent } else { 0 };
         let client_bad = std::mem::take(&mut self.client_loss_window);
+
+        // Severe host shed ⇒ unlock bitrate cuts (same as client RTP congestion).
+        // Without this, fps-only rungs keep bits/sec ≈ baseline and WAN friends
+        // stay packet-lossy / "media lost" forever.
+        if drop_pct >= SEVERE_SHED_PCT {
+            self.client_congestion_seen = true;
+        }
+
+        let rungs = rungs_from_inner(&self.baseline, self.client_congestion_seen);
+        let need = if drop_pct >= SEVERE_SHED_PCT {
+            SEVERE_DOWN_AFTER_WINDOWS
+        } else {
+            DOWN_AFTER_WINDOWS
+        };
 
         if drop_pct > DOWN_TRIGGER_PCT || client_bad {
             self.clean_windows = 0;
             self.bad_windows += 1;
-            if self.bad_windows >= DOWN_AFTER_WINDOWS {
+            if self.bad_windows >= need {
                 self.bad_windows = 0;
                 // Step down one rung toward the floor, never below it.
                 let step = index_of(&rungs, self.current)
@@ -249,11 +269,12 @@ mod tests {
     }
 
     #[test]
-    fn persistent_shed_steps_down_fps_holds_bitrate() {
+    fn mild_shed_steps_down_fps_holds_bitrate() {
+        // 9% is above DOWN_TRIGGER (8%) but below SEVERE (12%) — SCTP-rate path.
         let mut gov = LinkGov::new(P720);
         let mut seen = vec![];
         for _ in 0..20 {
-            let t = gov.on_window(40, 100);
+            let t = gov.on_window(9, 100);
             if seen.last() != Some(&t) {
                 seen.push(t);
             }
@@ -266,15 +287,27 @@ mod tests {
     }
 
     #[test]
-    fn persistent_shed_never_drops_bitrate() {
+    fn mild_shed_never_drops_bitrate() {
         let mut gov = LinkGov::new(P720);
         for _ in 0..20 {
-            gov.on_window(40, 100);
+            gov.on_window(9, 100);
             assert_eq!(gov.current().bitrate_kbps, P720.bitrate_kbps);
         }
         assert!(gov.current().fps <= P720.fps);
         assert_eq!(gov.current().width, 1280);
         assert_eq!(gov.current().height, 720);
+    }
+
+    #[test]
+    fn severe_host_shed_unlocks_bitrate_cut() {
+        // Live 2026-10-12: 10–18% shed at locked 10 Mbps → media lost.
+        let mut gov = LinkGov::new(P720);
+        let t = gov.on_window(15, 100); // 15% ≥ SEVERE → bitrate ladder, step once
+        assert!(
+            t.bitrate_kbps < P720.bitrate_kbps,
+            "severe shed must cut bitrate on first step, got {t:?}"
+        );
+        assert_eq!(t.fps, P720.fps, "first bitrate rung holds fps");
     }
 
     #[test]

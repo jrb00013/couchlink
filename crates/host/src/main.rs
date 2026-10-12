@@ -1047,6 +1047,16 @@ async fn main() -> Result<()> {
                                             decided.bitrate_kbps, drop_pct
                                         );
                                     }
+                                    // Recovery: shed mid-GOP leaves friends on frozen /
+                                    // "media lost" until the next periodic IDR. Force one
+                                    // re-anchor when the window was lossy (rate-limited by
+                                    // IDR_INTERVAL via last_idr below).
+                                    if drop_pct >= 8 && last_idr.elapsed() >= IDR_INTERVAL {
+                                        force_idr = true;
+                                        info!(
+                                            "link recovery: {drop_pct}% shed this window — requesting IDR"
+                                        );
+                                    }
                                     let received = capturer.take_received();
                                     let (wait_ms, copy_ms, wait_p95_ms) = capturer.take_handoff_ms();
                                     let omega = crate::input_photon_budget::handoff_wait_periods(
@@ -1067,8 +1077,8 @@ async fn main() -> Result<()> {
                                             "link keeping up".to_string()
                                         } else {
                                             format!(
-                                                "bottleneck: peer/network can't consume at {:.0} Mbps",
-                                                preset.bitrate_kbps as f64 / 1000.0
+                                                "bottleneck: peer/network can't consume at {:.1} Mbps (commanded)",
+                                                commanded_target.bitrate_kbps as f64 / 1000.0
                                             )
                                         },
                                     );
