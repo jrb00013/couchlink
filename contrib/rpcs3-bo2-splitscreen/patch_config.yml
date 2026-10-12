@@ -1,6 +1,9 @@
-# DEFAULT ON — do not disable softlock force-complete. Hang-detect alone still
-# softlocks at main_thread 0x73d6f8 (live 2026-10-11 on play21). install.sh and
-# preflight-bo2.sh both assert Enabled: true for both entries.
+# Hang-detect MUST stay on (stops the deliberate 0x17 suicide).
+# Softlock force-complete MUST stay OFF: freeze 2026-10-11-213130 proved it
+# fakes SPURS completion on first usleep → Launch/Blocks/main semaphore deadlock,
+# SpursHdlr0 group_join forever, all CellSpursKernel in PAUSE.
+# Real fix is emulator play22: unique-lock PUTLLC deny on ppu_stcx_line_wanted
+# (play20's deny) + ~16ms orphan decay (play21 liveness). Not a softlock band-aid.
 PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
   "BO2 split-screen: disable hang-detect watchdog (couchlink)":
     "Call of Duty: Black Ops II":
@@ -11,4 +14,4 @@ PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
     "Call of Duty: Black Ops II":
       BLUS31011:
         "01.00":
-          Enabled: true
+          Enabled: false

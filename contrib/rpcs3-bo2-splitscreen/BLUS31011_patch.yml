@@ -26,13 +26,14 @@ PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
         BLUS31011: [ 01.00 ]
     Author: "couchlink"
     Notes: |
-      main_thread wait at 0x73d690 exits when *r30 <= r31 (completion counter).
-      Livelock: counter never advances; usleep(50) + b back forever (stuck FPS).
-      Failed v1 (one-poll branch only): returned without updating *r30 → Backend
-      AV read 0x16 @ 0x737f40. Invariant the game already uses: done iff *r30<=r31.
-      After one progress attempt (bl 0x73d09c), store r31 into *r30 then exit —
-      callers/Backend see a consistent "complete" and continue. Needed for 4-pad
-      split-screen (friends as local pads). Dump: /mnt/c/Users/josep/bo2dump/wait_loop.73d000.hex
+      DISABLED by default (patch_config Enabled: false). Kept for archaeology only.
+      Freeze 2026-10-11-213130: this patch fires on the usleep path at 0x73d7a8 —
+      std r31,0(r30) + exit — faking SPURS complete before Secondary's decrement.
+      Result: Launch/Blocks/main stuck on sys_semaphore_wait ~230s, SpursHdlr0 in
+      sys_spu_thread_group_join, all six CellSpursKernel State PAUSE, FPS fake 59.89.
+      Docs already warned: Unknown STOP / AV with earlier variants. Real fix is
+      emulator play22 (unique-lock PUTLLC deny only while lock_waiters).
+      Dump: /tmp/bo2-freeze-20261011-213130 and /mnt/c/Users/josep/bo2dump/wait_loop.73d000.hex
     Patch Version: 2.0
     Patch:
       # was: li r11,0x8d / li r3,50 / sc (usleep) / b 0x73d6ec
