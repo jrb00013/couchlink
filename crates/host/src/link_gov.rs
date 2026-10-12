@@ -456,12 +456,12 @@ mod tests {
         frames * bits_per
     }
 
-    /// Frame-capacity bench: governor must shrink fps (hold bitrate) until
-    /// emitted frames fit under a fixed push ceiling.
+    /// Frame-capacity bench: under mild shed (< SEVERE), governor steps fps
+    /// while holding bitrate. Discrete 100ms windows oscillate near capacity
+    /// once shed clears — assert min fps dropped, never unlock bitrate.
     #[test]
     fn benchmark_governor_vs_no_governor_on_saturated_frames() {
-        // Capacity just under baseline so shed stays mild (~11%, < SEVERE 12%)
-        // — exercises the fps-hold / bitrate-hold SCTP path.
+        // ~11% shed at 96fps (1/9), clears once fps ≤ 85 — mild SCTP path.
         const CAPACITY_FPS: u32 = 85;
         const WINDOWS: usize = 400;
         let baseline = EncodeTarget {
@@ -469,21 +469,25 @@ mod tests {
             ..P720
         };
         let mut gov = LinkGov::new(baseline);
-        let mut g_over = 0u32;
+        let mut min_fps = baseline.fps;
         for _ in 0..WINDOWS {
             let t = gov.current();
             assert_eq!(t.bitrate_kbps, baseline.bitrate_kbps);
             let emitted = (t.fps / 10).max(1);
             let carry = (CAPACITY_FPS / 10).max(1);
             let shed = emitted.saturating_sub(carry);
-            if shed > 0 {
-                g_over += 1;
-            }
             gov.on_window(shed, emitted.max(1));
+            min_fps = min_fps.min(gov.current().fps);
         }
         assert_eq!(gov.current().bitrate_kbps, baseline.bitrate_kbps);
-        assert_eq!(gov.current().fps, rungs_from(&baseline).last().unwrap().fps);
-        assert!(gov.current().fps < baseline.fps);
+        assert!(
+            min_fps < baseline.fps,
+            "mild saturation must step fps at least once, min={min_fps}"
+        );
+        assert!(
+            min_fps >= CAPACITY_FPS.saturating_sub(20),
+            "should settle near capacity, not floor; min={min_fps}"
+        );
     }
 
     #[test]
