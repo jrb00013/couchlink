@@ -1,9 +1,22 @@
-# Hang-detect MUST stay on (stops the deliberate 0x17 suicide).
+# Hang-detect disable MUST stay Enabled (stops the deliberate 0x17 suicide).
 # Softlock force-complete MUST stay OFF: freeze 2026-10-11-213130 proved it
-# fakes SPURS completion on first usleep → Launch/Blocks/main semaphore deadlock,
-# SpursHdlr0 group_join forever, all CellSpursKernel in PAUSE.
-# Real fix is emulator play22: unique-lock PUTLLC deny on ppu_stcx_line_wanted
-# (play20's deny) + ~16ms orphan decay (play21 liveness). Not a softlock band-aid.
+# fakes SPURS completion → semaphore deadlock / GUEST_STALL.
+# Real softlock fix is emulator play23 (unique-lock PUTLLC deny + sleep-touch).
+#
+# 2026-10-12: live EBOOT is PPU-1229303f… — enable under BOTH hashes so either boots.
+
+PPU-1229303f45fc13ff13842852a5ca50afc183a94b:
+  "BO2 split-screen: disable hang-detect watchdog (couchlink)":
+    "Call of Duty: Black Ops II":
+      BLUS31011:
+        "01.00":
+          Enabled: true
+  "BO2 softlock: force SPURS wait complete then exit (couchlink)":
+    "Call of Duty: Black Ops II":
+      BLUS31011:
+        "01.00":
+          Enabled: false
+
 PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
   "BO2 split-screen: disable hang-detect watchdog (couchlink)":
     "Call of Duty: Black Ops II":

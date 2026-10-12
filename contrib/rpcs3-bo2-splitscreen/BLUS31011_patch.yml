@@ -1,24 +1,26 @@
 Version: 1.2
 
-PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
+# Live 2026-10-12: this EBOOT hashes as PPU-1229303f… — the old
+# PPU-fa8ffe9a… entries never matched, so hang-detect suicide still ran.
+PPU-1229303f45fc13ff13842852a5ca50afc183a94b:
   "BO2 split-screen: disable hang-detect watchdog (couchlink)":
     Games:
       "Call of Duty: Black Ops II":
         BLUS31011: [ 01.00 ]
     Author: "couchlink"
     Notes: |
-      Split-screen livelocks the main thread under doubled SPURS load; Treyarch's
-      hang-detect thread then deliberately writes to 0x17 and kills the process.
-      This does NOT fix the livelock — it removes the suicide so the session can
-      survive / recover, and pairs with config_BLUS31011.yml load-reduction settings.
-      Patch A: force watchdog-enabled flag read to 0 (skip entire hang path).
-      Patch B: NOP the intentional crash store (belt-and-suspenders).
-    Patch Version: 1.1
+      Hang-detect thread prints "Hang detected." then deliberately
+      `li r3,0x17; stw r4,0(r3)` — Fatal AV, emu freeze (live 2026-10-12 01:33).
+      Addresses from that crash dump (CIA 0x2fb984 / 0x2fb9cc).
+      Does NOT fix the underlying stall; removes the suicide so play23 can recover.
+      Patch A: force watchdog-enabled flag read to 0 (skip hang path).
+      Patch B: NOP the intentional crash store.
+    Patch Version: 1.2
     Patch:
-      # 0041c3cc  lbz r3,-0x32f4(r3)  ->  li r3,0
-      - [ be32, 0x0041c3cc, 0x38600000 ]
-      # 0041c414  stw r4,0(r3)        ->  nop
-      - [ be32, 0x0041c414, 0x60000000 ]
+      # 002fb984  lbz r3,-0x3b54(r3)  ->  li r3,0
+      - [ be32, 0x002fb984, 0x38600000 ]
+      # 002fb9cc  stw r4,0(r3)        ->  nop
+      - [ be32, 0x002fb9cc, 0x60000000 ]
 
   "BO2 softlock: force SPURS wait complete then exit (couchlink)":
     Games:
@@ -26,18 +28,37 @@ PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
         BLUS31011: [ 01.00 ]
     Author: "couchlink"
     Notes: |
-      DISABLED by default (patch_config Enabled: false). Kept for archaeology only.
-      Freeze 2026-10-11-213130: this patch fires on the usleep path at 0x73d7a8 —
-      std r31,0(r30) + exit — faking SPURS complete before Secondary's decrement.
-      Result: Launch/Blocks/main stuck on sys_semaphore_wait ~230s, SpursHdlr0 in
-      sys_spu_thread_group_join, all six CellSpursKernel State PAUSE, FPS fake 59.89.
-      Docs already warned: Unknown STOP / AV with earlier variants. Real fix is
-      emulator play22 (unique-lock PUTLLC deny only while lock_waiters).
-      Dump: /tmp/bo2-freeze-20261011-213130 and /mnt/c/Users/josep/bo2dump/wait_loop.73d000.hex
+      DISABLED by default. Kept for archaeology. Softlock force-complete causes
+      GUEST_STALL — leave Enabled: false in patch_config.yml.
     Patch Version: 2.0
     Patch:
-      # was: li r11,0x8d / li r3,50 / sc (usleep) / b 0x73d6ec
-      # now: std r31,0(r30) / b 0x73d7b8 / nop / nop
+      - [ be32, 0x0073d7a8, 0xfbfe0000 ]
+      - [ be32, 0x0073d7ac, 0x4800000c ]
+      - [ be32, 0x0073d7b0, 0x60000000 ]
+      - [ be32, 0x0073d7b4, 0x60000000 ]
+
+# Legacy hash (older EBOOT). Kept so installs that still hash here keep working.
+PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab:
+  "BO2 split-screen: disable hang-detect watchdog (couchlink)":
+    Games:
+      "Call of Duty: Black Ops II":
+        BLUS31011: [ 01.00 ]
+    Author: "couchlink"
+    Notes: |
+      Legacy addresses for PPU-fa8ffe9a… EBOOT. Current disc is PPU-1229303f…
+    Patch Version: 1.1
+    Patch:
+      - [ be32, 0x0041c3cc, 0x38600000 ]
+      - [ be32, 0x0041c414, 0x60000000 ]
+
+  "BO2 softlock: force SPURS wait complete then exit (couchlink)":
+    Games:
+      "Call of Duty: Black Ops II":
+        BLUS31011: [ 01.00 ]
+    Author: "couchlink"
+    Notes: "Legacy softlock patch — keep Enabled: false."
+    Patch Version: 2.0
+    Patch:
       - [ be32, 0x0073d7a8, 0xfbfe0000 ]
       - [ be32, 0x0073d7ac, 0x4800000c ]
       - [ be32, 0x0073d7b0, 0x60000000 ]

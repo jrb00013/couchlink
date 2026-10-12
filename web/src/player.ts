@@ -161,6 +161,8 @@ export class CouchlinkPlayer {
   private stallBytes = -1;
   private stallSince = 0;
   private stallKeyframeSent = false;
+  /** Coalesce PLI on loss/freeze deltas so the 2s stats poll cannot PLI-storm. */
+  private lastLossPliAt = 0;
   private lastStallRecoverAt = 0;
   private statsTimer: number | null = null;
   private lastStats: { delay: number; count: number; decoded: number } | null =
@@ -587,6 +589,21 @@ export class CouchlinkPlayer {
               packets_received_delta: recvDelta,
               freeze_count_delta: freezeDelta,
             });
+          }
+          // Don't wait for the 5s stall watchdog — loss/freezes already mean
+          // the picture is about to freeze. PLI now; host also force_idr's on
+          // the matching ClientLinkStats. ≥3s coalesce matches host IDR_INTERVAL.
+          if (lostDelta > 0 || freezeDelta > 0 || droppedDelta > 0) {
+            const nowPli = performance.now();
+            if (nowPli - this.lastLossPliAt >= 3000) {
+              this.lastLossPliAt = nowPli;
+              cwarn("loss/freeze delta — requesting keyframe", {
+                lostDelta,
+                freezeDelta,
+                droppedDelta,
+              });
+              this.requestVideoKeyframe();
+            }
           }
         }
       } catch (e) {
