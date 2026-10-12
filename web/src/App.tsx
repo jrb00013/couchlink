@@ -209,6 +209,7 @@ export default function App() {
   const [isMobile, setIsMobile] = useState(() => detectMobile());
   const [landscape, setLandscape] = useState(() => detectLandscape());
   const touchInputRef = useRef<TouchGamepadInput | null>(null);
+  const [touchInput, setTouchInput] = useState<TouchGamepadInput | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -878,11 +879,25 @@ export default function App() {
   }, [kbmMouseLookEnabled]);
 
   // Re-detect mobile + landscape so side-mode follows a phone tilt.
+  // Sticky detectMobile keeps the overlay mounted across rotate; we also
+  // nudge video/canvas layout so the stream does not vanish on orientationchange.
   useEffect(() => {
     const sync = () => {
       setIsMobile(detectMobile());
       setLandscape(detectLandscape());
       touchInputRef.current?.refresh();
+      requestAnimationFrame(() => {
+        const v = videoRef.current;
+        if (v && !v.classList.contains("is-hidden")) {
+          void v.play().catch(() => {});
+        }
+        for (const c of [canvasRef.current, wcCanvasRef.current]) {
+          if (!c || c.classList.contains("is-hidden")) continue;
+          c.style.width = "100%";
+          c.style.height = "100%";
+        }
+        touchInputRef.current?.refresh();
+      });
     };
     window.addEventListener("resize", sync);
     window.addEventListener("orientationchange", sync);
@@ -928,20 +943,23 @@ export default function App() {
     };
   }, []);
 
-  // Touch controller: one shared input for the mobile layout, live for the
-  // lifetime of the page. Desktop is unaffected — setTouchInput(null) when the
-  // device is not mobile, and the overlay is only rendered on mobile.
+  // Touch controller: one shared input for the mobile layout. Desktop is
+  // unaffected — player gets null when not mobile; overlay only renders mobile.
   useEffect(() => {
+    if (!isMobile) {
+      touchInputRef.current = null;
+      setTouchInput(null);
+      playerRef.current?.setTouchInput(null);
+      return;
+    }
     const input = new TouchGamepadInput();
     touchInputRef.current = input;
-    if (isMobile) {
-      playerRef.current?.setTouchInput(input);
-    } else {
-      playerRef.current?.setTouchInput(null);
-    }
+    setTouchInput(input);
+    playerRef.current?.setTouchInput(input);
     return () => {
       input.detach();
       touchInputRef.current = null;
+      setTouchInput(null);
       playerRef.current?.setTouchInput(null);
     };
   }, [isMobile]);
@@ -1229,9 +1247,9 @@ export default function App() {
             )}
           </div>
 
-          {isMobile && connected && touchInputRef.current && (
-            <div className="touch-dock">
-              <TouchOverlay input={touchInputRef.current} />
+          {isMobile && connected && touchInput && (
+            <div className="touch-dock" aria-label="Touch controller">
+              <TouchOverlay input={touchInput} />
             </div>
           )}
         </div>
