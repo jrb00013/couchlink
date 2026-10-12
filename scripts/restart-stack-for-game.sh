@@ -55,6 +55,9 @@ fi
 if sed 's/\x1b\[[0-9;]*m//g' "$LOG" 2>/dev/null | grep -aq 'unknown variant `client_link_stats`'; then
   echo "WARNING: host cannot decode client_link_stats (stale/wrong-branch host binary): the link governor is blind. Rebuild and restart." >&2
 fi
+echo "==> starting capture-keeper (peak-bytes watchdog; survives host silent-reconnect bugs)"
+scripts/capture-keeper.sh --bg "$NEEDLE" >/dev/null
+
 host=$(sed 's#\(https://[^/]*\)/.*#\1#' /tmp/couchlink-join-url.txt)
 echo "tunnel: $(curl -s -o /dev/null -w '%{http_code}' "$host/")  (200 = reachable)"
 echo; echo "JOIN LINK (on clipboard):"; cat /tmp/couchlink-join-url.txt; echo

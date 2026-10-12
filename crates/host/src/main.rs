@@ -899,11 +899,12 @@ async fn main() -> Result<()> {
                             freeze_count_delta,
                             slot,
                         } => {
-                            if link_gov::client_report_is_congested(
+                            let loss_congested = link_gov::client_report_is_congested(
                                 packets_lost_delta,
                                 packets_received_delta,
                                 freeze_count_delta,
-                            ) {
+                            );
+                            if loss_congested {
                                 link_gov.note_client_loss();
                                 info!(
                                     "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
@@ -941,6 +942,18 @@ async fn main() -> Result<()> {
                                          — treating as link congestion (jb={jitter_buffer_ms}ms)"
                                     );
                                 }
+                            }
+                            // Recover *now* — waiting for the next 5s gov window
+                            // + periodic IDR left friends on "Media lost" for
+                            // 5–12s. Coalesce with IDR_INTERVAL so reports every
+                            // 2s cannot IDR-storm.
+                            if (loss_congested || reacted || rtt_ms >= RTT_CONGESTION_MS)
+                                && last_idr.elapsed() >= IDR_INTERVAL
+                            {
+                                force_idr = true;
+                                info!(
+                                    "slot {slot}: client congestion — requesting IDR for recovery"
+                                );
                             }
                         }
                         SignalMessage::Heartbeat => {
@@ -1047,6 +1060,16 @@ async fn main() -> Result<()> {
                                             decided.bitrate_kbps, drop_pct
                                         );
                                     }
+                                    // Recovery: shed mid-GOP leaves friends on frozen /
+                                    // "media lost" until the next periodic IDR. Force one
+                                    // re-anchor when the window was lossy (rate-limited by
+                                    // IDR_INTERVAL via last_idr below).
+                                    if drop_pct >= 8 && last_idr.elapsed() >= IDR_INTERVAL {
+                                        force_idr = true;
+                                        info!(
+                                            "link recovery: {drop_pct}% shed this window — requesting IDR"
+                                        );
+                                    }
                                     let received = capturer.take_received();
                                     let (wait_ms, copy_ms, wait_p95_ms) = capturer.take_handoff_ms();
                                     let omega = crate::input_photon_budget::handoff_wait_periods(
@@ -1067,8 +1090,8 @@ async fn main() -> Result<()> {
                                             "link keeping up".to_string()
                                         } else {
                                             format!(
-                                                "bottleneck: peer/network can't consume at {:.0} Mbps",
-                                                preset.bitrate_kbps as f64 / 1000.0
+                                                "bottleneck: peer/network can't consume at {:.1} Mbps (commanded)",
+                                                commanded_target.bitrate_kbps as f64 / 1000.0
                                             )
                                         },
                                     );

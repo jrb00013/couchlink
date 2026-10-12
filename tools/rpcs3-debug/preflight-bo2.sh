@@ -13,11 +13,11 @@ cfg="$R/config/custom_configs/config_BLUS31011.yml"
 g() { tr -d '\r' < "$cfg" | sed -n "s/^  $1: //p" | head -1; }
 [ "$(g 'Multithreaded RSX')" = false ] && p PASS "MT RSX off" || p FAIL "MT RSX not off (BO2 menu softlock)"
 [ "$(g 'Disable SPU GETLLAR Spin Optimization')" = true ] && p PASS "GETLLAR spin optimization disabled (BO2 pack)" || p WARN "GETLLAR spin optimization still enabled"
-# Softlock force-complete is the long-term default (2026-10-11): hang-detect alone
-# leaves main_thread stuck at 0x73d6f8. Do not flip this back to "PASS when OFF".
+# Softlock force-complete must stay OFF (2026-10-11-213130 GUEST_STALL). play22
+# fixes Secondary stwcx starvation; re-enabling force-complete causes semaphore deadlock.
 grep -A6 'force SPURS wait complete' "$R/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true' \
-  && p PASS "SPURS softlock force-complete patch ON (default)" \
-  || p FAIL "SPURS softlock force-complete patch OFF — run contrib/rpcs3-bo2-splitscreen/install.sh"
+  && p FAIL "SPURS softlock force-complete ON — disable it (causes GUEST_STALL); run install.sh" \
+  || p PASS "SPURS softlock force-complete patch OFF (required)"
 grep -B1 -A5 'hang-detect' "$R/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true' \
   && p PASS "hang-detect NOP patch on" \
   || p FAIL "hang-detect patch not enabled — run contrib/rpcs3-bo2-splitscreen/install.sh"
