@@ -656,7 +656,16 @@ export default function App() {
       clog("ui state", s, d ?? "");
       setState(s);
       if (d) setDetail(d);
-      if (s === "disconnected" || s === "error" || s === "waiting_host") {
+      // Tear down present path only on hard loss. Soft ICE blips stay on
+      // "connected" now; "Recovering media…" / Host disconnected / errors still
+      // wipe the decoder so a real rebuild can attach cleanly.
+      const hardWaiting =
+        s === "waiting_host" &&
+        !!d &&
+        (/Recovering media/i.test(d) ||
+          /Host disconnected/i.test(d) ||
+          /^Waiting for host offer/i.test(d));
+      if (s === "disconnected" || s === "error" || hardWaiting) {
         clearRtpFallbackTimer();
         viewRef.current?.stop();
         wcRef.current?.stop();
