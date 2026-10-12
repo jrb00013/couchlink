@@ -9,11 +9,12 @@ thread then deliberately writes to address `0x17` and kills the process
 
 ## What this pack does
 
-1. **Game patch** (`BLUS31011_patch.yml`) — for PPU hash
+1. **Game patches** (`BLUS31011_patch.yml`) — for PPU hash
    `PPU-fa8ffe9ae59bfa8575027c9a6ec5aab7fb0215ab` (loads ~26s into boot / when
-   multiplayer code maps in):
-   - Force watchdog enable-flag read to 0 (`0x0041c3cc`: `lbz` → `li r3,0`)
-   - NOP the intentional crash store (`0x0041c414`: `stw` → `nop`)
+   multiplayer code maps in). **Both are default ON** (`patch_config.yml`);
+   `install.sh` / `preflight-bo2.sh` fail if either is off:
+   - Hang-detect: force watchdog flag read to 0 + NOP suicide store
+   - Softlock: force SPURS wait complete then exit (breaks `0x73d6f8` livelock)
 2. **Per-game config** — **Multithreaded RSX off**, **Frame limit Auto**,
    permanently for BLUS31011. Also: Accurate SPU DMA, PPU reservation priority
    over SPUs, Safe SPU block size, Max SPURS Threads 4, no exclusive fullscreen
@@ -55,8 +56,10 @@ state (v1 one-poll-without-store caused Backend AV at `0x16`). Enabled as
 RPCS3_DIR=/mnt/c/Users/YOU/RPCS3 ./install.sh
 ```
 
-Then boot BLUS31011. Confirm in RPCS3: **Manage → Game Patches** that
-`BO2 split-screen: disable hang-detect watchdog (couchlink)` is checked.
+Then boot BLUS31011. Confirm in RPCS3: **Manage → Game Patches** that **both**
+are checked (these are the long-term defaults — do not uncheck softlock):
+- `BO2 split-screen: disable hang-detect watchdog (couchlink)`
+- `BO2 softlock: force SPURS wait complete then exit (couchlink)`
 
 ## Proof protocol
 

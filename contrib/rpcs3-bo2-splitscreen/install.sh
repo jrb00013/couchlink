@@ -16,6 +16,18 @@ mkdir -p "$RPCS3_DIR/patches" "$RPCS3_DIR/config" "$RPCS3_DIR/config/custom_conf
 cp "$ROOT/BLUS31011_patch.yml" "$RPCS3_DIR/patches/BLUS31011_patch.yml"
 cp "$ROOT/patch_config.yml" "$RPCS3_DIR/config/patch_config.yml"
 
+# Long-term default: both patches MUST stay enabled. A live softlock on play21
+# (2026-10-11) proved hang-detect-alone is not enough — force-complete was left
+# Enabled:false in an old tree and BO2 froze at CIA 0x73d6f8.
+if ! grep -A6 'force SPURS wait complete' "$RPCS3_DIR/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true'; then
+  echo "error: softlock force-complete patch is not Enabled: true in patch_config.yml" >&2
+  exit 1
+fi
+if ! grep -A6 'hang-detect watchdog' "$RPCS3_DIR/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true'; then
+  echo "error: hang-detect patch is not Enabled: true in patch_config.yml" >&2
+  exit 1
+fi
+
 # Build custom config from current global + our overrides (python for YAML-ish merge of known keys)
 BASE="$RPCS3_DIR/config/config.yml"
 OUT="$RPCS3_DIR/config/custom_configs/config_BLUS31011.yml"
