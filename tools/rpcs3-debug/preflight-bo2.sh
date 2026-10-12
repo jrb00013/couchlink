@@ -12,9 +12,15 @@ c=$(strings -a "$exe" | grep -c 'PPU reservation contention'); [ "$c" -gt 0 ] &&
 cfg="$R/config/custom_configs/config_BLUS31011.yml"
 g() { tr -d '\r' < "$cfg" | sed -n "s/^  $1: //p" | head -1; }
 [ "$(g 'Multithreaded RSX')" = false ] && p PASS "MT RSX off" || p FAIL "MT RSX not off (BO2 menu softlock)"
-[ "$(g 'Disable SPU GETLLAR Spin Optimization')" = false ] && p PASS "GETLLAR spin optimization on (default)" || p WARN "GETLLAR spin optimization disabled"
-grep -A5 'force SPURS' "$R/config/patch_config.yml" | grep -q 'Enabled: false' && p PASS "unproven SPURS force-complete patch is OFF" || p WARN "SPURS force-complete patch is ON (crashed BO2 once)"
-grep -B1 -A5 'hang-detect' "$R/config/patch_config.yml" | grep -q 'Enabled: true' && p PASS "hang-detect NOP patch on" || p WARN "hang-detect patch not enabled"
+[ "$(g 'Disable SPU GETLLAR Spin Optimization')" = true ] && p PASS "GETLLAR spin optimization disabled (BO2 pack)" || p WARN "GETLLAR spin optimization still enabled"
+# Softlock force-complete is the long-term default (2026-10-11): hang-detect alone
+# leaves main_thread stuck at 0x73d6f8. Do not flip this back to "PASS when OFF".
+grep -A6 'force SPURS wait complete' "$R/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true' \
+  && p PASS "SPURS softlock force-complete patch ON (default)" \
+  || p FAIL "SPURS softlock force-complete patch OFF — run contrib/rpcs3-bo2-splitscreen/install.sh"
+grep -B1 -A5 'hang-detect' "$R/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true' \
+  && p PASS "hang-detect NOP patch on" \
+  || p FAIL "hang-detect patch not enabled — run contrib/rpcs3-bo2-splitscreen/install.sh"
 tl=$(tasklist.exe 2>&1 | tr -d '\r'); if grep -q 'UtilAcceptVsock\|accept4' <<<"$tl"; then p WARN "WSL<->Windows interop failing right now (native watcher still works)"; else grep -qi '^rpcs3.exe' <<<"$tl" && p PASS "RPCS3 running" || p WARN "RPCS3 not running"; fi
 n=$(powershell.exe -NoProfile -Command "(Get-CimInstance Win32_Process | ? { \$_.CommandLine -match 'rpcs3-stall-watch\.ps1' } | measure).Count" 2>&1 | tr -d '\r' | tail -1)
 [ "${n:-0}" -ge 1 ] 2>/dev/null && p PASS "Windows-native stall watcher running" || p FAIL "native stall watcher NOT running: tools/rpcs3-debug/start-windows-watcher.sh"
