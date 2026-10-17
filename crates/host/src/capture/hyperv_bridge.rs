@@ -38,6 +38,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd};
 use std::time::{Duration, Instant};
 use vsock::{VsockStream, VMADDR_CID_HOST};
 
+use super::bridge::FIRST_FRAME_GRACE;
 use super::Captured;
 
 const IDLE_POLL: Duration = Duration::from_millis(2);
@@ -398,8 +399,19 @@ impl HyperVBridge {
                 // win-capture leaves the vsock stream open and just stops
                 // sending, so no read error is ever raised to trip
                 // `maybe_respawn` on its own.
+                //
+                // Cold start shares the TCP path's `FIRST_FRAME_GRACE`:
+                // `session_started_at` covers a quick post-accept handshake, but
+                // not a first-ever frame that needs longer than FRAME_STALE_AFTER
+                // to exist — and a wrong "hung" call is unrecoverable here too,
+                // since `last_frame_at` is never re-seeded on reconnect.
                 let healthy_at = self.last_frame_at.max(self.session_started_at);
-                if healthy_at.elapsed() >= FRAME_STALE_AFTER {
+                let threshold = if self.frames_received == 0 {
+                    FIRST_FRAME_GRACE
+                } else {
+                    FRAME_STALE_AFTER
+                };
+                if healthy_at.elapsed() >= threshold {
                     tracing::warn!(
                         "no frame from win-capture in {:?} (Hyper-V socket still open — \
                          likely hung, not disconnected) — treating as dead",
