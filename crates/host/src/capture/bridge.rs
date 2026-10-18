@@ -125,6 +125,11 @@ pub struct WindowsBridge {
     /// its first frame — without treating accept itself as "healthy" (that
     /// was the black-WebCodecs hang: refreshing `last_frame_at` on accept).
     session_started_at: Instant,
+    /// True once THIS accepted socket has delivered a frame. `frames_received` cannot serve: the stats reporter drains it every
+    /// window (`take_received`), so it reads 0 whenever no frame landed since the last tick. PR #100 keyed the cold-start grace on
+    /// it, and a respawned win-capture (new socket, needs >1.5s for its first NAL) was killed again and again: 34s of outage on
+    /// 2026-10-17 03:16 (reconnect, "no frame in 1.5s", FORCE-kill, reconnect, ...).
+    session_got_frame: bool,
     /// See `HyperVBridge::ever_connected` — same startup/picker race.
     ever_connected: bool,
     /// See `HyperVBridge::pending_audio` — same demux, same cap.
@@ -188,6 +193,7 @@ impl WindowsBridge {
             last_respawn: None,
             last_frame_at: now,
             session_started_at: now,
+            session_got_frame: false,
             ever_connected,
             pending_audio: VecDeque::new(),
         })
@@ -255,6 +261,7 @@ impl WindowsBridge {
                 // Grace for first frame on this socket — do not touch
                 // last_frame_at / disconnected_at (hung writer must still trip).
                 self.session_started_at = Instant::now();
+                self.session_got_frame = false;
                 true
             }
             Err(_) => false,
@@ -344,6 +351,7 @@ impl WindowsBridge {
             self.last = None;
         }
         self.frames_received += 1;
+        self.session_got_frame = true;
         Ok(Some(info))
     }
 
@@ -503,7 +511,7 @@ impl WindowsBridge {
                 //
                 // So before the first frame ever lands, hold the wider net.
                 let healthy_at = self.last_frame_at.max(self.session_started_at);
-                let threshold = if self.frames_received == 0 {
+                let threshold = if !self.session_got_frame {
                     FIRST_FRAME_GRACE
                 } else {
                     FRAME_STALE_AFTER
@@ -648,6 +656,7 @@ mod tests {
             keyframe: false,
             target: None,
             frames_received: 1, // was healthy, then went silent (real hang signature)
+            session_got_frame: true,
             disconnected_at: Some(outage_start),
             last_respawn: None,
             last_frame_at: stale,
@@ -689,12 +698,25 @@ mod tests {
             "silent reconnect must not refresh last_frame_at"
         );
 
-        // After FRAME_STALE_AFTER with no frame → FORCE relaunch.
+        // A NEW session that has not delivered its first frame gets FIRST_FRAME_GRACE, not FRAME_STALE_AFTER: a respawned
+        // win-capture needs longer than 1.5s to produce its first NAL, and killing it at 1.5s looped for 34s (live 2026-10-17 03:16).
         std::thread::sleep(FRAME_STALE_AFTER + Duration::from_millis(50));
         let _ = bridge.capture();
         assert!(
+            bridge.stream.is_some() && bridge.last_respawn.is_none(),
+            "a new session must not be FORCE-killed before its first frame within FIRST_FRAME_GRACE"
+        );
+        assert!(
+            bridge.last_frame_at == last_before && bridge.disconnected_at.is_some(),
+            "and the silent reconnect still must not mark the capture healthy"
+        );
+        // Once THIS session has delivered a frame and then goes silent, the strict FRAME_STALE_AFTER applies again.
+        bridge.session_got_frame = true;
+        bridge.session_started_at = Instant::now() - (FRAME_STALE_AFTER + Duration::from_millis(50));
+        let _ = bridge.capture();
+        assert!(
             bridge.last_respawn.is_some(),
-            "hung-alive must FORCE-respawn once session grace elapses with no frame"
+            "hung-alive must FORCE-respawn when a session that had frames goes silent"
         );
 
         writer.join().unwrap();
@@ -745,6 +767,7 @@ mod tests {
             last_respawn: None,
             last_frame_at: stale,
             session_started_at: stale,
+            session_got_frame: false,
             ever_connected: true,
             pending_audio: VecDeque::new(),
         };
@@ -805,6 +828,7 @@ mod tests {
             last_respawn: None,
             last_frame_at: Instant::now(),
             session_started_at: Instant::now(),
+            session_got_frame: false,
             ever_connected: false,
             pending_audio: VecDeque::new(),
         };

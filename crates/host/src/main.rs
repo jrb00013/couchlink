@@ -905,7 +905,11 @@ async fn main() -> Result<()> {
                                 freeze_count_delta,
                             );
                             if loss_congested {
-                                link_gov.note_client_loss();
+                                if link_gov::client_report_is_severe(packets_lost_delta, packets_received_delta) {
+                                    link_gov.note_severe_client_loss();
+                                } else {
+                                    link_gov.note_client_loss();
+                                }
                                 info!(
                                     "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
                                      {freeze_count_delta} freeze(s), jb {jitter_buffer_ms}ms — \

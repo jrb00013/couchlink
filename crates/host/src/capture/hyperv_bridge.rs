@@ -90,6 +90,8 @@ pub struct HyperVBridge {
     last_frame_at: Instant,
     /// See `bridge::WindowsBridge::session_started_at` — same first-frame grace.
     session_started_at: Instant,
+    /// See `bridge::WindowsBridge::session_got_frame` (the stats reporter drains `frames_received`, so it cannot mark first frame).
+    session_got_frame: bool,
     /// Floor between non-blocking connect attempts so the host select loop
     /// is not spent inside `poll(250ms)` on every idle tick while win-capture
     /// is still coming up.
@@ -165,6 +167,7 @@ impl HyperVBridge {
             last_respawn: None,
             last_frame_at: Instant::now(),
             session_started_at: Instant::now(),
+            session_got_frame: false,
             last_connect_attempt: None,
             ever_connected,
             wait_ns: 0,
@@ -214,6 +217,7 @@ impl HyperVBridge {
         self.stream = Some(stream);
         self.ever_connected = true;
         self.session_started_at = Instant::now();
+        self.session_got_frame = false;
         true
     }
 
@@ -267,6 +271,7 @@ impl HyperVBridge {
                 self.last = None;
             }
             self.frames_received += 1;
+            self.session_got_frame = true;
             return Ok(Some(info));
         }
         // Drained 16 audio frames without a video frame showing up — give the
@@ -406,7 +411,7 @@ impl HyperVBridge {
                 // to exist — and a wrong "hung" call is unrecoverable here too,
                 // since `last_frame_at` is never re-seeded on reconnect.
                 let healthy_at = self.last_frame_at.max(self.session_started_at);
-                let threshold = if self.frames_received == 0 {
+                let threshold = if !self.session_got_frame {
                     FIRST_FRAME_GRACE
                 } else {
                     FRAME_STALE_AFTER
