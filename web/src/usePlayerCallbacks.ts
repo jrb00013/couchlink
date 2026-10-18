@@ -16,6 +16,7 @@ export function usePlayerCallbacks(handlers: {
   onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: PlayerCallbacks["onStreamInfo"];
   onHostStats?: PlayerCallbacks["onHostStats"];
+  onHostBattery?: PlayerCallbacks["onHostBattery"];
   onPadStats?: PlayerCallbacks["onPadStats"];
   onRegistered?: PlayerCallbacks["onRegistered"];
   onPlayersStatus?: PlayerCallbacks["onPlayersStatus"];
@@ -39,6 +40,7 @@ export function usePlayerCallbacks(handlers: {
         handlersRef.current.onPresentPath?.(path, detail),
       onStreamInfo: (info) => handlersRef.current.onStreamInfo?.(info),
       onHostStats: (stats) => handlersRef.current.onHostStats?.(stats),
+      onHostBattery: (b) => handlersRef.current.onHostBattery?.(b),
       onPadStats: (hz, name) => handlersRef.current.onPadStats?.(hz, name),
       onRegistered: (slot) => handlersRef.current.onRegistered?.(slot),
       onPlayersStatus: (occupied, max) =>
