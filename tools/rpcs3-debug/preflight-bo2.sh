@@ -12,7 +12,7 @@ c=$(strings -a "$exe" | grep -c 'PPU reservation contention'); [ "$c" -gt 0 ] &&
 cfg="$R/config/custom_configs/config_BLUS31011.yml"
 g() { tr -d '\r' < "$cfg" | sed -n "s/^  $1: //p" | head -1; }
 [ "$(g 'Multithreaded RSX')" = false ] && p PASS "MT RSX off" || p FAIL "MT RSX not off (BO2 menu softlock)"
-[ "$(g 'Disable SPU GETLLAR Spin Optimization')" = true ] && p PASS "GETLLAR spin optimization disabled (BO2 pack)" || p WARN "GETLLAR spin optimization still enabled"
+[ "$(g 'Disable SPU GETLLAR Spin Optimization')" = false ] && p PASS "GETLLAR spin optimization on (default; PR #84 pack)" || p WARN "GETLLAR spin optimization disabled (pack default is on, PR #84)"
 # Softlock force-complete must stay OFF (2026-10-11-213130 GUEST_STALL). play22
 # fixes Secondary stwcx starvation; re-enabling force-complete causes semaphore deadlock.
 grep -A6 'force SPURS wait complete' "$R/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true' \
