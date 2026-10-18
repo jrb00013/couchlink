@@ -721,11 +721,18 @@ export class CouchlinkPlayer {
     if (this.mediaRecoverTimer || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (this.mediaHealthy) {
-      clog("ICE blip while video healthy — waiting before recover", reason);
+    // Soft ICE blip: keep the UI on "connected" and leave WebCodecs/RTP alive.
+    // Emitting waiting_host + "Media lost" made App.tsx stop the decoder immediately
+    // even when ICE self-healed — friend had to refresh (Ricardo 2026-10-10).
+    const softBlip =
+      this.mediaHealthy &&
+      (reason.includes("disconnected") || reason === "connection disconnected");
+    if (softBlip) {
+      clog("ICE blip while video healthy — waiting before recover (no Media lost UI)", reason);
+    } else {
+      cwarn("scheduling media recover", reason);
+      this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     }
-    cwarn("scheduling media recover", reason);
-    this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     this.mediaRecoverTimer = window.setTimeout(() => {
       this.mediaRecoverTimer = null;
       this.mediaHealthy = false;
@@ -735,7 +742,20 @@ export class CouchlinkPlayer {
         send(this.ws, { type: "request_offer" });
         this.cb.onState("waiting_host", "Recovering media…");
       }
-    }, this.mediaHealthy ? MEDIA_RECOVER_DELAY_MS : MEDIA_RECOVER_DELAY_COLD_MS);
+    }, this.mediaHealthy || softBlip ? MEDIA_RECOVER_DELAY_MS : MEDIA_RECOVER_DELAY_COLD_MS);
+  }
+
+  /** Restore connected UI after a soft blip healed without tearing media down. */
+  private clearMediaRecoverIfHealed(via: string) {
+    if (this.mediaRecoverTimer) {
+      clog(`${via} — cancelling media recover timer`);
+      clearTimeout(this.mediaRecoverTimer);
+      this.mediaRecoverTimer = null;
+    }
+    if (this.gotVideoTrack || this.webcodecsPath) {
+      this.mediaHealthy = true;
+      this.cb.onState("connected", "media restored");
+    }
   }
 
   private async applyRemoteOffer(sdp: string, epoch: number) {
@@ -821,14 +841,10 @@ export class CouchlinkPlayer {
       clog("pc.connectionState", pc.connectionState);
       if (pc.connectionState === "connected") {
         // Authoritative healthy signal — both ICE and DTLS are up.
-        this.mediaHealthy = this.gotVideoTrack;
-        if (this.mediaRecoverTimer) {
-          clearTimeout(this.mediaRecoverTimer);
-          this.mediaRecoverTimer = null;
-        }
+        this.clearMediaRecoverIfHealed("connection restored");
       } else if (pc.connectionState === "disconnected") {
         // Transient loss — schedule a recover with the full grace period.
-        // If ICE self-heals the timer will be cancelled before it fires.
+        // Soft blip: no Media lost UI (keeps WebCodecs painted).
         this.scheduleMediaRecover("connection disconnected");
       } else if (pc.connectionState === "failed") {
         cwarn("WebRTC connection failed — scheduling recover");
@@ -838,29 +854,28 @@ export class CouchlinkPlayer {
     pc.oniceconnectionstatechange = () => {
       clog("pc.iceConnectionState", pc.iceConnectionState);
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        // ICE layer is up — mark healthy and cancel any pending recover timer.
-        // connectionState may lag behind iceConnectionState on some browsers.
-        this.mediaHealthy = this.gotVideoTrack;
-        if (this.mediaRecoverTimer) {
-          clog("ICE reconnected — cancelling media recover timer");
-          clearTimeout(this.mediaRecoverTimer);
-          this.mediaRecoverTimer = null;
+        // ICE layer is up — cancel pending recover; connectionState may lag.
+        this.clearMediaRecoverIfHealed("ICE reconnected");
+        if (this.iceDisconnectTimer) {
+          clearTimeout(this.iceDisconnectTimer);
+          this.iceDisconnectTimer = null;
         }
       } else if (pc.iceConnectionState === "disconnected") {
         cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
-        // "disconnected" = browser's consent-freshness pings stopped being answered.
-        // A NAT rebind or brief drop on a live direct P2P path (srflx/srflx) does
-        // exactly this. restartIce() is far cheaper than waiting for `failed` to
-        // trigger a full signaling round-trip — try it after a 4s grace period.
+        // Answerer restartIce() alone cannot renegotiate — after 4s ask the host
+        // for an ICE-restart offer (create_and_send_offer_ice_restart).
         if (!this.iceDisconnectTimer) {
           this.iceDisconnectTimer = window.setTimeout(() => {
             this.iceDisconnectTimer = null;
             if (this.pc?.iceConnectionState !== "disconnected") return;
-            clog("ICE still disconnected after grace — restarting ICE");
+            clog("ICE still disconnected after grace — requesting host ICE-restart offer");
             try {
               this.pc.restartIce();
             } catch (e) {
               cwarn("restartIce failed", String(e));
+            }
+            if (this.ws?.readyState === WebSocket.OPEN) {
+              send(this.ws, { type: "request_offer" });
             }
           }, 4000);
         }
@@ -872,7 +887,7 @@ export class CouchlinkPlayer {
         cwarn("ICE failed — scheduling recover", pc.iceConnectionState);
         this.scheduleMediaRecover("ICE failed");
       } else {
-        // connected / completed / closed — cancel any pending ICE restart timer
+        // checking / closed — cancel any pending ICE restart timer
         if (this.iceDisconnectTimer) {
           clearTimeout(this.iceDisconnectTimer);
           this.iceDisconnectTimer = null;
