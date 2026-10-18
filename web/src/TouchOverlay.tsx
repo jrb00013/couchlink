@@ -1,12 +1,9 @@
 /**
  * On-screen touch controller for the mobile layout.
  *
- * Renders two dynamic-origin stick zones (left half / right half) plus
- * hit-testable button clusters (D-pad, face buttons, shoulders, triggers,
- * Options/Create). The same element is used in two placements:
- *
- *  - docked: in normal flow below the video (not fullscreen), full opacity
- *  - overlay: absolutely over the stage during fullscreen, low opacity
+ * Cloud-streaming style: always a translucent overlay on the video
+ * (portrait and landscape). Two dynamic-origin stick zones plus D-pad,
+ * face, shoulder/trigger, and Options/Create clusters.
  *
  * The underlying {@link TouchGamepadInput} converts touches into the same
  * DualSense-shaped PadState the keyboard/mouse source produces, so the host
