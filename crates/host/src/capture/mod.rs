@@ -246,6 +246,68 @@ pub(crate) fn respawn_windows_capture() {
     }
 }
 
+/// Synchronously force win-capture to relaunch against whatever
+/// `capture_window_override` currently holds. Unlike `respawn_windows_capture`
+/// (fire-and-forget, called from the frame-loop hot path), this is called
+/// from a `spawn_blocking` in response to `SwitchCaptureWindow` and waiting
+/// for it is fine — the caller has nothing else to do until it's done anyway.
+pub fn force_switch_capture_window(root: &std::path::Path) -> Result<()> {
+    let script = root.join("scripts/ensure-win-capture.sh");
+    if !script.is_file() {
+        bail!("ensure-win-capture.sh not found under {}", root.display());
+    }
+    let status = respawn_command(root, &script, None).status()?;
+    if !status.success() {
+        bail!("ensure-win-capture.sh exited with {status}");
+    }
+    Ok(())
+}
+
+/// Every visible top-level Windows window's title, for the in-page window
+/// switcher (`SignalMessage::RequestCaptureWindows`). Best-effort: an empty
+/// list on any failure (no `powershell.exe`, not WSL, …) just leaves the
+/// switcher overlay empty rather than erroring the whole request.
+pub fn list_capturable_windows() -> Vec<String> {
+    if !is_wsl() {
+        return Vec::new();
+    }
+    const SCRIPT: &str = r#"
+Add-Type @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class CLWin {
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+}
+'@
+$titles = New-Object System.Collections.Generic.List[string]
+[CLWin]::EnumWindows({ param($h,$l)
+  if ([CLWin]::IsWindowVisible($h)) {
+    $sb = New-Object System.Text.StringBuilder 256
+    [CLWin]::GetWindowText($h,$sb,256) | Out-Null
+    if ($sb.Length -gt 0) { $titles.Add($sb.ToString()) }
+  }
+  $true
+}, [IntPtr]::Zero) | Out-Null
+$titles
+"#;
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", SCRIPT])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Build (but do not spawn) the unattended win-capture relaunch. Split from
 /// `respawn_windows_capture` so tests can assert on the environment without
 /// actually launching PowerShell.
@@ -257,6 +319,19 @@ pub(crate) fn respawn_windows_capture() {
 /// stream silently returning as whole-desktop capture. A source pinned via
 /// `COUCHLINK_CAPTURE_SOURCE` (desktop / window / …) is still honoured exactly.
 fn respawn_command(root: &std::path::Path, script: &std::path::Path, configured: Option<String>) -> std::process::Command {
+    // A live in-page window switch (`SwitchCaptureWindow`, see main.rs) writes
+    // this file instead of touching the host's own env, which is frozen at
+    // process launch. Without it, this respawn — which the host's own
+    // self-heal fires within seconds of the switch killing the old capture —
+    // would relaunch with the *old* target from its inherited environment,
+    // silently reverting the switch. Present and non-empty always wins over
+    // both the inherited env and the caller-supplied `configured` source.
+    let override_window = capture_window_override(root);
+    let configured = if override_window.is_some() {
+        Some("window".to_string())
+    } else {
+        configured
+    };
     let mut cmd = std::process::Command::new("bash");
     cmd.arg(script)
         .current_dir(root)
@@ -274,7 +349,50 @@ fn respawn_command(root: &std::path::Path, script: &std::path::Path, configured:
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    if let Some(window) = override_window {
+        cmd.env("COUCHLINK_CAPTURE_WINDOW", window);
+    }
     cmd
+}
+
+/// Path to the live window-switch override file, under the gitignored
+/// `.run/` dir so it never gets committed or survives a fresh checkout.
+fn capture_window_override_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(".run/capture-window-override")
+}
+
+/// Reads the live override written by `SwitchCaptureWindow`, if any and
+/// non-empty. `None` means "no live override" — everything falls back to
+/// whatever `COUCHLINK_CAPTURE_WINDOW` the host was launched with, same as
+/// before this existed.
+fn capture_window_override(root: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(capture_window_override_path(root)).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Writes (or clears, with `None`) the live window-switch override so the
+/// *next* respawn — including the one the host's own self-heal fires within
+/// seconds of this same call's caller killing the old capture — targets the
+/// new window instead of reverting to the launch-time env.
+pub fn set_capture_window_override(root: &std::path::Path, window: Option<&str>) -> Result<()> {
+    let path = capture_window_override_path(root);
+    match window {
+        Some(w) if !w.trim().is_empty() => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, w)?;
+        }
+        _ => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
 }
 
 /// Which capture source a respawned win-capture should use.

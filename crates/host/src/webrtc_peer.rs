@@ -732,11 +732,42 @@ impl WebRtcHost {
         let _ = self.video_dc.send(&buf.freeze()).await;
     }
 
+    /// Create and send an SDP offer.
+    ///
+    /// `ice_restart`: when true (player `request_offer` after an ICE blip), mint
+    /// new ICE credentials so the renegotiation can re-select srflx/TURN.
+    /// Answerer-only `pc.restartIce()` in the browser is a no-op without this —
+    /// live (Ricardo 2026-10-10): Media lost stuck until a full page refresh.
     pub async fn create_and_send_offer(
         &self,
         signal_out: &mpsc::UnboundedSender<SignalMessage>,
     ) -> Result<()> {
-        let offer = self.pc.create_offer(None).await?;
+        self.create_and_send_offer_with(signal_out, false).await
+    }
+
+    pub async fn create_and_send_offer_ice_restart(
+        &self,
+        signal_out: &mpsc::UnboundedSender<SignalMessage>,
+    ) -> Result<()> {
+        self.create_and_send_offer_with(signal_out, true).await
+    }
+
+    async fn create_and_send_offer_with(
+        &self,
+        signal_out: &mpsc::UnboundedSender<SignalMessage>,
+        ice_restart: bool,
+    ) -> Result<()> {
+        use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
+        let offer = if ice_restart {
+            self.pc
+                .create_offer(Some(RTCOfferOptions {
+                    ice_restart: true,
+                    voice_activity_detection: false,
+                }))
+                .await?
+        } else {
+            self.pc.create_offer(None).await?
+        };
         self.pc.set_local_description(offer).await?;
         let local = self
             .pc
@@ -744,6 +775,13 @@ impl WebRtcHost {
             .await
             .context("local description")?;
         let epoch = self.offer_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        if ice_restart {
+            warn!(
+                slot = self.player_slot.load(Ordering::Relaxed),
+                epoch,
+                "offer with ICE restart (player request_offer)"
+            );
+        }
         signal_out.send(SignalMessage::Offer {
             sdp: local.sdp,
             epoch,

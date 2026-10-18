@@ -24,7 +24,7 @@ couchlink_read_public_ipv6() {
     fi
   fi
   if command -v powershell.exe >/dev/null 2>&1; then
-    v6="$(powershell.exe -NoProfile -Command \
+    v6="$(powershell.exe -NoProfile -WindowStyle Hidden -Command \
       "(Get-NetIPAddress -AddressFamily IPv6 | Where-Object { \$_.AddressState -eq 'Preferred' -and \$_.InterfaceAlias -notmatch 'WSL|vEthernet|Loopback|Bluetooth' -and \$_.IPAddress -match '^[23]' -and \$_.IPAddress -notlike 'fd*' } | Sort-Object @{e={ if (\$_.PrefixOrigin -eq 'Dhcp') {0} elseif (\$_.SuffixOrigin -eq 'Link') {1} else {2} }} | Select-Object -First 1 -ExpandProperty IPAddress)" \
       2>/dev/null | tr -d ' \r\n')"
     if [[ "$v6" =~ ^[23] ]]; then

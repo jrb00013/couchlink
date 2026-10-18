@@ -342,9 +342,11 @@ async fn route_slot_msg(
         }
         SignalMessage::RequestOffer { slot } => {
             if let Some(conn) = slots.lock().await.get(&slot) {
-                info!("player requested offer (slot {slot}, renegotiate, no peer rebuild)");
+                // ICE-restart offer: browser is the answerer so its restartIce()
+                // alone cannot renegotiate; host must mint new ICE credentials.
+                warn!("player requested offer (slot {slot}, ICE-restart renegotiate)");
                 *force_idr = true;
-                if let Err(e) = conn.host.create_and_send_offer(signal_out).await {
+                if let Err(e) = conn.host.create_and_send_offer_ice_restart(signal_out).await {
                     warn!("request_offer failed: {e}");
                 }
             } else {
@@ -883,6 +885,35 @@ async fn main() -> Result<()> {
                             }
                             split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                         }
+                        SignalMessage::RequestCaptureWindows { slot } => {
+                            let signal_out = signal_out.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let windows = capture::list_capturable_windows();
+                                let _ = signal_out.send(SignalMessage::CaptureWindowList {
+                                    windows,
+                                    slot,
+                                });
+                            });
+                        }
+                        SignalMessage::SwitchCaptureWindow { title, slot } => {
+                            info!("slot {slot}: live capture switch requested -> {title:?}");
+                            tokio::task::spawn_blocking(move || {
+                                let Ok(root) = std::env::var("COUCHLINK_ROOT") else {
+                                    warn!("live capture switch: COUCHLINK_ROOT unset");
+                                    return;
+                                };
+                                let root = std::path::Path::new(&root);
+                                if let Err(e) =
+                                    capture::set_capture_window_override(root, Some(&title))
+                                {
+                                    warn!("could not write capture window override: {e:#}");
+                                    return;
+                                }
+                                if let Err(e) = capture::force_switch_capture_window(root) {
+                                    warn!("live capture switch failed: {e:#}");
+                                }
+                            });
+                        }
                         SignalMessage::PresentPath { path, slot } => {
                             if let Some(conn) = slots.lock().await.get(&slot) {
                                 conn.host.set_present_path(&path);
@@ -906,42 +937,50 @@ async fn main() -> Result<()> {
                             );
                             if loss_congested {
                                 link_gov.note_client_loss();
-                                info!(
+                                // warn: COUCHLINK_VERBOSE=0 filters info! — need this live.
+                                warn!(
                                     "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
                                      {freeze_count_delta} freeze(s), jb {jitter_buffer_ms}ms — \
-                                     link governor stepping down",
+                                     link governor marking window bad",
                                     packets_lost_delta.saturating_add(packets_received_delta)
                                 );
                             }
                             // See the SignalMessage doc comment: this is the only
                             // congestion signal the governor gets once RTP is the
                             // live present path, since RTP sends never shed on
-                            // their own. Feed drops into `dropped_frames`; also
-                            // treat catastrophic RTT as congestion (live case:
-                            // drop_pct=0 host-side while friend rtt≈862ms felt frozen).
-                            const RTT_CONGESTION_MS: u32 = 250;
-                            let mut reacted = false;
+                            // their own. Feed drops into `dropped_frames`.
                             if frames_dropped_delta > 0 {
                                 dropped_frames += frames_dropped_delta as u64;
                                 link_gov.note_client_congestion();
-                                reacted = true;
-                                info!(
+                                warn!(
                                     "slot {slot}: client reports {frames_dropped_delta} frame(s) \
                                      dropped, jitter buffer {jitter_buffer_ms}ms — counted toward \
                                      link governor"
                                 );
                             }
-                            if rtt_ms >= RTT_CONGESTION_MS {
-                                // Synthetic shed so on_window sees pressure even when
-                                // the browser isn't dropping (input lag / surplus blowout).
+                            // RTT is the load-bearing signal when host shed is 0% but
+                            // the friend's ICE RTT has ballooned (Ricardo 8112ms live).
+                            // note_client_rtt marks the window bad + holds climb; slam
+                            // on catastrophic RTT applies the bitrate floor immediately.
+                            if let Some(slam) = link_gov.note_client_rtt(rtt_ms) {
+                                commanded_target = slam.clone();
+                                capturer.set_target(slam.clone());
+                                warn!(
+                                    "slot {slot}: client rtt {rtt_ms}ms (≥{} slam) — commanded \
+                                     encoder {}x{}@{} ({} kbps) immediately (jb={jitter_buffer_ms}ms)",
+                                    link_gov::RTT_SLAM_MS,
+                                    slam.width,
+                                    slam.height,
+                                    slam.fps,
+                                    slam.bitrate_kbps
+                                );
+                            } else if rtt_ms >= link_gov::RTT_CONGESTION_MS {
                                 dropped_frames += 8;
-                                link_gov.note_client_congestion();
-                                if !reacted {
-                                    info!(
-                                        "slot {slot}: client rtt {rtt_ms}ms (≥{RTT_CONGESTION_MS}) \
-                                         — treating as link congestion (jb={jitter_buffer_ms}ms)"
-                                    );
-                                }
+                                warn!(
+                                    "slot {slot}: client rtt {rtt_ms}ms (≥{}) — marking link \
+                                     congested (jb={jitter_buffer_ms}ms)",
+                                    link_gov::RTT_CONGESTION_MS
+                                );
                             }
                             // Recover *now* — waiting for the next 5s gov window
                             // + periodic IDR left friends on "Media lost" for
@@ -1054,7 +1093,8 @@ async fn main() -> Result<()> {
                                     if decided != commanded_target {
                                         commanded_target = decided;
                                         capturer.set_target(decided.clone());
-                                        info!(
+                                        // warn so COUCHLINK_VERBOSE=0 still surfaces steps.
+                                        warn!(
                                             "link governor: commanded encoder {}x{}@{} ({} kbps) after {}% sheds",
                                             decided.width, decided.height, decided.fps,
                                             decided.bitrate_kbps, drop_pct

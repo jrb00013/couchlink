@@ -236,7 +236,99 @@ export class CouchlinkPlayer {
     playoutDelayHint?: number | null;
   }) | null = null;
 
-  constructor(private cb: PlayerCallbacks) {}
+  /** Window-switcher overlay DOM, while open. */
+  private switcherEl: HTMLDivElement | null = null;
+
+  constructor(private cb: PlayerCallbacks) {
+    // Deliberately obscure: three modifiers + a letter no game binds. A
+    // DualSense/gamepad physically cannot produce a keydown at all, so a
+    // controller player can never trigger this by accident; a keyboard+mouse
+    // player would have to hold Ctrl+Shift+Alt and press K at the same
+    // time, which no game (and no OS shortcut) uses — if this fires, it was
+    // on purpose. See SignalMessage::RequestCaptureWindows's doc comment.
+    window.addEventListener("keydown", (ev) => {
+      if (ev.ctrlKey && ev.shiftKey && ev.altKey && ev.key.toLowerCase() === "k") {
+        ev.preventDefault();
+        this.requestWindowSwitcher();
+      }
+    });
+  }
+
+  private requestWindowSwitcher() {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    clog("signal → request_capture_windows");
+    send(this.ws, { type: "request_capture_windows" });
+  }
+
+  private closeWindowSwitcherOverlay() {
+    this.switcherEl?.remove();
+    this.switcherEl = null;
+  }
+
+  private showWindowSwitcherOverlay(windows: string[]) {
+    this.closeWindowSwitcherOverlay();
+    const backdrop = document.createElement("div");
+    backdrop.style.cssText =
+      "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.72);" +
+      "display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;";
+    backdrop.addEventListener("click", (ev) => {
+      if (ev.target === backdrop) this.closeWindowSwitcherOverlay();
+    });
+
+    const panel = document.createElement("div");
+    panel.style.cssText =
+      "background:#1b1b1f;color:#eee;border-radius:10px;padding:16px 18px;" +
+      "min-width:320px;max-width:min(560px,90vw);max-height:70vh;overflow:auto;" +
+      "box-shadow:0 8px 32px rgba(0,0,0,0.5);";
+
+    const title = document.createElement("div");
+    title.textContent = "Switch capture window";
+    title.style.cssText = "font-size:15px;font-weight:600;margin-bottom:10px;";
+    panel.appendChild(title);
+
+    if (windows.length === 0) {
+      const empty = document.createElement("div");
+      empty.textContent = "No windows reported by the host.";
+      empty.style.cssText = "opacity:0.7;font-size:13px;";
+      panel.appendChild(empty);
+    }
+
+    for (const w of windows) {
+      const btn = document.createElement("button");
+      btn.textContent = w;
+      btn.style.cssText =
+        "display:block;width:100%;text-align:left;background:#2a2a30;color:#eee;" +
+        "border:1px solid #3a3a42;border-radius:6px;padding:8px 10px;margin:4px 0;" +
+        "font-size:13px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      btn.addEventListener("mouseenter", () => (btn.style.background = "#35353d"));
+      btn.addEventListener("mouseleave", () => (btn.style.background = "#2a2a30"));
+      btn.addEventListener("click", () => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          clog("signal → switch_capture_window", w);
+          send(this.ws, { type: "switch_capture_window", title: w });
+        }
+        this.closeWindowSwitcherOverlay();
+      });
+      panel.appendChild(btn);
+    }
+
+    const hint = document.createElement("div");
+    hint.textContent = "Esc or click outside to cancel";
+    hint.style.cssText = "opacity:0.5;font-size:11px;margin-top:8px;";
+    panel.appendChild(hint);
+
+    backdrop.appendChild(panel);
+    document.body.appendChild(backdrop);
+    this.switcherEl = backdrop;
+
+    const onEscape = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") {
+        this.closeWindowSwitcherOverlay();
+        window.removeEventListener("keydown", onEscape);
+      }
+    };
+    window.addEventListener("keydown", onEscape);
+  }
 
   setTurn(turn: { url: string; user: string; pass: string } | null) {
     this.turn = turn;
@@ -721,11 +813,18 @@ export class CouchlinkPlayer {
     if (this.mediaRecoverTimer || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (this.mediaHealthy) {
-      clog("ICE blip while video healthy — waiting before recover", reason);
+    // Soft ICE blip: keep the UI on "connected" and leave WebCodecs/RTP alive.
+    // Emitting waiting_host + "Media lost" made App.tsx stop the decoder immediately
+    // even when ICE self-healed — friend had to refresh (Ricardo 2026-10-10).
+    const softBlip =
+      this.mediaHealthy &&
+      (reason.includes("disconnected") || reason === "connection disconnected");
+    if (softBlip) {
+      clog("ICE blip while video healthy — waiting before recover (no Media lost UI)", reason);
+    } else {
+      cwarn("scheduling media recover", reason);
+      this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     }
-    cwarn("scheduling media recover", reason);
-    this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     this.mediaRecoverTimer = window.setTimeout(() => {
       this.mediaRecoverTimer = null;
       this.mediaHealthy = false;
@@ -735,7 +834,20 @@ export class CouchlinkPlayer {
         send(this.ws, { type: "request_offer" });
         this.cb.onState("waiting_host", "Recovering media…");
       }
-    }, this.mediaHealthy ? MEDIA_RECOVER_DELAY_MS : MEDIA_RECOVER_DELAY_COLD_MS);
+    }, this.mediaHealthy || softBlip ? MEDIA_RECOVER_DELAY_MS : MEDIA_RECOVER_DELAY_COLD_MS);
+  }
+
+  /** Restore connected UI after a soft blip healed without tearing media down. */
+  private clearMediaRecoverIfHealed(via: string) {
+    if (this.mediaRecoverTimer) {
+      clog(`${via} — cancelling media recover timer`);
+      clearTimeout(this.mediaRecoverTimer);
+      this.mediaRecoverTimer = null;
+    }
+    if (this.gotVideoTrack || this.webcodecsPath) {
+      this.mediaHealthy = true;
+      this.cb.onState("connected", "media restored");
+    }
   }
 
   private async applyRemoteOffer(sdp: string, epoch: number) {
@@ -821,14 +933,10 @@ export class CouchlinkPlayer {
       clog("pc.connectionState", pc.connectionState);
       if (pc.connectionState === "connected") {
         // Authoritative healthy signal — both ICE and DTLS are up.
-        this.mediaHealthy = this.gotVideoTrack;
-        if (this.mediaRecoverTimer) {
-          clearTimeout(this.mediaRecoverTimer);
-          this.mediaRecoverTimer = null;
-        }
+        this.clearMediaRecoverIfHealed("connection restored");
       } else if (pc.connectionState === "disconnected") {
         // Transient loss — schedule a recover with the full grace period.
-        // If ICE self-heals the timer will be cancelled before it fires.
+        // Soft blip: no Media lost UI (keeps WebCodecs painted).
         this.scheduleMediaRecover("connection disconnected");
       } else if (pc.connectionState === "failed") {
         cwarn("WebRTC connection failed — scheduling recover");
@@ -838,29 +946,28 @@ export class CouchlinkPlayer {
     pc.oniceconnectionstatechange = () => {
       clog("pc.iceConnectionState", pc.iceConnectionState);
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        // ICE layer is up — mark healthy and cancel any pending recover timer.
-        // connectionState may lag behind iceConnectionState on some browsers.
-        this.mediaHealthy = this.gotVideoTrack;
-        if (this.mediaRecoverTimer) {
-          clog("ICE reconnected — cancelling media recover timer");
-          clearTimeout(this.mediaRecoverTimer);
-          this.mediaRecoverTimer = null;
+        // ICE layer is up — cancel pending recover; connectionState may lag.
+        this.clearMediaRecoverIfHealed("ICE reconnected");
+        if (this.iceDisconnectTimer) {
+          clearTimeout(this.iceDisconnectTimer);
+          this.iceDisconnectTimer = null;
         }
       } else if (pc.iceConnectionState === "disconnected") {
         cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
-        // "disconnected" = browser's consent-freshness pings stopped being answered.
-        // A NAT rebind or brief drop on a live direct P2P path (srflx/srflx) does
-        // exactly this. restartIce() is far cheaper than waiting for `failed` to
-        // trigger a full signaling round-trip — try it after a 4s grace period.
+        // Answerer restartIce() alone cannot renegotiate — after 4s ask the host
+        // for an ICE-restart offer (create_and_send_offer_ice_restart).
         if (!this.iceDisconnectTimer) {
           this.iceDisconnectTimer = window.setTimeout(() => {
             this.iceDisconnectTimer = null;
             if (this.pc?.iceConnectionState !== "disconnected") return;
-            clog("ICE still disconnected after grace — restarting ICE");
+            clog("ICE still disconnected after grace — requesting host ICE-restart offer");
             try {
               this.pc.restartIce();
             } catch (e) {
               cwarn("restartIce failed", String(e));
+            }
+            if (this.ws?.readyState === WebSocket.OPEN) {
+              send(this.ws, { type: "request_offer" });
             }
           }, 4000);
         }
@@ -872,7 +979,7 @@ export class CouchlinkPlayer {
         cwarn("ICE failed — scheduling recover", pc.iceConnectionState);
         this.scheduleMediaRecover("ICE failed");
       } else {
-        // connected / completed / closed — cancel any pending ICE restart timer
+        // checking / closed — cancel any pending ICE restart timer
         if (this.iceDisconnectTimer) {
           clearTimeout(this.iceDisconnectTimer);
           this.iceDisconnectTimer = null;
@@ -1441,6 +1548,9 @@ export class CouchlinkPlayer {
         break;
       case "host_stats":
         this.cb.onHostStats?.(msg);
+        break;
+      case "capture_window_list":
+        this.showWindowSwitcherOverlay(msg.windows);
         break;
       case "players_status":
         this.cb.onPlayersStatus?.(msg.occupied, msg.max);

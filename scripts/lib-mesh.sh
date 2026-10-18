@@ -83,11 +83,11 @@ couchlink_windows_wireguard_ip() {
       if [[ -n "$ifaces" ]]; then
         # Prefer configured couchlink host IP if assigned on a WireGuard adapter.
         if command -v powershell.exe >/dev/null 2>&1; then
-          ip="$(powershell.exe -NoProfile -Command \
+          ip="$(powershell.exe -NoProfile -WindowStyle Hidden -Command \
             "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { \$_.InterfaceAlias -match 'WireGuard|Wintun|wg0' -and \$_.IPAddress -eq '${expect}' } | Select-Object -First 1 -ExpandProperty IPAddress" \
             2>/dev/null | tr -d ' \r\n')"
           if [[ -z "$ip" ]]; then
-            ip="$(powershell.exe -NoProfile -Command \
+            ip="$(powershell.exe -NoProfile -WindowStyle Hidden -Command \
               "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { \$_.InterfaceAlias -match 'WireGuard|Wintun' -and \$_.IPAddress -notlike '169.254*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
               2>/dev/null | tr -d ' \r\n')"
           fi
