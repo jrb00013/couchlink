@@ -64,11 +64,14 @@ const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// second trigger: if no frame has landed in this long while the socket is
 /// still nominally connected, treat it exactly like a disconnect.
 ///
-/// Was 4s — over 200 missed frames' worth of margin at 60fps. Issue #67:
-/// this generosity directly extended the visible freeze when win-capture
-/// hung. 1.5s is still ~90 missed frames of slack, far past any real jitter,
-/// while detecting the hang much sooner.
-const FRAME_STALE_AFTER: Duration = Duration::from_millis(1500);
+/// 4s. Issue #67 cut this to 1.5s to shorten the freeze on a true hang, but
+/// live play (MK, 2026-10-20) showed the cost: win-capture idle-repeats at
+/// least once a second, so a 1.5s gap is a capture hitch (GPU contention at a
+/// fight load, swapchain rebuild), and those clear by themselves in a second
+/// or two. The FORCE-respawn it triggered then cost every viewer a ~5s
+/// "paused" while the new capture initialised its encoder — much worse than
+/// the hitch it reacted to. 4s rides out a hitch and still catches a hang.
+const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
 
 /// A socket read timeout surfaces as `WouldBlock` (EAGAIN) on Unix and `TimedOut`
 /// on Windows. Both mean "no data yet", not "connection broken".
