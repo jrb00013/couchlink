@@ -144,11 +144,17 @@ try {
             # win_capture.rs. Any other non-zero code is the original case:
             # the window does not exist yet.
             if ($code -eq 75) {
-                Write-Host "Windows capture: '$Window' window closed - reattaching in 2s"
+                # Reattach almost immediately. The host relaunches win-capture
+                # itself once the link has been down 2s (RESPAWN_AFTER), and that
+                # relaunch kills this launcher too: a 2s sleep here raced it, so
+                # one window recreate in MK (2026-10-20) became ~35s of
+                # kill/restart churn and repeated "paused" for every viewer.
+                Write-Host "Windows capture: '$Window' window closed - reattaching"
+                Start-Sleep -Milliseconds 250
             } else {
                 Write-Host "Windows capture: no window matching '$Window' yet (exit $code) - retrying in 2s"
+                Start-Sleep -Seconds 2
             }
-            Start-Sleep -Seconds 2
         }
     } else {
         Invoke-Cap

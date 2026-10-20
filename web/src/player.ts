@@ -71,6 +71,8 @@ export interface PlayerCallbacks {
     shm_gate_trips?: boolean;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
+  /** Host PC battery, broadcast with each host stats window. */
+  onHostBattery?: (b: { percent: number; charging: boolean; ac: boolean }) => void;
   /** This browser's own assigned slot (1-based), so it can label itself
    * correctly in a per-player display instead of guessing. */
   onRegistered?: (slot: number) => void;
@@ -1441,6 +1443,13 @@ export class CouchlinkPlayer {
         break;
       case "host_stats":
         this.cb.onHostStats?.(msg);
+        break;
+      case "host_battery":
+        this.cb.onHostBattery?.({
+          percent: msg.percent,
+          charging: msg.charging ?? false,
+          ac: msg.ac ?? false,
+        });
         break;
       case "players_status":
         this.cb.onPlayersStatus?.(msg.occupied, msg.max);

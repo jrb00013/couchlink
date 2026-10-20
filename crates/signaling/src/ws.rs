@@ -345,6 +345,7 @@ pub async fn handle_socket(socket: WebSocket, store: Arc<SessionStore>) {
             // Shared stream telemetry + split-seat config fan out to every player.
             SignalMessage::StreamInfo { .. }
             | SignalMessage::HostStats { .. }
+            | SignalMessage::HostBattery { .. }
             | SignalMessage::SplitScreenConfig { .. } => {
                 if let (Some(sid), Some(Role::Host)) = (session_id.as_deref(), role) {
                     store.broadcast_to_players(sid, &text);
