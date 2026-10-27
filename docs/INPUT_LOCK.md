@@ -22,3 +22,12 @@ Use the lock before working in another window while friends are connected. A pos
 automatically whenever the captured window is not the foreground window.
 
 Co-developed with David Poindexter (@Dpoin23), Joel S. (@neutral207) and Ricardo Beale (@RiccoWrld).
+
+## Automatic focus gate (Windows companion)
+`couchlink-ds-vhid` neutralises every viewer report while the host's foreground window is a terminal or shell
+(default: WindowsTerminal, wt, OpenConsole, conhost, cmd, powershell, pwsh, wsl, wslhost, explorer), so the
+tab-closing case cannot happen even without the manual lock. It logs `viewer input BLOCKED (foreground = ...)`
+and `live again`.
+- `COUCHLINK_INPUT_BLOCK_FOREGROUND=a.exe,b.exe` replaces the block list; `off` disables the gate.
+- `COUCHLINK_INPUT_ONLY_FOREGROUND=rpcs3.exe` is strict mode: pad input only while that exe is in front.
+Takes effect when the companion is restarted (restarting it re-plugs the virtual pads).
