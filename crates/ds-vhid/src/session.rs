@@ -200,7 +200,12 @@ where
             warn!("bad DSVH magic (slot {slot})");
             break;
         }
-        let report = decode_input(&buf)?;
+        let mut report = decode_input(&buf)?;
+        if !crate::focus_gate::input_allowed() {
+            // The host is in a window that would act on controller input (terminal, shell):
+            // keep the pad alive but neutral so nothing a viewer presses lands there.
+            report = couchlink_pad::map_frame::pad_frame_to_dualsense_usb_report(&couchlink_proto::PadFrame::neutral());
+        }
         backend
             .lock()
             .unwrap()

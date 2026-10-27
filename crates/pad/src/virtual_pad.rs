@@ -127,7 +127,16 @@ impl VirtualPad {
         }
     }
 
+    /// Inject a viewer frame. While the host's input lock is engaged the frame is replaced by
+    /// a neutral one, so held buttons are released and nothing the viewer does reaches the host.
     pub fn apply(&mut self, frame: &PadFrame) -> Result<()> {
+        if crate::input_lock::is_locked() {
+            return self.apply_unlocked(&PadFrame::neutral());
+        }
+        self.apply_unlocked(frame)
+    }
+
+    fn apply_unlocked(&mut self, frame: &PadFrame) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
             self.inner.apply(frame)
