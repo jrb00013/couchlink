@@ -89,33 +89,36 @@ fn foreground_exe() -> Option<String> {
     None
 }
 
-/// Cached (<=100 ms) decision for the per-report path.
+/// How often the foreground window is sampled (off the report path).
+const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+static ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether pad input may reach the host right now. One relaxed atomic load on the report path;
+/// a background thread (started on first call) samples the foreground window every [`POLL`].
 pub fn input_allowed() -> bool {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-    static STATE: OnceLock<(Policy, Mutex<(Instant, bool, Option<String>)>)> = OnceLock::new();
-    let (policy, cache) = STATE.get_or_init(|| {
-        let p = policy_from_env();
-        tracing::info!("input focus gate: {p:?}");
-        (p, Mutex::new((Instant::now() - Duration::from_secs(1), true, None)))
-    });
-    if *policy == Policy::Off {
-        return true;
-    }
-    let mut c = cache.lock().unwrap();
-    if c.0.elapsed() >= Duration::from_millis(100) {
-        let exe = foreground_exe();
-        let ok = allows(policy, exe.as_deref());
-        if ok != c.1 {
-            tracing::info!(
-                "viewer input {} (foreground = {})",
-                if ok { "live again" } else { "BLOCKED" },
-                exe.as_deref().unwrap_or("?")
-            );
+    use std::sync::atomic::Ordering;
+    static POLLER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POLLER.get_or_init(|| {
+        let policy = policy_from_env();
+        tracing::info!("input focus gate: {policy:?}");
+        if policy == Policy::Off {
+            return;
         }
-        *c = (Instant::now(), ok, exe);
-    }
-    c.1
+        let _ = std::thread::Builder::new().name("focus-gate".into()).spawn(move || loop {
+            let exe = foreground_exe();
+            let ok = allows(&policy, exe.as_deref());
+            if ALLOWED.swap(ok, Ordering::Relaxed) != ok {
+                tracing::info!(
+                    "viewer input {} (foreground = {})",
+                    if ok { "live again" } else { "BLOCKED" },
+                    exe.as_deref().unwrap_or("?")
+                );
+            }
+            std::thread::sleep(POLL);
+        });
+    });
+    ALLOWED.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -128,6 +131,19 @@ mod tests {
         assert!(!allows(&p, Some("windowsterminal.exe")));
         assert!(allows(&p, Some("rpcs3.exe")));
         assert!(allows(&p, None));
+    }
+
+    #[test]
+    fn report_path_check_is_an_atomic_load() {
+        let _ = input_allowed(); // start the poller
+        let t = std::time::Instant::now();
+        let mut n = 0u32;
+        for _ in 0..1_000_000 {
+            n += input_allowed() as u32;
+        }
+        let per = t.elapsed().as_nanos() / 1_000_000;
+        assert!(per < 200, "input_allowed() took {per} ns/call");
+        assert!(n > 0);
     }
 
     #[test]

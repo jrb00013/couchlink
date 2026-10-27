@@ -4,26 +4,19 @@
 //! Windows Terminal answer D-pad/A/B by moving focus around their tab strip).
 //!
 //! The lock is a file, so a shell script, the TUI or anything else can flip it without a
-//! round trip through the host: present = locked, absent = unlocked. The host polls it
-//! at most every [`POLL_MS`] ms, so the check is cheap enough for the per-frame path.
+//! round trip through the host: present = locked, absent = unlocked. A background thread
+//! re-reads it every [`POLL_MS`] ms, so the per-frame check is a single atomic load.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Instant;
 
 use tracing::info;
 
-/// How often the lock file is re-read on the frame path.
+/// How often the lock file is re-read (off the frame path).
 const POLL_MS: u64 = 150;
 
 static LOCKED: AtomicBool = AtomicBool::new(false);
-static LAST_POLL_MS: AtomicU64 = AtomicU64::new(u64::MAX);
-
-fn epoch() -> Instant {
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
-}
 
 /// Lock file location: `COUCHLINK_INPUT_LOCK_FILE`, else `%LOCALAPPDATA%\couchlink\input.lock`
 /// on Windows, else `$XDG_RUNTIME_DIR/couchlink-input.lock` (falling back to `/tmp`).
@@ -44,14 +37,21 @@ pub fn lock_path() -> PathBuf {
     dir.join("couchlink-input.lock")
 }
 
-/// Whether viewer input is currently blocked. Cached for [`POLL_MS`].
+/// Whether viewer input is currently blocked. One relaxed atomic load: the lock file is
+/// watched by a background thread (started on first call), so the input path does no I/O.
 pub fn is_locked() -> bool {
-    let now = epoch().elapsed().as_millis() as u64;
-    let last = LAST_POLL_MS.load(Ordering::Relaxed);
-    if last != u64::MAX && now.saturating_sub(last) < POLL_MS {
-        return LOCKED.load(Ordering::Relaxed);
-    }
-    LAST_POLL_MS.store(now, Ordering::Relaxed);
+    static POLLER: OnceLock<()> = OnceLock::new();
+    POLLER.get_or_init(|| {
+        refresh();
+        let _ = std::thread::Builder::new().name("input-lock-poll".into()).spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+            refresh();
+        });
+    });
+    LOCKED.load(Ordering::Relaxed)
+}
+
+fn refresh() {
     let locked = lock_path().exists();
     if LOCKED.swap(locked, Ordering::Relaxed) != locked {
         if locked {
@@ -60,7 +60,6 @@ pub fn is_locked() -> bool {
             info!("input lock released - viewer input is live again");
         }
     }
-    locked
 }
 
 /// Engage or release the lock (creates / removes the lock file).
@@ -91,15 +90,15 @@ mod tests {
         assert_eq!(lock_path(), file);
 
         set_locked(false).unwrap();
-        LAST_POLL_MS.store(u64::MAX, Ordering::Relaxed);
+        refresh();
         assert!(!is_locked());
 
         set_locked(true).unwrap();
-        LAST_POLL_MS.store(u64::MAX, Ordering::Relaxed);
+        refresh();
         assert!(is_locked());
 
         set_locked(false).unwrap();
-        LAST_POLL_MS.store(u64::MAX, Ordering::Relaxed);
+        refresh();
         assert!(!is_locked());
         set_locked(false).unwrap(); // releasing twice is fine
         let _ = std::fs::remove_dir_all(&dir);
