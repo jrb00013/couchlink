@@ -89,36 +89,72 @@ fn foreground_exe() -> Option<String> {
     None
 }
 
-/// How often the foreground window is sampled (off the report path).
-const POLL: std::time::Duration = std::time::Duration::from_millis(50);
-
 static ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static POLICY: std::sync::OnceLock<Policy> = std::sync::OnceLock::new();
 
-/// Whether pad input may reach the host right now. One relaxed atomic load on the report path;
-/// a background thread (started on first call) samples the foreground window every [`POLL`].
-pub fn input_allowed() -> bool {
+/// Re-evaluate after the foreground window changed.
+fn on_foreground_changed() {
     use std::sync::atomic::Ordering;
-    static POLLER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    POLLER.get_or_init(|| {
-        let policy = policy_from_env();
-        tracing::info!("input focus gate: {policy:?}");
-        if policy == Policy::Off {
+    let Some(policy) = POLICY.get() else { return };
+    let exe = foreground_exe();
+    let ok = allows(policy, exe.as_deref());
+    if ALLOWED.swap(ok, Ordering::Relaxed) != ok {
+        tracing::info!(
+            "viewer input {} (foreground = {})",
+            if ok { "live again" } else { "BLOCKED" },
+            exe.as_deref().unwrap_or("?")
+        );
+    }
+}
+
+/// Windows tells us when the foreground window changes (EVENT_SYSTEM_FOREGROUND), so there is
+/// no polling at all: the thread sleeps in GetMessage and runs only on a focus change.
+#[cfg(windows)]
+fn watch_foreground() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetMessageW, EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    };
+    unsafe extern "system" fn cb(_: HWINEVENTHOOK, _: u32, _: HWND, _: i32, _: i32, _: u32, _: u32) {
+        on_foreground_changed();
+    }
+    let _ = std::thread::Builder::new().name("focus-gate".into()).spawn(|| unsafe {
+        on_foreground_changed();
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(cb),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        if hook.is_invalid() {
+            tracing::warn!("focus gate: SetWinEventHook failed - viewer input stays unfiltered");
             return;
         }
-        let _ = std::thread::Builder::new().name("focus-gate".into()).spawn(move || loop {
-            let exe = foreground_exe();
-            let ok = allows(&policy, exe.as_deref());
-            if ALLOWED.swap(ok, Ordering::Relaxed) != ok {
-                tracing::info!(
-                    "viewer input {} (foreground = {})",
-                    if ok { "live again" } else { "BLOCKED" },
-                    exe.as_deref().unwrap_or("?")
-                );
-            }
-            std::thread::sleep(POLL);
-        });
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
     });
-    ALLOWED.load(Ordering::Relaxed)
+}
+
+#[cfg(not(windows))]
+fn watch_foreground() {}
+
+/// Whether pad input may reach the host right now: one relaxed atomic load on the report path.
+pub fn input_allowed() -> bool {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        let policy = policy_from_env();
+        tracing::info!("input focus gate: {policy:?}");
+        let off = policy == Policy::Off;
+        let _ = POLICY.set(policy);
+        if !off {
+            watch_foreground();
+        }
+    });
+    ALLOWED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
