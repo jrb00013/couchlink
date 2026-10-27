@@ -5,6 +5,7 @@
 pub mod absinfo;
 pub mod dualsense;
 pub mod feedback;
+pub mod input_lock;
 pub mod map_frame;
 pub mod parse;
 pub mod parse_ds4;
