@@ -9,6 +9,10 @@ fn main() {
 
 #[cfg(windows)]
 mod run {
+    /// Smallest frame worth encoding. NVENC H.264 refuses anything under roughly 145x49, and a
+    /// minimized window reports a ~173x32 caption bar, so resizes below this are ignored.
+    const MIN_ENCODE_W: u32 = 320;
+    const MIN_ENCODE_H: u32 = 180;
     use anyhow::{bail, Context as AnyhowContext, Result};
     use clap::{Parser, ValueEnum};
     use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
@@ -416,6 +420,7 @@ mod run {
                 let mut replay_target: Option<ReplayTarget> = None;
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
+                let mut tiny_frames = 0u32;
                 let mut encoded_window = Instant::now();
 
                 loop {
@@ -440,6 +445,25 @@ mod run {
                             // Take the newest frame available, not the oldest.
                             while let Ok(newer) = raw_rx.try_recv() {
                                 latest = Some(newer);
+                            }
+                            // A minimized/shrunk window (WGC reports its 173x32 caption bar)
+                            // is not a frame worth encoding: following it rebuilds the encoder
+                            // at a size NVENC rejects ("input type is not supported"), the
+                            // stream dies and the host kills the capture after 4 s. Drop it and
+                            // keep replaying the last real frame until the window is back.
+                            if latest
+                                .as_ref()
+                                .is_some_and(|(lw, lh, _, _)| *lw < MIN_ENCODE_W || *lh < MIN_ENCODE_H)
+                            {
+                                if let Some((lw, lh, _, _)) = latest.take() {
+                                    if tiny_frames == 0 {
+                                        info!("window shrank to {lw}x{lh} (minimized?) - holding the last frame instead of rebuilding the encoder");
+                                    }
+                                    tiny_frames += 1;
+                                }
+                            } else if tiny_frames > 0 {
+                                info!("window back to normal size after {tiny_frames} undersized frames");
+                                tiny_frames = 0;
                             }
                             // Nothing new this beat? Re-encode the frame we already
                             // have, so a static screen keeps the cadence hole-free
