@@ -1,4 +1,5 @@
 mod age;
+mod battery;
 mod amazing_latency_ab;
 mod input_photon_budget;
 mod capture;
@@ -905,7 +906,11 @@ async fn main() -> Result<()> {
                                 freeze_count_delta,
                             );
                             if loss_congested {
-                                link_gov.note_client_loss();
+                                if link_gov::client_report_is_severe(packets_lost_delta, packets_received_delta) {
+                                    link_gov.note_severe_client_loss();
+                                } else {
+                                    link_gov.note_client_loss();
+                                }
                                 info!(
                                     "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
                                      {freeze_count_delta} freeze(s), jb {jitter_buffer_ms}ms — \
@@ -1110,6 +1115,9 @@ async fn main() -> Result<()> {
                                         copy_ms,
                                         wait_p95_ms,
                                     ));
+                                    if let Some(m) = host_battery_message() {
+                                        let _ = signal_out.send(m);
+                                    }
                                     rate_window = std::time::Instant::now();
                                     rate_mark = frames_out;
                                     idle_frames = 0;
@@ -1311,6 +1319,9 @@ async fn main() -> Result<()> {
                                 handoff_copy_ms,
                                 handoff_wait_p95_ms,
                             ));
+                            if let Some(m) = host_battery_message() {
+                                let _ = signal_out.send(m);
+                            }
                             stage_capture = Duration::ZERO;
                             stage_scale = Duration::ZERO;
                             stage_encode = Duration::ZERO;
@@ -1359,6 +1370,15 @@ fn stream_info_message(
         capture_ok,
         capture_hint,
     }
+}
+
+/// Host battery for the viewers' indicator; `None` on a machine without a battery.
+fn host_battery_message() -> Option<SignalMessage> {
+    battery::read().map(|b| SignalMessage::HostBattery {
+        percent: b.percent,
+        charging: b.charging,
+        ac: b.ac,
+    })
 }
 
 /// Per-window host pipeline telemetry for the debug panel. `target_*` is the
