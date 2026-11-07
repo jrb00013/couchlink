@@ -984,16 +984,62 @@ mod run {
         }
     }
 
+    fn hwnd_visible(hwnd: isize) -> bool {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+        unsafe { IsWindowVisible(HWND(hwnd as *mut _)).as_bool() }
+    }
+
+    /// First matching window, preferring a *visible* one. PCSX2 (and other Qt
+    /// emulators) answer F11 by hiding the game window and creating a second,
+    /// same-titled borderless one, so more than one window can match.
     fn find_window(needle: &str) -> Result<Option<Window>> {
         let wins = Window::enumerate().context("enumerate windows")?;
+        let mut hidden = None;
         for w in wins {
             let title = w.title().unwrap_or_default();
             let proc = w.process_name().unwrap_or_default();
             if window_matches(needle, &title, &proc) && !title.trim().is_empty() {
-                return Ok(Some(w));
+                if hwnd_visible(w.as_raw_hwnd() as isize) {
+                    return Ok(Some(w));
+                }
+                hidden.get_or_insert(w);
             }
         }
-        Ok(None)
+        Ok(hidden)
+    }
+
+    /// Exit 75 when the captured window is hidden and a different visible one
+    /// matches, so the launcher re-attaches to it.
+    ///
+    /// Live-traced 2026-11-06: F11 in PCSX2 hides the game window (new HWND for
+    /// the fullscreen one, same title). The WGC item on the hidden window never
+    /// closes, so `on_closed` never fires; frames just stop and the yellow
+    /// border vanishes until the player leaves fullscreen. Cost when idle is
+    /// one `IsWindowVisible` per 250 ms on a side thread, nothing on the frame path.
+    fn spawn_hidden_watch(hwnd: isize, needle: String) {
+        std::thread::spawn(move || {
+            let mut hidden_since: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                if hwnd_visible(hwnd) {
+                    hidden_since = None;
+                    continue;
+                }
+                let since = *hidden_since.get_or_insert_with(Instant::now);
+                if since.elapsed() < Duration::from_millis(500) {
+                    continue;
+                }
+                if let Ok(Some(w)) = find_window(&needle) {
+                    let other = w.as_raw_hwnd() as isize;
+                    if other != hwnd && hwnd_visible(other) {
+                        warn!("captured window hidden and another matching window is visible (fullscreen toggle?) — exiting to re-attach");
+                        std::thread::sleep(Duration::from_millis(50));
+                        std::process::exit(EXIT_SOURCE_CLOSED);
+                    }
+                }
+            }
+        });
     }
 
     /// Host commands, multiplexed on the reverse of the frame socket.
@@ -1389,6 +1435,8 @@ mod run {
                             );
                         }
                     }
+
+                    spawn_hidden_watch(w.as_raw_hwnd() as isize, args.window.clone());
 
                     if args.keep_rendering {
                         couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
