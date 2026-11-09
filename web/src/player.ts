@@ -82,6 +82,8 @@ export interface PlayerCallbacks {
   /** A fellow player (not the host) left — drop their entry from any
    * per-player display instead of leaving a stale "connected" row. */
   onPlayerLeft?: (slot: number) => void;
+  /** Host broadcast: split-seat master enable + regions (kaleidoscope). */
+  onSplitScreenConfig?: (msg: Extract<SignalMessage, { type: "split_screen_config" }>) => void;
   /** Full getStats-derived telemetry snapshot, ~2s tick. */
   onTelemetry?: (t: PlayerTelemetry) => void;
 }
@@ -159,6 +161,8 @@ export class CouchlinkPlayer {
   private stallBytes = -1;
   private stallSince = 0;
   private stallKeyframeSent = false;
+  /** Coalesce PLI on loss/freeze deltas so the 2s stats poll cannot PLI-storm. */
+  private lastLossPliAt = 0;
   private lastStallRecoverAt = 0;
   private statsTimer: number | null = null;
   private lastStats: { delay: number; count: number; decoded: number } | null =
@@ -585,6 +589,21 @@ export class CouchlinkPlayer {
               packets_received_delta: recvDelta,
               freeze_count_delta: freezeDelta,
             });
+          }
+          // Don't wait for the 5s stall watchdog — loss/freezes already mean
+          // the picture is about to freeze. PLI now; host also force_idr's on
+          // the matching ClientLinkStats. ≥3s coalesce matches host IDR_INTERVAL.
+          if (lostDelta > 0 || freezeDelta > 0 || droppedDelta > 0) {
+            const nowPli = performance.now();
+            if (nowPli - this.lastLossPliAt >= 3000) {
+              this.lastLossPliAt = nowPli;
+              cwarn("loss/freeze delta — requesting keyframe", {
+                lostDelta,
+                freezeDelta,
+                droppedDelta,
+              });
+              this.requestVideoKeyframe();
+            }
           }
         }
       } catch (e) {
@@ -1441,8 +1460,30 @@ export class CouchlinkPlayer {
       case "player_pad_info":
         this.cb.onPlayerPadInfo?.(msg.slot, msg.kind, msg.id ?? "");
         break;
+      case "split_screen_config":
+        this.cb.onSplitScreenConfig?.(msg);
+        break;
       case "pong":
         break;
     }
+  }
+
+  /** Player → host: view mode / detector regions (slot stamped by signaling). */
+  sendSplitScreenSet(opts: {
+    enabled: boolean;
+    viewMode?: "own" | "full";
+    layout?: string;
+    regions?: { x: number; y: number; w: number; h: number }[];
+    rescan?: boolean;
+  }) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    send(this.ws, {
+      type: "split_screen_set",
+      enabled: opts.enabled,
+      view_mode: opts.viewMode,
+      layout: opts.layout,
+      regions: opts.regions,
+      rescan: opts.rescan,
+    });
   }
 }

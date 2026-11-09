@@ -55,6 +55,8 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// there.
 const RESPAWN_AFTER: Duration = Duration::from_secs(2);
 const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
+/// See `bridge::HUNG_RESPAWN_RETRY_INTERVAL`.
+const HUNG_RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// See `bridge::FRAME_STALE_AFTER` — same fix, same reasoning, over vsock
 /// instead of TCP: a hung win-capture never errors this side's read, it just
 /// stops sending, so `maybe_respawn` needs a second trigger besides a socket
@@ -85,6 +87,8 @@ pub struct HyperVBridge {
     disconnected_at: Option<Instant>,
     last_respawn: Option<Instant>,
     last_frame_at: Instant,
+    /// See `bridge::WindowsBridge::session_started_at` — same first-frame grace.
+    session_started_at: Instant,
     /// Floor between non-blocking connect attempts so the host select loop
     /// is not spent inside `poll(250ms)` on every idle tick while win-capture
     /// is still coming up.
@@ -159,6 +163,7 @@ impl HyperVBridge {
             disconnected_at,
             last_respawn: None,
             last_frame_at: Instant::now(),
+            session_started_at: Instant::now(),
             last_connect_attempt: None,
             ever_connected,
             wait_ns: 0,
@@ -207,6 +212,7 @@ impl HyperVBridge {
         }
         self.stream = Some(stream);
         self.ever_connected = true;
+        self.session_started_at = Instant::now();
         true
     }
 
@@ -351,8 +357,8 @@ impl HyperVBridge {
         }
         if self.stream.is_none() {
             if self.try_reconnect() {
-                self.disconnected_at = None;
-                self.last_frame_at = Instant::now();
+                // See `bridge.rs`: TCP/vsock accept ≠ healthy capture. A hung
+                // writer's reconnect must not clear the outage clocks.
             } else {
                 self.maybe_respawn();
             }
@@ -373,6 +379,7 @@ impl HyperVBridge {
         } {
             Ok(true) => {
                 self.last_frame_at = Instant::now();
+                self.disconnected_at = None;
                 let t_copy = Instant::now();
                 let frame = std::mem::take(&mut self.buf);
                 self.copy_ns += t_copy.elapsed().as_nanos() as u64;
@@ -391,15 +398,16 @@ impl HyperVBridge {
                 // win-capture leaves the vsock stream open and just stops
                 // sending, so no read error is ever raised to trip
                 // `maybe_respawn` on its own.
-                if self.last_frame_at.elapsed() >= FRAME_STALE_AFTER {
+                let healthy_at = self.last_frame_at.max(self.session_started_at);
+                if healthy_at.elapsed() >= FRAME_STALE_AFTER {
                     tracing::warn!(
                         "no frame from win-capture in {:?} (Hyper-V socket still open — \
                          likely hung, not disconnected) — treating as dead",
-                        self.last_frame_at.elapsed()
+                        healthy_at.elapsed()
                     );
                     self.stream = None;
                     self.disconnected_at.get_or_insert_with(Instant::now);
-                    self.maybe_respawn();
+                    self.force_respawn_hung();
                 }
                 Ok(self.stale_frame())
             }
@@ -433,8 +441,20 @@ impl HyperVBridge {
         if since.elapsed() < RESPAWN_AFTER {
             return;
         }
+        self.spawn_respawn(RESPAWN_RETRY_INTERVAL);
+    }
+
+    /// See `bridge::WindowsBridge::force_respawn_hung`.
+    fn force_respawn_hung(&mut self) {
+        if !self.ever_connected {
+            return;
+        }
+        self.spawn_respawn(HUNG_RESPAWN_RETRY_INTERVAL);
+    }
+
+    fn spawn_respawn(&mut self, retry_floor: Duration) {
         if let Some(last) = self.last_respawn {
-            if last.elapsed() < RESPAWN_RETRY_INTERVAL {
+            if last.elapsed() < retry_floor {
                 return;
             }
         }
