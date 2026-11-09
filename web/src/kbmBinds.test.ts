@@ -1,6 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
   DEFAULT_KBM_BINDS,
+  FIGHTING_KBM_BINDS,
+  KBM_ACTIONS,
   KBM_STORAGE_KEY,
   formatKbmCode,
   loadKbmBinds,
@@ -28,6 +30,50 @@ describe("kbmBinds", () => {
   it("loads defaults when nothing is stored", () => {
     expect(loadKbmBinds().cross).toEqual(["Space"]);
     expect(loadKbmBinds().r2).toEqual(["Mouse0"]);
+    expect(loadKbmBinds().l2).toEqual(["Mouse2"]);
+    expect(loadKbmBinds().l1).toEqual(["KeyG"]);
+    expect(loadKbmBinds().l3).toEqual(
+      expect.arrayContaining(["ShiftLeft", "ShiftRight"])
+    );
+  });
+
+  it("migrates v1 storage and forces LMB→R2 / RMB→L2 for shooters", () => {
+    localStorage.setItem(
+      "couchlink.kbm.binds.v1",
+      JSON.stringify({
+        ...DEFAULT_KBM_BINDS,
+        r2: ["KeyZ"],
+        l2: ["KeyX"],
+        l3: ["Mouse0", "Mouse2"],
+      })
+    );
+    const loaded = loadKbmBinds();
+    expect(loaded.r2).toContain("Mouse0");
+    expect(loaded.l2).toContain("Mouse2");
+    expect(loaded.l3).not.toContain("Mouse0");
+    expect(loaded.l3).not.toContain("Mouse2");
+    expect(localStorage.getItem(KBM_STORAGE_KEY)).toBeTruthy();
+    expect(localStorage.getItem("couchlink.kbm.binds.v1")).toBeNull();
+  });
+
+  it("migrates v2 Shift→L1 (nade) into Shift→L3 sprint + G grenade", () => {
+    localStorage.setItem(
+      "couchlink.kbm.binds.v2",
+      JSON.stringify({
+        ...DEFAULT_KBM_BINDS,
+        l1: ["ShiftLeft", "ShiftRight"],
+        l3: ["KeyC"],
+        create: ["KeyG"],
+      })
+    );
+    const loaded = loadKbmBinds();
+    expect(loaded.l1).toEqual(["KeyG"]);
+    expect(loaded.l3).toEqual(
+      expect.arrayContaining(["ShiftLeft", "ShiftRight"])
+    );
+    expect(loaded.l1).not.toContain("ShiftLeft");
+    expect(loaded.create).not.toContain("KeyG");
+    expect(localStorage.getItem("couchlink.kbm.binds.v2")).toBeNull();
   });
 
   it("round-trips a remap through localStorage", () => {
@@ -47,5 +93,21 @@ describe("kbmBinds", () => {
     expect(formatKbmCode("Mouse0")).toBe("Left click");
     expect(formatKbmCode("KeyE")).toBe("E");
     expect(formatKbmCode("Space")).toBe("Space");
+  });
+
+  it("fighting preset never binds one key to two actions", () => {
+    const seen = new Map<string, string>();
+    for (const { action } of KBM_ACTIONS) {
+      for (const code of FIGHTING_KBM_BINDS[action]) {
+        expect(seen.get(code), `${code} on ${action}`).toBeUndefined();
+        seen.set(code, action);
+      }
+    }
+  });
+
+  it("fighting preset keeps the left stick unbound and the D-pad on WASD", () => {
+    expect(FIGHTING_KBM_BINDS.moveLeft).toEqual([]);
+    expect(FIGHTING_KBM_BINDS.dpadLeft).toContain("KeyA");
+    expect(FIGHTING_KBM_BINDS.dpadRight).toContain("KeyD");
   });
 });

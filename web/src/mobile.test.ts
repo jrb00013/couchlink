@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { detectLandscape, detectMobile, isSideMode } from "./mobile";
+import {
+  detectLandscape,
+  detectMobile,
+  isSideMode,
+  resetMobileStickyForTests,
+} from "./mobile";
 
 const globalAny = globalThis as unknown as {
   window?: {
@@ -7,20 +12,38 @@ const globalAny = globalThis as unknown as {
     innerWidth: number;
     innerHeight: number;
     matchMedia?: (q: string) => unknown;
+    sessionStorage?: Storage;
   };
   navigator?: { maxTouchPoints: number };
 };
 
 let navigatorState: { maxTouchPoints: number } = { maxTouchPoints: 0 };
+const store = new Map<string, string>();
+
+const fakeStorage: Storage = {
+  getItem: (k: string) => store.get(k) ?? null,
+  setItem: (k: string, v: string) => {
+    store.set(k, v);
+  },
+  removeItem: (k: string) => {
+    store.delete(k);
+  },
+  clear: () => store.clear(),
+  key: () => null,
+  length: 0,
+};
 
 beforeEach(() => {
+  store.clear();
   const location = { search: "" };
   globalAny.window = {
     location,
     innerWidth: 1200,
     innerHeight: 800,
     matchMedia: () => ({ matches: false, media: "", onchange: null }),
+    sessionStorage: fakeStorage,
   };
+  resetMobileStickyForTests();
   navigatorState = { maxTouchPoints: 0 };
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -29,6 +52,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetMobileStickyForTests();
   delete globalAny.window;
 });
 
@@ -99,6 +123,18 @@ describe("mobile — device detection", () => {
     setTouchPoints(5);
     fakeMatchMedia({ coarse: true });
     expect(detectMobile()).toBe(false);
+  });
+
+  it("stays mobile after rotate to a wide landscape width", () => {
+    setInnerWidth(390);
+    setTouchPoints(5);
+    fakeMatchMedia({ coarse: true });
+    expect(detectMobile()).toBe(true);
+    // Landscape phone: width often > 820 and coarse may still be true;
+    // sticky must keep mobile even if we only had touch+small before.
+    setInnerWidth(900);
+    fakeMatchMedia({ coarse: false });
+    expect(detectMobile()).toBe(true);
   });
 });
 

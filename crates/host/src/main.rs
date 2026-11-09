@@ -1,4 +1,5 @@
 mod age;
+mod battery;
 mod amazing_latency_ab;
 mod input_photon_budget;
 mod capture;
@@ -14,6 +15,7 @@ mod nat_punch;
 mod ricardo_playable_ab;
 mod scale;
 mod signaling_client;
+mod split_seat;
 mod wan3_math;
 mod webrtc_peer;
 
@@ -341,9 +343,11 @@ async fn route_slot_msg(
         }
         SignalMessage::RequestOffer { slot } => {
             if let Some(conn) = slots.lock().await.get(&slot) {
-                info!("player requested offer (slot {slot}, renegotiate, no peer rebuild)");
+                // ICE-restart offer: browser is the answerer so its restartIce()
+                // alone cannot renegotiate; host must mint new ICE credentials.
+                warn!("player requested offer (slot {slot}, ICE-restart renegotiate)");
                 *force_idr = true;
-                if let Err(e) = conn.host.create_and_send_offer(signal_out).await {
+                if let Err(e) = conn.host.create_and_send_offer_ice_restart(signal_out).await {
                     warn!("request_offer failed: {e}");
                 }
             } else {
@@ -566,6 +570,15 @@ async fn main() -> Result<()> {
 
     // Always surface the invite — this is what the friend needs.
     println!("friend join URL:\n{join}");
+    // Stable path the CF watchdog / copy-join-url.sh refresh when the
+    // trycloudflare hostname rotates mid-session.
+    {
+        let path = std::env::var("COUCHLINK_JOIN_URL_FILE")
+            .unwrap_or_else(|_| "/tmp/couchlink-join-url.txt".into());
+        if let Err(e) = std::fs::write(&path, format!("{join}\n")) {
+            tracing::warn!("failed to write join URL file {path}: {e}");
+        }
+    }
     if verbose {
         info!("friend join URL: {join}");
         if mesh.as_deref() == Some("headscale") || (hs_url.is_some() && ts_key.is_some()) {
@@ -608,6 +621,14 @@ async fn main() -> Result<()> {
     .await?;
 
     let signal_out = signaling.outbound.clone();
+    let split_seat_state = Arc::new(Mutex::new(split_seat::SplitSeatState::default()));
+    {
+        let st = Arc::clone(&split_seat_state);
+        let out = signal_out.clone();
+        tokio::spawn(split_seat::serve_control(st, out));
+    }
+    // Publish initial kaleidoscope config (master may be env-enabled).
+    split_seat::broadcast_config(&split_seat_state, &signal_out).await;
     {
         let (kind, id) = host_physical_pad();
         let _ = signal_out.send(SignalMessage::PadInfo {
@@ -713,6 +734,8 @@ async fn main() -> Result<()> {
                     &mut force_idr,
                 )
                 .await?;
+                // Late joiners must see current kaleidoscope master/regions.
+                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                 break;
             }
             SignalMessage::Error { message } => warn!("signal error: {message}"),
@@ -796,6 +819,7 @@ async fn main() -> Result<()> {
                             // else that arrived during the drain.
                             let (joins, deferred) =
                                 take_queued_joins(&mut signaling.inbound, slot, epoch);
+                            let had_joins = !joins.is_empty();
                             for (slot, epoch) in joins {
                                 handle_slot_join(
                                     slot,
@@ -809,6 +833,9 @@ async fn main() -> Result<()> {
                                     &mut force_idr,
                                 )
                                 .await?;
+                            }
+                            if had_joins {
+                                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                             }
                             // Re-handle non-join messages that arrived during the
                             // drain (answers for a *replaced* peer are dropped by
@@ -833,11 +860,117 @@ async fn main() -> Result<()> {
                                 });
                             }
                         }
+                        SignalMessage::SplitScreenSet {
+                            enabled,
+                            view_mode,
+                            layout,
+                            regions,
+                            rescan,
+                            slot,
+                        } => {
+                            let msg = SignalMessage::SplitScreenSet {
+                                enabled,
+                                view_mode: view_mode.clone(),
+                                layout: layout.clone(),
+                                regions: regions.clone(),
+                                rescan,
+                                slot,
+                            };
+                            {
+                                let mut st = split_seat_state.lock().await;
+                                split_seat::apply_player_set(&mut st, &msg);
+                                info!(
+                                    "slot {slot}: split_screen_set enabled={enabled} \
+                                     view={view_mode} layout={layout} rescan={rescan}"
+                                );
+                            }
+                            split_seat::broadcast_config(&split_seat_state, &signal_out).await;
+                        }
                         SignalMessage::PresentPath { path, slot } => {
                             if let Some(conn) = slots.lock().await.get(&slot) {
                                 conn.host.set_present_path(&path);
                             } else {
                                 warn!("present_path for unknown slot {slot} dropped");
+                            }
+                        }
+                        SignalMessage::ClientLinkStats {
+                            frames_dropped_delta,
+                            jitter_buffer_ms,
+                            rtt_ms,
+                            packets_lost_delta,
+                            packets_received_delta,
+                            freeze_count_delta,
+                            slot,
+                        } => {
+                            let loss_congested = link_gov::client_report_is_congested(
+                                packets_lost_delta,
+                                packets_received_delta,
+                                freeze_count_delta,
+                            );
+                            if loss_congested {
+                                if link_gov::client_report_is_severe(packets_lost_delta, packets_received_delta) {
+                                    link_gov.note_severe_client_loss();
+                                } else {
+                                    link_gov.note_client_loss();
+                                }
+                                // warn: COUCHLINK_VERBOSE=0 filters info! — need this live.
+                                warn!(
+                                    "slot {slot}: client loss {packets_lost_delta}/{} pkts, \
+                                     {freeze_count_delta} freeze(s), jb {jitter_buffer_ms}ms — \
+                                     link governor marking window bad",
+                                    packets_lost_delta.saturating_add(packets_received_delta)
+                                );
+                            }
+                            // See the SignalMessage doc comment: this is the only
+                            // congestion signal the governor gets once RTP is the
+                            // live present path, since RTP sends never shed on
+                            // their own. Feed drops into `dropped_frames`.
+                            if frames_dropped_delta > 0 {
+                                dropped_frames += frames_dropped_delta as u64;
+                                link_gov.note_client_congestion();
+                                warn!(
+                                    "slot {slot}: client reports {frames_dropped_delta} frame(s) \
+                                     dropped, jitter buffer {jitter_buffer_ms}ms — counted toward \
+                                     link governor"
+                                );
+                            }
+                            // RTT is the load-bearing signal when host shed is 0% but
+                            // the friend's ICE RTT has ballooned (Ricardo 8112ms live).
+                            // note_client_rtt marks the window bad + holds climb; slam
+                            // on catastrophic RTT applies the bitrate floor immediately.
+                            if let Some(slam) = link_gov.note_client_rtt(rtt_ms) {
+                                commanded_target = slam.clone();
+                                capturer.set_target(slam.clone());
+                                warn!(
+                                    "slot {slot}: client rtt {rtt_ms}ms (≥{} slam) — commanded \
+                                     encoder {}x{}@{} ({} kbps) immediately (jb={jitter_buffer_ms}ms)",
+                                    link_gov::RTT_SLAM_MS,
+                                    slam.width,
+                                    slam.height,
+                                    slam.fps,
+                                    slam.bitrate_kbps
+                                );
+                            } else if rtt_ms >= link_gov::RTT_CONGESTION_MS {
+                                dropped_frames += 8;
+                                warn!(
+                                    "slot {slot}: client rtt {rtt_ms}ms (≥{}) — marking link \
+                                     congested (jb={jitter_buffer_ms}ms)",
+                                    link_gov::RTT_CONGESTION_MS
+                                );
+                            }
+                            // Recover *now* — waiting for the next 5s gov window
+                            // + periodic IDR left friends on "Media lost" for
+                            // 5–12s. Coalesce with IDR_INTERVAL so reports every
+                            // 2s cannot IDR-storm.
+                            if (loss_congested
+                                || frames_dropped_delta > 0
+                                || rtt_ms >= link_gov::RTT_CONGESTION_MS)
+                                && last_idr.elapsed() >= IDR_INTERVAL
+                            {
+                                force_idr = true;
+                                info!(
+                                    "slot {slot}: client congestion — requesting IDR for recovery"
+                                );
                             }
                         }
                         SignalMessage::Heartbeat => {
@@ -938,10 +1071,21 @@ async fn main() -> Result<()> {
                                     if decided != commanded_target {
                                         commanded_target = decided;
                                         capturer.set_target(decided.clone());
-                                        info!(
+                                        // warn so COUCHLINK_VERBOSE=0 still surfaces steps.
+                                        warn!(
                                             "link governor: commanded encoder {}x{}@{} ({} kbps) after {}% sheds",
                                             decided.width, decided.height, decided.fps,
                                             decided.bitrate_kbps, drop_pct
+                                        );
+                                    }
+                                    // Recovery: shed mid-GOP leaves friends on frozen /
+                                    // "media lost" until the next periodic IDR. Force one
+                                    // re-anchor when the window was lossy (rate-limited by
+                                    // IDR_INTERVAL via last_idr below).
+                                    if drop_pct >= 8 && last_idr.elapsed() >= IDR_INTERVAL {
+                                        force_idr = true;
+                                        info!(
+                                            "link recovery: {drop_pct}% shed this window — requesting IDR"
                                         );
                                     }
                                     let received = capturer.take_received();
@@ -964,8 +1108,8 @@ async fn main() -> Result<()> {
                                             "link keeping up".to_string()
                                         } else {
                                             format!(
-                                                "bottleneck: peer/network can't consume at {:.0} Mbps",
-                                                preset.bitrate_kbps as f64 / 1000.0
+                                                "bottleneck: peer/network can't consume at {:.1} Mbps (commanded)",
+                                                commanded_target.bitrate_kbps as f64 / 1000.0
                                             )
                                         },
                                     );
@@ -984,6 +1128,9 @@ async fn main() -> Result<()> {
                                         copy_ms,
                                         wait_p95_ms,
                                     ));
+                                    if let Some(m) = host_battery_message() {
+                                        let _ = signal_out.send(m);
+                                    }
                                     rate_window = std::time::Instant::now();
                                     rate_mark = frames_out;
                                     idle_frames = 0;
@@ -1185,6 +1332,9 @@ async fn main() -> Result<()> {
                                 handoff_copy_ms,
                                 handoff_wait_p95_ms,
                             ));
+                            if let Some(m) = host_battery_message() {
+                                let _ = signal_out.send(m);
+                            }
                             stage_capture = Duration::ZERO;
                             stage_scale = Duration::ZERO;
                             stage_encode = Duration::ZERO;
@@ -1233,6 +1383,15 @@ fn stream_info_message(
         capture_ok,
         capture_hint,
     }
+}
+
+/// Host battery for the viewers' indicator; `None` on a machine without a battery.
+fn host_battery_message() -> Option<SignalMessage> {
+    battery::read().map(|b| SignalMessage::HostBattery {
+        percent: b.percent,
+        charging: b.charging,
+        ac: b.ac,
+    })
 }
 
 /// Per-window host pipeline telemetry for the debug panel. `target_*` is the

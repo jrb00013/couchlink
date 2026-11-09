@@ -23,39 +23,95 @@ export type KbmSnapshot = {
 };
 
 export type KbmOptions = {
-  /** Sensitivity scalar for mouse → right stick. Default 0.5. */
+  /** Sensitivity scalar for mouse → right stick. Default 1.15. */
   mouseSensitivity?: number;
+  /**
+   * Whether mouse movement drives the right stick at all. Default true —
+   * pointer-lock still gates it so accidental cursor motion never aims.
+   * Toggle off in Keybinds if a title fights mouse-driven look.
+   */
+  mouseLookEnabled?: boolean;
   /** Element to request pointer lock on (typically the canvas). */
   lockTarget?: HTMLElement | null;
   binds?: KbmBinds;
 };
 
-/** Fired on key/button/mouse-look change — send pad immediately, don't wait for poll. */
+/** Fired on key/button change — send pad immediately, don't wait for poll. */
 export type KbmActivityHandler = () => void;
+/** Fired on mouse-look motion — may be coalesced; buttons stay on `onActivity`. */
+export type KbmLookActivityHandler = () => void;
+
+/**
+ * Hold stick deflection this long after the last mouse sample so a ~60Hz game
+ * read still sees the look. Snap to center after — no mushy exponential tail.
+ */
+export const LOOK_HOLD_MS = 16;
 
 export class KeyboardMouseInput {
   private keys = new Set<string>();
   private mouseButtons = 0;
-  private mouseDx = 0;
-  private mouseDy = 0;
+  /** Motion not yet folded into the look latch. */
+  private pendingDx = 0;
+  private pendingDy = 0;
+  /** Stick deflection; time-decayed, snapped after {@link LOOK_HOLD_MS} silence. */
+  private latchDx = 0;
+  private latchDy = 0;
+  /** performance.now() of last pointer-lock mouse sample that added look. */
+  private lastMouseMoveAt = 0;
+  private lastLookSampleAt = 0;
   /** Unconsumed look for the mini viz — sample() zeros mouseDx/Dy. */
   private lookX = 0;
   private lookY = 0;
   private sensitivity: number;
+  private mouseLookEnabled: boolean;
   private lockTarget: HTMLElement | null;
   private active = false;
   private binds: KbmBinds;
   /** Wired by CouchlinkPlayer for sub-poll input (beats 2ms quantisation). */
   onActivity: KbmActivityHandler | null = null;
+  /** Look-only path — player may coalesce these; never delay buttons via this. */
+  onLookActivity: KbmLookActivityHandler | null = null;
 
   constructor(opts: KbmOptions = {}) {
-    this.sensitivity = opts.mouseSensitivity ?? 0.5;
+    this.sensitivity = opts.mouseSensitivity ?? 1.15;
+    this.mouseLookEnabled = opts.mouseLookEnabled ?? true;
     this.lockTarget = opts.lockTarget ?? null;
     this.binds = cloneBinds(opts.binds ?? DEFAULT_KBM_BINDS);
   }
 
   setBinds(binds: KbmBinds) {
     this.binds = cloneBinds(binds);
+  }
+
+  /** Live-tune mouse-look sensitivity without recreating the instance (that would drop pointer lock). */
+  setSensitivity(sensitivity: number) {
+    this.sensitivity = sensitivity;
+  }
+
+  getSensitivity(): number {
+    return this.sensitivity;
+  }
+
+  /** Live-toggle mouse-look without recreating the instance (that would drop pointer lock). */
+  setMouseLookEnabled(enabled: boolean) {
+    this.mouseLookEnabled = enabled;
+    if (!enabled) {
+      // Snap the stick back to neutral immediately, don't wait for hold —
+      // otherwise disabling mid-look leaves the last look direction "stuck"
+      // held on the wire until LOOK_HOLD_MS elapses.
+      this.pendingDx = 0;
+      this.pendingDy = 0;
+      this.latchDx = 0;
+      this.latchDy = 0;
+      this.lastMouseMoveAt = 0;
+      this.lastLookSampleAt = 0;
+      this.lookX = 0;
+      this.lookY = 0;
+    }
+  }
+
+  getMouseLookEnabled(): boolean {
+    return this.mouseLookEnabled;
   }
 
   setLockTarget(el: HTMLElement | null) {
@@ -101,8 +157,12 @@ export class KeyboardMouseInput {
     if (document.pointerLockElement) document.exitPointerLock();
     this.keys.clear();
     this.mouseButtons = 0;
-    this.mouseDx = 0;
-    this.mouseDy = 0;
+    this.pendingDx = 0;
+    this.pendingDy = 0;
+    this.latchDx = 0;
+    this.latchDy = 0;
+    this.lastMouseMoveAt = 0;
+    this.lastLookSampleAt = 0;
     this.lookX = 0;
     this.lookY = 0;
   }
@@ -122,6 +182,48 @@ export class KeyboardMouseInput {
     };
   }
 
+  /**
+   * Map accumulated mouse delta into right-stick axes.
+   *
+   * Pad polls ~every 2ms; BO2 reads closer to ~60Hz. Time-based decay
+   * (τ = LOOK_HOLD_MS) keeps deflection visible across game polls regardless
+   * of poll Hz, then hard-snaps after LOOK_HOLD_MS of mouse silence so look
+   * stops crisply instead of a long mushy tail.
+   */
+  sampleLookAxes(nowMs: number = performance.now()): { rx: number; ry: number } {
+    const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+    this.latchDx += this.pendingDx;
+    this.latchDy += this.pendingDy;
+    this.pendingDx = 0;
+    this.pendingDy = 0;
+
+    const dt =
+      this.lastLookSampleAt > 0
+        ? Math.max(0, Math.min(50, nowMs - this.lastLookSampleAt))
+        : 0;
+    this.lastLookSampleAt = nowMs;
+    if (dt > 0) {
+      const keep = Math.exp(-dt / LOOK_HOLD_MS);
+      this.latchDx *= keep;
+      this.latchDy *= keep;
+    }
+
+    if (
+      this.lastMouseMoveAt <= 0 ||
+      nowMs - this.lastMouseMoveAt > LOOK_HOLD_MS ||
+      (Math.abs(this.latchDx) < 0.02 && Math.abs(this.latchDy) < 0.02)
+    ) {
+      this.latchDx = 0;
+      this.latchDy = 0;
+    }
+
+    const scale = this.sensitivity * 128;
+    return {
+      rx: clamp(128 + this.latchDx * scale),
+      ry: clamp(128 + this.latchDy * scale),
+    };
+  }
+
   /** Sample current state into a PadState, consuming accumulated mouse delta. */
   sample(seq: number): PadState {
     const held = (action: KbmAction) => this.actionHeld(action);
@@ -133,12 +235,7 @@ export class KeyboardMouseInput {
     const lx = moveLeft ? 0 : moveRight ? 255 : 128;
     const ly = moveUp ? 0 : moveDown ? 255 : 128;
 
-    const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-    const scale = this.sensitivity * 128;
-    const rx = clamp(128 + this.mouseDx * scale);
-    const ry = clamp(128 + this.mouseDy * scale);
-    this.mouseDx = 0;
-    this.mouseDy = 0;
+    const { rx, ry } = this.sampleLookAxes();
 
     let buttons = 0;
     if (held("cross")) buttons |= BTN.CROSS;
@@ -173,13 +270,40 @@ export class KeyboardMouseInput {
     };
   }
 
+  /**
+   * Merge held keys, mouse buttons and mouse-look into a physical pad's frame.
+   *
+   * A connected-but-idle gamepad (paired DualSense, Steam Input, a headset
+   * that exposes HID buttons) used to shadow the keyboard completely, so the
+   * player's keys and mouse did nothing. The pad still wins where it is
+   * actually being used: keyboard axes only replace a stick when a movement
+   * key is down, and mouse-look only replaces the right stick while looking.
+   */
+  overlay(state: PadState): PadState {
+    const k = this.sample(state.seq);
+    const moving = k.lx !== 128 || k.ly !== 128;
+    const looking = k.rx !== 128 || k.ry !== 128;
+    return {
+      ...state,
+      buttons: state.buttons | k.buttons,
+      lx: moving ? k.lx : state.lx,
+      ly: moving ? k.ly : state.ly,
+      rx: looking ? k.rx : state.rx,
+      ry: looking ? k.ry : state.ry,
+      l2: Math.max(state.l2, k.l2),
+      r2: Math.max(state.r2, k.r2),
+    };
+  }
+
   /** True while any key or mouse button is held, or unprocessed mouse motion exists. */
   hasInput(): boolean {
     return (
       this.keys.size > 0 ||
       this.mouseButtons !== 0 ||
-      Math.abs(this.mouseDx) > 0.001 ||
-      Math.abs(this.mouseDy) > 0.001
+      Math.abs(this.pendingDx) > 0.001 ||
+      Math.abs(this.pendingDy) > 0.001 ||
+      Math.abs(this.latchDx) > 0.001 ||
+      Math.abs(this.latchDy) > 0.001
     );
   }
 
@@ -221,32 +345,57 @@ export class KeyboardMouseInput {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    this.mouseButtons |= 1 << e.button;
+    this.syncMouseButtonsFromEvent(e);
     this.bumpActivity();
   };
 
   private onMouseUp = (e: MouseEvent) => {
-    this.mouseButtons &= ~(1 << e.button);
+    this.syncMouseButtonsFromEvent(e);
     this.bumpActivity();
   };
 
   private onMouseMove = (e: MouseEvent) => {
-    if (!document.pointerLockElement) return;
-    this.mouseDx += e.movementX / 100;
-    this.mouseDy += e.movementY / 100;
+    // Keep button mask honest under pointer-lock (mouseup can be dropped).
+    this.syncMouseButtonsFromEvent(e);
+    if (!document.pointerLockElement || !this.mouseLookEnabled) return;
+    // Higher gain than /100: pixel motion must reach meaningful stick
+    // deflection so FPS titles (BO2) feel 1:1 with the mouse.
+    this.pendingDx += e.movementX / 35;
+    this.pendingDy += e.movementY / 35;
+    this.lastMouseMoveAt = performance.now();
     this.lookX = Math.max(-1, Math.min(1, this.lookX + e.movementX / 40));
     this.lookY = Math.max(-1, Math.min(1, this.lookY + e.movementY / 40));
-    this.bumpActivity();
+    this.onLookActivity?.();
   };
+
+  /**
+   * DOM `buttons` bitfield → our MouseN mask.
+   * 1=left→Mouse0, 2=right→Mouse2, 4=middle→Mouse1.
+   * Prefer this over edge-only tracking: pointer-lock often drops mouseup.
+   */
+  private syncMouseButtonsFromEvent(e: MouseEvent) {
+    const b = e.buttons ?? 0;
+    let bits = 0;
+    if (b & 1) bits |= 1 << 0;
+    if (b & 2) bits |= 1 << 2;
+    if (b & 4) bits |= 1 << 1;
+    this.mouseButtons = bits;
+  }
 
   private onContextMenu = (e: Event) => {
     if (document.pointerLockElement) e.preventDefault();
   };
 
-  /** Window/tab losing focus means no keyup will ever arrive for held keys — release them all. */
+  /**
+   * Window/tab losing focus means no keyup will ever arrive for held keys —
+   * release keys. Do not clear mouse buttons while pointer-locked: lock
+   * transitions can fire blur and would wipe LMB shoot / RMB aim mid-fight.
+   */
   private onBlur = () => {
     this.keys.clear();
-    this.mouseButtons = 0;
+    if (!document.pointerLockElement) {
+      this.mouseButtons = 0;
+    }
     this.bumpActivity();
   };
 

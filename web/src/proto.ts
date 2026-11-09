@@ -46,6 +46,19 @@ export type SignalMessage =
    * WebCodecs is starting on the DataChannel — keep both paths live as a
    * safety net until it paints, then it reports "webcodecs". */
   | { type: "present_path"; path: "webcodecs" | "rtp" | "warmup" | "clvd" }
+  /** Player → host: receive-side video health for this stats window (the
+   * host's link governor otherwise never sees RTP/WebCodecs-path congestion).
+   * `rtt_ms` is optional so older hosts ignore it safely. */
+  | {
+      type: "client_link_stats";
+      frames_dropped_delta: number;
+      jitter_buffer_ms: number;
+      rtt_ms?: number;
+      /** Per-report deltas; older hosts ignore unknown fields. */
+      packets_lost_delta?: number;
+      packets_received_delta?: number;
+      freeze_count_delta?: number;
+    }
   | {
       type: "stream_info";
       width: number;
@@ -55,6 +68,8 @@ export type SignalMessage =
       capture_ok?: boolean;
       capture_hint?: string;
     }
+  /** Host PC battery (sent with each host_stats window; absent on a host without a battery). */
+  | { type: "host_battery"; percent: number; charging?: boolean; ac?: boolean }
   | {
       type: "host_stats";
       fps: number;
@@ -77,7 +92,28 @@ export type SignalMessage =
       handoff_copy_ms?: number;
       handoff_wait_p95_ms?: number;
       shm_gate_trips?: boolean;
+    }
+  | {
+      type: "split_screen_set";
+      enabled: boolean;
+      view_mode?: "own" | "full";
+      layout?: string;
+      regions?: NormRect[];
+      rescan?: boolean;
+      slot?: number;
+    }
+  | {
+      type: "split_screen_config";
+      master_enabled: boolean;
+      host_view_mode?: "own" | "full";
+      layout?: string;
+      regions?: NormRect[];
+      seat_region?: number[];
+      rescan?: boolean;
     };
+
+/** Normalized crop rect in frame space (0..1). */
+export type NormRect = { x: number; y: number; w: number; h: number };
 
 export function send(ws: WebSocket, msg: SignalMessage) {
   ws.send(JSON.stringify(msg));

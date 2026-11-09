@@ -71,6 +71,8 @@ export interface PlayerCallbacks {
     shm_gate_trips?: boolean;
   }) => void;
   onPadStats?: (hz: number, name: string) => void;
+  /** Host PC battery, broadcast with each host stats window. */
+  onHostBattery?: (b: { percent: number; charging: boolean; ac: boolean }) => void;
   /** This browser's own assigned slot (1-based), so it can label itself
    * correctly in a per-player display instead of guessing. */
   onRegistered?: (slot: number) => void;
@@ -82,6 +84,8 @@ export interface PlayerCallbacks {
   /** A fellow player (not the host) left — drop their entry from any
    * per-player display instead of leaving a stale "connected" row. */
   onPlayerLeft?: (slot: number) => void;
+  /** Host broadcast: split-seat master enable + regions (kaleidoscope). */
+  onSplitScreenConfig?: (msg: Extract<SignalMessage, { type: "split_screen_config" }>) => void;
   /** Full getStats-derived telemetry snapshot, ~2s tick. */
   onTelemetry?: (t: PlayerTelemetry) => void;
 }
@@ -147,6 +151,21 @@ export class CouchlinkPlayer {
   private webcodecsPath = false;
   private clvdAsm = new ClvdAssembler();
   private heartbeatTimer: number | null = null;
+  /** Signaling auto-reconnect (a tunnel/network blip used to leave the page on "Closed" until a manual refresh). */
+  private lastConnectArgs: { url: string; sid: string; pin: string } | null = null;
+  private manualDisconnect = false;
+  private wsReconnectTimer: number | null = null;
+  private wsReconnectAttempts = 0;
+  private wsOpenedAt = 0;
+  /** Video stall watchdog (picture frozen while ICE still says "connected" - needed a manual refresh before). */
+  private stallPc: RTCPeerConnection | null = null;
+  private stallDecoded = -1;
+  private stallBytes = -1;
+  private stallSince = 0;
+  private stallKeyframeSent = false;
+  /** Coalesce PLI on loss/freeze deltas so the 2s stats poll cannot PLI-storm. */
+  private lastLossPliAt = 0;
+  private lastStallRecoverAt = 0;
   private statsTimer: number | null = null;
   private lastStats: { delay: number; count: number; decoded: number } | null =
     null;
@@ -179,6 +198,11 @@ export class CouchlinkPlayer {
   private lastSentL2 = 0;
   private lastSentR2 = 0;
   private padName = "none";
+  /** Cumulative `framesDropped` as of the last stats tick, to derive a delta for `client_link_stats`. */
+  private lastReportedFramesDropped = 0;
+  private lastReportedPacketsLost = 0;
+  private lastReportedPacketsReceived = 0;
+  private lastReportedFreezeCount = 0;
   /** Last 1s pad send-rate reported to the UI, reused in telemetry ticks. */
   private lastPadHz = 0;
   /** Last Gamepad.id announced to the host, so pad_info is sent on change… */
@@ -193,6 +217,9 @@ export class CouchlinkPlayer {
   private lastPathKey = "";
   /** Keyboard+mouse input source — injected by the UI, null if not active. */
   private kbm: KeyboardMouseInput | null = null;
+  /** Coalesce look-only pad flushes (buttons stay on onActivity). */
+  private lookFlushTimer: number | null = null;
+  private lastLookFlushAt = 0;
   /** Touch-screen controller — injected by the UI on mobile, null otherwise. */
   private touch: TouchGamepadInput | null = null;
   /** Previous inbound-rtp sample, for bitrate + loss deltas. */
@@ -219,9 +246,21 @@ export class CouchlinkPlayer {
 
   /** Attach or detach a keyboard/mouse input source. Call with null to disable. */
   setKbm(kbm: KeyboardMouseInput | null) {
-    if (this.kbm) this.kbm.onActivity = null;
+    if (this.kbm) {
+      this.kbm.onActivity = null;
+      this.kbm.onLookActivity = null;
+    }
+    if (this.lookFlushTimer != null) {
+      window.clearTimeout(this.lookFlushTimer);
+      this.lookFlushTimer = null;
+    }
     this.kbm = kbm;
-    if (kbm) kbm.onActivity = () => this.flushKbmPadImmediate();
+    if (kbm) {
+      // Buttons/keys: immediate (Ricardo-class Φ). Look: coalesce so we don't
+      // flood the unordered pad DC at raw mousemove Hz under load.
+      kbm.onActivity = () => this.flushKbmPadImmediate();
+      kbm.onLookActivity = () => this.scheduleLookFlush();
+    }
   }
 
   /** Attach or detach the mobile touch controller. Call with null to disable. */
@@ -231,6 +270,8 @@ export class CouchlinkPlayer {
 
   connect(signalingUrl: string, sessionId: string, pin: string) {
     clog("connect()", { signalingUrl, sessionId, pinLen: pin.length });
+    this.manualDisconnect = false;
+    this.lastConnectArgs = { url: signalingUrl, sid: sessionId, pin };
     this.lastOfferEpoch = 0;
     this.mediaHealthy = false;
     this.webcodecsPath = false;
@@ -257,6 +298,7 @@ export class CouchlinkPlayer {
     this.cb.onState("connecting", `Opening ${url}`);
     const ws = new WebSocket(url);
     this.ws = ws;
+    let everOpened = false;
 
     this.connectTimer = window.setTimeout(() => {
       if (ws.readyState === WebSocket.CONNECTING) {
@@ -272,6 +314,8 @@ export class CouchlinkPlayer {
       clog("websocket open");
       if (this.connectTimer) clearTimeout(this.connectTimer);
       this.connectTimer = null;
+      everOpened = true;
+      this.wsOpenedAt = Date.now();
       this.cb.onState("registering");
       this.sendRegister(ws);
       this.startHeartbeat(ws);
@@ -298,15 +342,44 @@ export class CouchlinkPlayer {
       clog("websocket close", { code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
       if (this.connectTimer) clearTimeout(this.connectTimer);
       if (ev.code !== 1000 && this.ws === ws) {
-        this.cb.onState("error", ev.reason || `Closed (${ev.code})`);
+        // Only reconnect a socket that was up (or is already in a retry sequence); a wrong URL on first connect keeps its error.
+        if (!this.manualDisconnect && this.lastConnectArgs && (everOpened || this.wsReconnectAttempts > 0)) {
+          this.scheduleWsReconnect(ev.code);
+        } else {
+          this.cb.onState("error", ev.reason || `Closed (${ev.code})`);
+        }
       } else if (this.ws === ws) {
         this.cb.onState("disconnected");
       }
     };
   }
 
+  /**
+   * The signaling socket closed unexpectedly (tunnel hiccup, network blip, idle timeout...). Reconnect through the normal
+   * join flow with backoff (1s, 2s, 4s ... 10s). The attempt counter resets once a socket stayed up > 20 s, so a flapping
+   * tunnel backs off instead of hammering. Never runs after an explicit disconnect().
+   */
+  private scheduleWsReconnect(code: number) {
+    if (this.wsReconnectTimer || !this.lastConnectArgs) return;
+    if (this.wsOpenedAt && Date.now() - this.wsOpenedAt > 20_000) this.wsReconnectAttempts = 0;
+    const delay = Math.min(1000 * 2 ** this.wsReconnectAttempts, 10_000);
+    this.wsReconnectAttempts++;
+    cwarn("signaling closed unexpectedly - reconnecting", { code, attempt: this.wsReconnectAttempts, delay });
+    this.cb.onState("connecting", `Connection lost (${code}) - reconnecting (attempt ${this.wsReconnectAttempts})...`);
+    this.wsReconnectTimer = window.setTimeout(() => {
+      this.wsReconnectTimer = null;
+      if (this.manualDisconnect || !this.lastConnectArgs) return;
+      const a = this.lastConnectArgs;
+      this.connect(a.url, a.sid, a.pin);
+    }, delay);
+  }
+
   disconnect() {
     clog("disconnect()");
+    this.manualDisconnect = true;
+    if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
+    this.wsReconnectTimer = null;
+    this.wsReconnectAttempts = 0;
     this.cleanup();
     this.cb.onState("disconnected");
   }
@@ -468,6 +541,7 @@ export class CouchlinkPlayer {
         const stats = await pc.getStats();
         const path = this.logSelectedPath(stats);
         const video = this.collectInbound(stats);
+        this.checkVideoStall(pc, video);
         this.cb.onTelemetry?.({
           path,
           video,
@@ -486,11 +560,106 @@ export class CouchlinkPlayer {
             totalFreezesDuration: video.totalFreezesDuration,
             jbTarget: this.videoReceiver?.jitterBufferTarget ?? null,
           });
+          // Host link governor is blind on RTP/WebCodecs once CLVD sheds go to
+          // zero — report receive-side drops (and RTT) so it can step down.
+          // Matches live freeze pattern: host drop_pct=0 while friend freezes.
+          const droppedDelta = Math.max(
+            0,
+            video.framesDropped - this.lastReportedFramesDropped
+          );
+          this.lastReportedFramesDropped = video.framesDropped;
+          // Packet loss and freezes are what a lossy WAN actually shows: NACK/FEC
+          // hide loss from framesDropped while the picture still stalls on a
+          // retransmit. Cumulative counters → per-report deltas (clamped so a
+          // stats reset never goes negative).
+          const lostDelta = Math.max(0, video.packetsLost - this.lastReportedPacketsLost);
+          const recvDelta = Math.max(
+            0,
+            video.packetsReceived - this.lastReportedPacketsReceived
+          );
+          const freezeDelta = Math.max(0, video.freezeCount - this.lastReportedFreezeCount);
+          this.lastReportedPacketsLost = video.packetsLost;
+          this.lastReportedPacketsReceived = video.packetsReceived;
+          this.lastReportedFreezeCount = video.freezeCount;
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            send(this.ws, {
+              type: "client_link_stats",
+              frames_dropped_delta: droppedDelta,
+              jitter_buffer_ms: Math.round(video.jitterBufferMs),
+              rtt_ms: path?.rttMs ?? 0,
+              packets_lost_delta: lostDelta,
+              packets_received_delta: recvDelta,
+              freeze_count_delta: freezeDelta,
+            });
+          }
+          // Don't wait for the 5s stall watchdog — loss/freezes already mean
+          // the picture is about to freeze. PLI now; host also force_idr's on
+          // the matching ClientLinkStats. ≥3s coalesce matches host IDR_INTERVAL.
+          if (lostDelta > 0 || freezeDelta > 0 || droppedDelta > 0) {
+            const nowPli = performance.now();
+            if (nowPli - this.lastLossPliAt >= 3000) {
+              this.lastLossPliAt = nowPli;
+              cwarn("loss/freeze delta — requesting keyframe", {
+                lostDelta,
+                freezeDelta,
+                droppedDelta,
+              });
+              this.requestVideoKeyframe();
+            }
+          }
         }
       } catch (e) {
         cwarn("getStats failed", String(e));
       }
     }, 2000);
+  }
+
+  /**
+   * Video stall watchdog. 2026-10-03: a friend's picture froze mid-game while the host was streaming at 56 fps and the
+   * capture was healthy; ICE still reported "connected", so nothing recovered it and he had to refresh (and lost his game).
+   * If no new frame was decoded for 5 s (tab visible, media was healthy before), ask for a keyframe; if it is still frozen
+   * after 12 s, rebuild the peer through the existing media-recover path (request_offer), at most once per 20 s.
+   */
+  private checkVideoStall(pc: RTCPeerConnection, video: { framesDecoded: number; bytesReceived: number } | null) {
+    if (!video || typeof document === "undefined" || document.visibilityState !== "visible") {
+      this.stallSince = 0;
+      return;
+    }
+    const now = Date.now();
+    if (this.stallPc !== pc) {
+      // New peer connection: start tracking from scratch.
+      this.stallPc = pc;
+      this.stallDecoded = video.framesDecoded;
+      this.stallBytes = video.bytesReceived;
+      this.stallSince = 0;
+      this.stallKeyframeSent = false;
+      return;
+    }
+    if (video.framesDecoded > this.stallDecoded) {
+      this.stallDecoded = video.framesDecoded;
+      this.stallBytes = video.bytesReceived;
+      this.stallSince = 0;
+      this.stallKeyframeSent = false;
+      return;
+    }
+    // No new decoded frame since the last poll. Only treat it as a stall after the stream was proven to work.
+    if (!this.mediaHealthy || this.stallDecoded <= 0) return;
+    if (!this.stallSince) this.stallSince = now;
+    const stalledMs = now - this.stallSince;
+    const bytesMoving = video.bytesReceived > this.stallBytes;
+    this.stallBytes = video.bytesReceived;
+    if (stalledMs >= 5000 && !this.stallKeyframeSent) {
+      this.stallKeyframeSent = true;
+      cwarn("video stalled 5s - requesting keyframe", { bytesMoving, decoded: this.stallDecoded });
+      this.requestVideoKeyframe();
+    }
+    if (stalledMs >= 12000 && now - this.lastStallRecoverAt > 20000) {
+      this.lastStallRecoverAt = now;
+      this.stallSince = 0;
+      this.stallKeyframeSent = false;
+      cwarn("video stalled 12s - recovering media", { bytesMoving, decoded: this.stallDecoded });
+      this.scheduleMediaRecover("video stalled");
+    }
   }
 
   private pinJitterBuffer() {
@@ -554,11 +723,18 @@ export class CouchlinkPlayer {
     if (this.mediaRecoverTimer || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (this.mediaHealthy) {
-      clog("ICE blip while video healthy — waiting before recover", reason);
+    // Soft ICE blip: keep the UI on "connected" and leave WebCodecs/RTP alive.
+    // Emitting waiting_host + "Media lost" made App.tsx stop the decoder immediately
+    // even when ICE self-healed — friend had to refresh (Ricardo 2026-10-10).
+    const softBlip =
+      this.mediaHealthy &&
+      (reason.includes("disconnected") || reason === "connection disconnected");
+    if (softBlip) {
+      clog("ICE blip while video healthy — waiting before recover (no Media lost UI)", reason);
+    } else {
+      cwarn("scheduling media recover", reason);
+      this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     }
-    cwarn("scheduling media recover", reason);
-    this.cb.onState("waiting_host", `Media lost (${reason}) — reconnecting…`);
     this.mediaRecoverTimer = window.setTimeout(() => {
       this.mediaRecoverTimer = null;
       this.mediaHealthy = false;
@@ -568,7 +744,20 @@ export class CouchlinkPlayer {
         send(this.ws, { type: "request_offer" });
         this.cb.onState("waiting_host", "Recovering media…");
       }
-    }, this.mediaHealthy ? MEDIA_RECOVER_DELAY_MS : MEDIA_RECOVER_DELAY_COLD_MS);
+    }, this.mediaHealthy || softBlip ? MEDIA_RECOVER_DELAY_MS : MEDIA_RECOVER_DELAY_COLD_MS);
+  }
+
+  /** Restore connected UI after a soft blip healed without tearing media down. */
+  private clearMediaRecoverIfHealed(via: string) {
+    if (this.mediaRecoverTimer) {
+      clog(`${via} — cancelling media recover timer`);
+      clearTimeout(this.mediaRecoverTimer);
+      this.mediaRecoverTimer = null;
+    }
+    if (this.gotVideoTrack || this.webcodecsPath) {
+      this.mediaHealthy = true;
+      this.cb.onState("connected", "media restored");
+    }
   }
 
   private async applyRemoteOffer(sdp: string, epoch: number) {
@@ -654,14 +843,10 @@ export class CouchlinkPlayer {
       clog("pc.connectionState", pc.connectionState);
       if (pc.connectionState === "connected") {
         // Authoritative healthy signal — both ICE and DTLS are up.
-        this.mediaHealthy = this.gotVideoTrack;
-        if (this.mediaRecoverTimer) {
-          clearTimeout(this.mediaRecoverTimer);
-          this.mediaRecoverTimer = null;
-        }
+        this.clearMediaRecoverIfHealed("connection restored");
       } else if (pc.connectionState === "disconnected") {
         // Transient loss — schedule a recover with the full grace period.
-        // If ICE self-heals the timer will be cancelled before it fires.
+        // Soft blip: no Media lost UI (keeps WebCodecs painted).
         this.scheduleMediaRecover("connection disconnected");
       } else if (pc.connectionState === "failed") {
         cwarn("WebRTC connection failed — scheduling recover");
@@ -671,29 +856,28 @@ export class CouchlinkPlayer {
     pc.oniceconnectionstatechange = () => {
       clog("pc.iceConnectionState", pc.iceConnectionState);
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        // ICE layer is up — mark healthy and cancel any pending recover timer.
-        // connectionState may lag behind iceConnectionState on some browsers.
-        this.mediaHealthy = this.gotVideoTrack;
-        if (this.mediaRecoverTimer) {
-          clog("ICE reconnected — cancelling media recover timer");
-          clearTimeout(this.mediaRecoverTimer);
-          this.mediaRecoverTimer = null;
+        // ICE layer is up — cancel pending recover; connectionState may lag.
+        this.clearMediaRecoverIfHealed("ICE reconnected");
+        if (this.iceDisconnectTimer) {
+          clearTimeout(this.iceDisconnectTimer);
+          this.iceDisconnectTimer = null;
         }
       } else if (pc.iceConnectionState === "disconnected") {
         cwarn("ICE disconnected (may recover on its own)", pc.iceConnectionState);
-        // "disconnected" = browser's consent-freshness pings stopped being answered.
-        // A NAT rebind or brief drop on a live direct P2P path (srflx/srflx) does
-        // exactly this. restartIce() is far cheaper than waiting for `failed` to
-        // trigger a full signaling round-trip — try it after a 4s grace period.
+        // Answerer restartIce() alone cannot renegotiate — after 4s ask the host
+        // for an ICE-restart offer (create_and_send_offer_ice_restart).
         if (!this.iceDisconnectTimer) {
           this.iceDisconnectTimer = window.setTimeout(() => {
             this.iceDisconnectTimer = null;
             if (this.pc?.iceConnectionState !== "disconnected") return;
-            clog("ICE still disconnected after grace — restarting ICE");
+            clog("ICE still disconnected after grace — requesting host ICE-restart offer");
             try {
               this.pc.restartIce();
             } catch (e) {
               cwarn("restartIce failed", String(e));
+            }
+            if (this.ws?.readyState === WebSocket.OPEN) {
+              send(this.ws, { type: "request_offer" });
             }
           }, 4000);
         }
@@ -705,7 +889,7 @@ export class CouchlinkPlayer {
         cwarn("ICE failed — scheduling recover", pc.iceConnectionState);
         this.scheduleMediaRecover("ICE failed");
       } else {
-        // connected / completed / closed — cancel any pending ICE restart timer
+        // checking / closed — cancel any pending ICE restart timer
         if (this.iceDisconnectTimer) {
           clearTimeout(this.iceDisconnectTimer);
           this.iceDisconnectTimer = null;
@@ -1061,10 +1245,45 @@ export class CouchlinkPlayer {
 
   /** Event-driven kbm send — zero poll wait on button edges (Ricardo-class Φ). */
   private flushKbmPadImmediate() {
+    if (this.lookFlushTimer != null) {
+      window.clearTimeout(this.lookFlushTimer);
+      this.lookFlushTimer = null;
+    }
     const kbm = this.kbm;
     if (!kbm?.hasInput()) return;
+    // Physical pad seated: don't replace its frame with pure KBM — re-poll so
+    // mouse-look can overlay rx/ry onto the DualSense (or whatever) state.
+    const pads = navigator.getGamepads?.() ?? [];
+    const physical = selectPhysicalGamepads(
+      [...pads].filter((p): p is Gamepad => !!p)
+    );
+    if (physical[0]) {
+      this.pollAndSendPad();
+      return;
+    }
     this.seq = (this.seq + 1) >>> 0;
     this.emitPad(kbm.sample(this.seq));
+  }
+
+  /**
+   * Look-only flush — coalesce to ~8ms so mousemove doesn't flood the pad DC.
+   * Button `onActivity` still calls {@link flushKbmPadImmediate} and cancels this.
+   */
+  private scheduleLookFlush() {
+    const LOOK_COALESCE_MS = 8;
+    const now = performance.now();
+    if (now - this.lastLookFlushAt >= LOOK_COALESCE_MS) {
+      this.lastLookFlushAt = now;
+      this.flushKbmPadImmediate();
+      return;
+    }
+    if (this.lookFlushTimer != null) return;
+    const wait = Math.max(0, LOOK_COALESCE_MS - (now - this.lastLookFlushAt));
+    this.lookFlushTimer = window.setTimeout(() => {
+      this.lookFlushTimer = null;
+      this.lastLookFlushAt = performance.now();
+      this.flushKbmPadImmediate();
+    }, wait);
   }
 
   private pollAndSendPad() {
@@ -1158,7 +1377,14 @@ export class CouchlinkPlayer {
     }
     this.padName = gp.id;
     this.seq = (this.seq + 1) >>> 0;
-    const state: PadState = fromBrowserGamepad(gp, this.seq);
+    let state: PadState = fromBrowserGamepad(gp, this.seq);
+    // Mouse look → BO2 camera: while pointer-locked with mouse-look on, drive
+    // the right stick from the mouse even if a DualSense is still connected.
+    // Without this, plugging a pad permanently shadows KBM and friends who
+    // "put the controller on" lose camera look.
+    // Keys and mouse buttons merge too, not just look: a seated-but-idle pad
+    // must not swallow the keyboard (PC player: "can't hit any buttons").
+    if (this.kbm) state = this.kbm.overlay(state);
     this.emitPad(state);
     const now = performance.now();
     if (now - this.padWindowStart >= 1000) {
@@ -1233,6 +1459,13 @@ export class CouchlinkPlayer {
       case "host_stats":
         this.cb.onHostStats?.(msg);
         break;
+      case "host_battery":
+        this.cb.onHostBattery?.({
+          percent: msg.percent,
+          charging: msg.charging ?? false,
+          ac: msg.ac ?? false,
+        });
+        break;
       case "players_status":
         this.cb.onPlayersStatus?.(msg.occupied, msg.max);
         break;
@@ -1251,8 +1484,30 @@ export class CouchlinkPlayer {
       case "player_pad_info":
         this.cb.onPlayerPadInfo?.(msg.slot, msg.kind, msg.id ?? "");
         break;
+      case "split_screen_config":
+        this.cb.onSplitScreenConfig?.(msg);
+        break;
       case "pong":
         break;
     }
+  }
+
+  /** Player → host: view mode / detector regions (slot stamped by signaling). */
+  sendSplitScreenSet(opts: {
+    enabled: boolean;
+    viewMode?: "own" | "full";
+    layout?: string;
+    regions?: { x: number; y: number; w: number; h: number }[];
+    rescan?: boolean;
+  }) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    send(this.ws, {
+      type: "split_screen_set",
+      enabled: opts.enabled,
+      view_mode: opts.viewMode,
+      layout: opts.layout,
+      regions: opts.regions,
+      rescan: opts.rescan,
+    });
   }
 }

@@ -9,10 +9,15 @@ fn main() {
 
 #[cfg(windows)]
 mod run {
+    /// Smallest frame worth encoding. NVENC H.264 refuses anything under roughly 145x49, and a
+    /// minimized window reports a ~173x32 caption bar, so resizes below this are ignored.
+    const MIN_ENCODE_W: u32 = 320;
+    const MIN_ENCODE_H: u32 = 180;
     use anyhow::{bail, Context as AnyhowContext, Result};
     use clap::{Parser, ValueEnum};
     use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
     use couchlink_capture_bridge::mf_encoder::{EncoderRequest, HardwareEncoder};
+    use couchlink_capture_bridge::encode_target::{fallback_after_failed_build, plan_target_change, TargetPlan};
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
     use couchlink_capture_bridge::audio::{write_audio_frame, AudioFrame};
     use couchlink_capture_bridge::{window_matches, write_frame_with_format, FrameFormat};
@@ -145,6 +150,8 @@ mod run {
     /// after the emulator restarts. Distinct from 1 so this shows up in a log
     /// as a deliberate restart request rather than a crash.
     const EXIT_SOURCE_CLOSED: i32 = 75;
+    /// Frames submitted that came from the window (not a replay of the last one).
+    static FRESH_SUBMITTED: AtomicU32 = AtomicU32::new(0);
 
     #[derive(Clone, Copy, Debug, ValueEnum)]
     pub enum CaptureSource {
@@ -340,6 +347,12 @@ mod run {
             // so the reported latency is capture-to-encoded, not just encode time.
             let mut submitted_at: Option<Instant> = None;
             let mut enc_us: Vec<u64> = Vec::with_capacity(512);
+            // Last (fps, bitrate) an encoder was successfully built with, and the last target a build REJECTED. A rebuild that fails
+            // must not kill the stream (2026-10-03: governor stepped 10000 -> 4000 kbps, the rebuild was rejected, no frames, the host
+            // dropped the capture every 1.5 s and the friend's picture froze): fall back to the last good settings and do not retry the
+            // rejected target until the host commands something else.
+            let mut last_good: Option<(u32, u32)> = None;
+            let mut rejected: Option<(u32, u32)> = None;
             'build: loop {
                 let Some((w, h, pixels, _t)) = seed.take().or_else(|| raw_rx.recv().ok()) else {
                     return;
@@ -347,21 +360,39 @@ mod run {
                 // The host may have commanded fps/bitrate since the last build —
                 // re-read them so a SET_TARGET lands on the next encoder, and mark
                 // what we built so a later change rebuilds again.
-                let fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
-                let bitrate_bps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed) * 1000;
+                let mut fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
+                let mut bitrate_bps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed) * 1000;
                 // Prefer the device-backed encoder so textures can go straight in;
                 // fall back to the system-memory encoder if it will not take a device.
                 let zero_copy_wanted = matches!(pixels, Surface::Texture(_));
-                let built = if zero_copy_wanted {
-                    HardwareEncoder::new_with_device(&device.0, w, h, fps, bitrate_bps).or_else(|e| {
-                        warn!("encoder refused the D3D11 device ({e:#}) — system memory it is");
+                let try_build = |fps: u32, bitrate_bps: u32| {
+                    if zero_copy_wanted {
+                        HardwareEncoder::new_with_device(&device.0, w, h, fps, bitrate_bps).or_else(|e| {
+                            warn!("encoder refused the D3D11 device ({e:#}) — system memory it is");
+                            HardwareEncoder::new(w, h, fps, bitrate_bps)
+                        })
+                    } else {
                         HardwareEncoder::new(w, h, fps, bitrate_bps)
-                    })
-                } else {
-                    HardwareEncoder::new(w, h, fps, bitrate_bps)
+                    }
                 };
+                let mut built = try_build(fps, bitrate_bps);
+                if built.is_err() {
+                    if let Some((good_fps, good_bps)) = fallback_after_failed_build((fps, bitrate_bps), last_good) {
+                        let why = built.as_ref().err().map(|e| format!("{e:#}")).unwrap_or_default();
+                        warn!(
+                            "encoder rebuild at {fps} fps / {} kbps failed ({why}) — keeping the last working {good_fps} fps / {} kbps",
+                            bitrate_bps / 1000,
+                            good_bps / 1000
+                        );
+                        rejected = Some((fps, bitrate_bps));
+                        fps = good_fps;
+                        bitrate_bps = good_bps;
+                        built = try_build(fps, bitrate_bps);
+                    }
+                }
                 let mut encoder = match built {
                     Ok(e) => {
+                        last_good = Some((fps, bitrate_bps));
                         if !e.is_zero_copy() {
                             ZERO_COPY_OK.store(false, Ordering::Relaxed);
                         }
@@ -383,7 +414,7 @@ mod run {
                 // to deliver. Output cadence follows input cadence, and a receiver
                 // sizes its jitter buffer from irregularity, not from rate — this is
                 // the same fix that took the raw path's buffer from 97ms to 6ms.
-                let tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
+                let mut tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
                 let mut next_submit = Instant::now();
                 // Only pixel frames can be re-encoded to fill a gap: a pooled texture
                 // is recycled by the capture thread and would be overwritten.
@@ -391,6 +422,8 @@ mod run {
                 let mut replay_target: Option<ReplayTarget> = None;
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
+                let mut tiny_frames = 0u32;
+                let mut fresh = 0u32;
                 let mut encoded_window = Instant::now();
 
                 loop {
@@ -410,11 +443,34 @@ mod run {
                             if next_submit > now {
                                 std::thread::sleep(next_submit - now);
                             }
+                            // The link governor's fps rungs act here, on the submit beat: the encoder is never rebuilt for an fps
+                            // change (see `plan_target_change`), so the commanded fps has to land in the pacing or the governor's
+                            // message-rate relief never reaches the wire. One relaxed atomic load per beat.
+                            tick = Duration::from_micros(1_000_000 / TARGET_FPS.load(Ordering::Relaxed).max(1) as u64);
                             next_submit = Instant::now() + tick;
 
                             // Take the newest frame available, not the oldest.
                             while let Ok(newer) = raw_rx.try_recv() {
                                 latest = Some(newer);
+                            }
+                            // A minimized/shrunk window (WGC reports its 173x32 caption bar)
+                            // is not a frame worth encoding: following it rebuilds the encoder
+                            // at a size NVENC rejects ("input type is not supported"), the
+                            // stream dies and the host kills the capture after 4 s. Drop it and
+                            // keep replaying the last real frame until the window is back.
+                            if latest
+                                .as_ref()
+                                .is_some_and(|(lw, lh, _, _)| *lw < MIN_ENCODE_W || *lh < MIN_ENCODE_H)
+                            {
+                                if let Some((lw, lh, _, _)) = latest.take() {
+                                    if tiny_frames == 0 {
+                                        info!("window shrank to {lw}x{lh} (minimized?) - holding the last frame instead of rebuilding the encoder");
+                                    }
+                                    tiny_frames += 1;
+                                }
+                            } else if tiny_frames > 0 {
+                                info!("window back to normal size after {tiny_frames} undersized frames");
+                                tiny_frames = 0;
                             }
                             // Nothing new this beat? Re-encode the frame we already
                             // have, so a static screen keeps the cadence hole-free
@@ -473,12 +529,29 @@ mod run {
                             // so rebuild then too.
                             let now_fps = TARGET_FPS.load(Ordering::Relaxed).max(1);
                             let now_kbps = TARGET_BITRATE_KBPS.load(Ordering::Relaxed);
-                            if now_fps != fps || now_kbps * 1000 != bitrate_bps {
-                                info!(
-                                    "encode target now {fw}x{fh}@{now_fps} ({now_kbps} kbps) — rebuilding encoder"
-                                );
-                                seed = Some((fw, fh, surface, captured_at));
-                                continue 'build;
+                            match plan_target_change((fps, bitrate_bps), (now_fps, now_kbps * 1000), rejected) {
+                                TargetPlan::Keep => {}
+                                // The link governor's normal move: apply it to the running encoder. No teardown, no IDR, no
+                                // gap, no latency spike.
+                                TargetPlan::ApplyBitrate(bps) => match encoder.set_bitrate(bps) {
+                                    Ok(()) => {
+                                        info!("encode bitrate now {now_kbps} kbps — applied to the running encoder (no rebuild)");
+                                        bitrate_bps = bps;
+                                        last_good = Some((fps, bitrate_bps));
+                                    }
+                                    Err(e) => {
+                                        info!(
+                                            "encode target now {fw}x{fh}@{now_fps} ({now_kbps} kbps) — runtime change refused ({e:#}), rebuilding encoder"
+                                        );
+                                        seed = Some((fw, fh, surface, captured_at));
+                                        continue 'build;
+                                    }
+                                },
+                                TargetPlan::Rebuild => {
+                                    info!("encode target now {fw}x{fh}@{now_fps} ({now_kbps} kbps) — rebuilding encoder");
+                                    seed = Some((fw, fh, surface, captured_at));
+                                    continue 'build;
+                                }
                             }
                             let submitted = match &surface {
                                 // A texture arriving at a system-memory encoder means
@@ -494,6 +567,7 @@ mod run {
                                     // since two clones of the same COM object live at
                                     // different addresses.
                                     if submitted.is_ok() && from_source {
+                                        FRESH_SUBMITTED.fetch_add(1, Ordering::Relaxed);
                                         if replay_target.as_ref().map(|r| r.dimensions())
                                             != Some((fw, fh))
                                         {
@@ -539,6 +613,7 @@ mod run {
                                     .try_send((w, h, f.data, FrameFormat::H264, key))
                                     .is_ok();
                                 encoded += 1;
+                                fresh += FRESH_SUBMITTED.swap(0, Ordering::Relaxed);
                                 if !queued {
                                     stalled += 1;
                                     encoder.request_keyframe();
@@ -553,7 +628,7 @@ mod run {
                                             / 1000.0
                                     };
                                     info!(
-                                        "encoded {:.1} fps ({bytes} bytes/frame, {stalled} not queued) \
+                                        "encoded {:.1} fps ({fresh} new from window, {bytes} bytes/frame, {stalled} not queued) \
                                          | capture->encoded p50={:.1}ms p99={:.1}ms",
                                         encoded as f64 / encoded_window.elapsed().as_secs_f64(),
                                         p(50),
@@ -561,6 +636,7 @@ mod run {
                                     );
                                     enc_us.clear();
                                     encoded = 0;
+                                    fresh = 0;
                                     stalled = 0;
                                     encoded_window = Instant::now();
                                 }
@@ -918,16 +994,63 @@ mod run {
         }
     }
 
+    fn hwnd_visible(hwnd: isize) -> bool {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+        unsafe { IsWindowVisible(HWND(hwnd as *mut _)).as_bool() }
+    }
+
+    /// First matching window, preferring a *visible* one. PCSX2 (and other Qt
+    /// emulators) answer F11 by hiding the game window and creating a second,
+    /// same-titled borderless one, so more than one window can match.
     fn find_window(needle: &str) -> Result<Option<Window>> {
         let wins = Window::enumerate().context("enumerate windows")?;
+        let mut hidden = None;
         for w in wins {
             let title = w.title().unwrap_or_default();
             let proc = w.process_name().unwrap_or_default();
             if window_matches(needle, &title, &proc) && !title.trim().is_empty() {
-                return Ok(Some(w));
+                if hwnd_visible(w.as_raw_hwnd() as isize) {
+                    return Ok(Some(w));
+                }
+                hidden.get_or_insert(w);
             }
         }
-        Ok(None)
+        Ok(hidden)
+    }
+
+    /// Exit 75 when the captured window is hidden and a different visible one
+    /// matches, so the launcher re-attaches to it.
+    ///
+    /// Live-traced 2026-11-06: F11 in PCSX2 hides the game window (new HWND for
+    /// the fullscreen one, same title). The WGC item on the hidden window never
+    /// closes, so `on_closed` never fires; frames just stop and the yellow
+    /// border vanishes until the player leaves fullscreen. Cost when idle is
+    /// one `IsWindowVisible` per 250 ms on a side thread, nothing on the frame path.
+    fn spawn_hidden_watch(hwnd: isize, needle: String) {
+        std::thread::spawn(move || {
+            let mut hidden_since: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                if hwnd_visible(hwnd) {
+                    hidden_since = None;
+                    continue;
+                }
+                let since = *hidden_since.get_or_insert_with(Instant::now);
+                if since.elapsed() < Duration::from_millis(500) {
+                    continue;
+                }
+                if let Ok(Some(w)) = find_window(&needle) {
+                    let other = w.as_raw_hwnd() as isize;
+                    if other != hwnd && hwnd_visible(other) {
+                        warn!("hwnd {hwnd} hidden; replacement hwnd {other}");
+                        warn!("captured window hidden and another matching window is visible (fullscreen toggle?) — exiting to re-attach");
+                        std::thread::sleep(Duration::from_millis(50));
+                        std::process::exit(EXIT_SOURCE_CLOSED);
+                    }
+                }
+            }
+        });
     }
 
     /// Host commands, multiplexed on the reverse of the frame socket.
@@ -1323,6 +1446,13 @@ mod run {
                             );
                         }
                     }
+
+                    info!(
+                        "capture target hwnd={} visible={}",
+                        w.as_raw_hwnd() as isize,
+                        hwnd_visible(w.as_raw_hwnd() as isize)
+                    );
+                    spawn_hidden_watch(w.as_raw_hwnd() as isize, args.window.clone());
 
                     if args.keep_rendering {
                         couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());

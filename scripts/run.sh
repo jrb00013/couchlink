@@ -395,6 +395,10 @@ fi
 PIDS=()
 cleanup() {
   couchlink_say "==> shutting down"
+  # Stop CF watchdog before killing children so it doesn't race a restart.
+  if declare -F couchlink_stop_cloudflared_watchdog >/dev/null 2>&1; then
+    couchlink_stop_cloudflared_watchdog
+  fi
   for pid in "${PIDS[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done

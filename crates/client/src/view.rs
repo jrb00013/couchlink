@@ -46,6 +46,52 @@ struct FrameTextures {
     height: u32,
 }
 
+/// Normalized UV crop in frame space. Full frame = (0,0,1,1).
+#[derive(Debug, Clone, Copy)]
+pub struct UvCrop {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Default for UvCrop {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        }
+    }
+}
+
+/// Shared with the network thread (SplitScreenConfig) — paint gate when armed
+/// and crop unknown mirrors the web client.
+#[derive(Debug, Clone)]
+pub struct CropState {
+    pub armed: bool,
+    pub crop: Option<UvCrop>,
+}
+
+impl Default for CropState {
+    fn default() -> Self {
+        Self {
+            armed: false,
+            crop: None,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CropUniform {
+    /// xy = origin, zw = size in UV space
+    rect: [f32; 4],
+    /// x = armed (1) without crop → paint black; else 0
+    gate: [f32; 4],
+}
+
 struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -54,16 +100,18 @@ struct Renderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    crop_buf: wgpu::Buffer,
     current_frame: Option<FrameTextures>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
     status_text: TextBuffer,
+    crop_state: Arc<Mutex<CropState>>,
 }
 
 impl Renderer {
-    fn new(window: Arc<Window>) -> Result<Self> {
+    fn new(window: Arc<Window>, crop_state: Arc<Mutex<CropState>>) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone())?;
@@ -102,6 +150,9 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
                 r#"
 struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+struct Crop { rect: vec4<f32>, gate: vec4<f32> };
+
+@group(0) @binding(4) var<uniform> crop: Crop;
 
 @vertex
 fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
@@ -109,6 +160,7 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
         vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
     );
+    // Full-frame UVs; fragment remaps into crop.rect (xy=origin, zw=size).
     var uvs = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 0.0),
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
@@ -126,12 +178,17 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VOut {
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    // Paint gate: isolation armed but crop unknown → black (never flash full split).
+    if (crop.gate.x > 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let uv = crop.rect.xy + in.uv * crop.rect.zw;
     // Full-range BT.709 (matches bgra_to_nv12 + MF_MT_YUV_MATRIX on the host
     // and VIDEO_COLOR_SPACE in webCodecsCanvas.ts). No 16/235 studio-swing
     // rescale needed — capture is already 0..255 PC levels.
-    let y = textureSample(t_frame, s_frame, in.uv).r;
-    let u = textureSample(t_u, s_frame, in.uv).r - 0.5019608;
-    let v = textureSample(t_v, s_frame, in.uv).r - 0.5019608;
+    let y = textureSample(t_frame, s_frame, uv).r;
+    let u = textureSample(t_u, s_frame, uv).r - 0.5019608;
+    let v = textureSample(t_v, s_frame, uv).r - 0.5019608;
     let rgb = vec3<f32>(
         y + 1.5748 * v,
         y - 0.1873 * u - 0.4681 * v,
@@ -182,6 +239,16 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -216,6 +283,21 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             ..Default::default()
         });
 
+        let crop_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("crop-uniform"),
+            size: std::mem::size_of::<CropUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &crop_buf,
+            0,
+            bytemuck::bytes_of(&CropUniform {
+                rect: [0.0, 0.0, 1.0, 1.0],
+                gate: [0.0; 4],
+            }),
+        );
+
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let mut text_atlas = TextAtlas::new(&device, &queue, config.format);
@@ -233,13 +315,29 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             pipeline,
             bind_group_layout,
             sampler,
+            crop_buf,
             current_frame: None,
             font_system,
             swash_cache,
             text_atlas,
             text_renderer,
             status_text,
+            crop_state,
         })
+    }
+
+    fn sync_crop_uniform(&self) {
+        let st = self.crop_state.lock().unwrap_or_else(|e| e.into_inner());
+        let (rect, gate) = match (st.armed, st.crop) {
+            (true, None) => ([0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 0.0]),
+            (_, Some(c)) => ([c.x, c.y, c.w, c.h], [0.0; 4]),
+            (false, None) => ([0.0, 0.0, 1.0, 1.0], [0.0; 4]),
+        };
+        self.queue.write_buffer(
+            &self.crop_buf,
+            0,
+            bytemuck::bytes_of(&CropUniform { rect, gate }),
+        );
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -320,6 +418,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     }
 
     fn draw(&mut self) -> Result<()> {
+        self.sync_crop_uniform();
         let show_status = self.current_frame.is_none();
         if show_status {
             self.text_renderer
@@ -424,6 +523,10 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.crop_buf.as_entire_binding(),
+                },
             ],
         });
         FrameTextures {
@@ -504,6 +607,7 @@ struct App {
     renderer: Option<Renderer>,
     frame_rx: Receiver<DecodedFrame>,
     keyboard_pad: Arc<Mutex<KeyboardPad>>,
+    crop_state: Arc<Mutex<CropState>>,
     shutdown_tx: std::sync::mpsc::Sender<()>,
     init_error: Option<anyhow::Error>,
     present_us: Vec<u64>,
@@ -621,7 +725,7 @@ impl ApplicationHandler for App {
         match event_loop.create_window(attrs) {
             Ok(w) => {
                 let window = Arc::new(w);
-                match Renderer::new(window.clone()) {
+                match Renderer::new(window.clone(), Arc::clone(&self.crop_state)) {
                     Ok(mut r) => {
                         r.set_waiting_copy(&self.join_field, self.field_error.as_deref());
                         self.renderer = Some(r);
@@ -778,6 +882,7 @@ pub fn run(
     keyboard_pad: Arc<Mutex<KeyboardPad>>,
     shutdown_tx: std::sync::mpsc::Sender<()>,
     join_prefill: String,
+    crop_state: Arc<Mutex<CropState>>,
 ) -> Result<ViewResult> {
     let event_loop = EventLoop::new()?;
     let mut app = App {
@@ -785,6 +890,7 @@ pub fn run(
         renderer: None,
         frame_rx,
         keyboard_pad,
+        crop_state,
         shutdown_tx,
         init_error: None,
         present_us: Vec::with_capacity(512),
