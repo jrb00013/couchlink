@@ -62,7 +62,7 @@ const HUNG_RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// instead of TCP: a hung win-capture never errors this side's read, it just
 /// stops sending, so `maybe_respawn` needs a second trigger besides a socket
 /// error.
-const FRAME_STALE_AFTER: Duration = Duration::from_millis(1500);
+const FRAME_STALE_AFTER: Duration = Duration::from_secs(4);
 /// Cap on per-frame wait samples kept for p95 (SHM decision gate).
 const WAIT_SAMPLE_CAP: usize = 120;
 

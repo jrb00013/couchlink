@@ -5,6 +5,7 @@
 
 #[cfg(windows)]
 mod backend;
+mod focus_gate;
 #[cfg(windows)]
 mod pipe_win;
 #[cfg(windows)]
