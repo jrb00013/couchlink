@@ -39,6 +39,22 @@ const RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// Hung-alive (socket reconnects, no frames): recover faster than the crash-loop
 /// floor. 20s left friends on black "webcodecs video" after each hang (2026-10-12 MK).
 const HUNG_RESPAWN_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Cold-start grace, applied only until the *first* frame ever lands.
+///
+/// `session_started_at` already gives each accepted socket one
+/// `FRAME_STALE_AFTER` to produce its first NAL, which is the right fix for a
+/// *reconnect* inheriting a stale clock (live 2026-10-12). It does not cover a
+/// genuine cold start, where win-capture needs longer than 1.5s to launch,
+/// dial, resolve the window needle and spin up WGC. Declaring that "hung" is
+/// unrecoverable: `last_frame_at` is never re-seeded on accept, so FORCE-kill
+/// destroys a healthy capture and every later reconnect is instantly "hung"
+/// again — livelocked on a black "webcodecs video" page while the socket keeps
+/// streaming. Live 2026-10-16 (MK): fired at 1.5s with ~1.1 MB/s inbound.
+///
+/// Once a frame has been received the strict `FRAME_STALE_AFTER` path — and
+/// `session_started_at`'s reconnect grace — apply unchanged.
+pub(super) const FIRST_FRAME_GRACE: Duration = Duration::from_secs(10);
 /// Once a frame has started, the rest is already in flight — allow plenty of time.
 const FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// A hung (not crashed/disconnected) win-capture never trips `Err` from
@@ -472,8 +488,27 @@ impl WindowsBridge {
                 // not inherit a multi-second-stale last_frame_at and get killed
                 // before the first NAL lands (live 2026-10-12: encode OK, host
                 // FORCE-killed mid-handshake → Connection reset loop).
+                //
+                // `session_started_at` buys one FRAME_STALE_AFTER of first-frame
+                // grace per accept, which covers a quick handshake but not a cold
+                // start: a fresh win-capture must launch, dial, resolve the window
+                // needle and spin up WGC before its first NAL exists, and that
+                // routinely takes longer than 1.5s. Nothing has ever proven this
+                // capture healthy, so calling it "hung" is a guess — and a costly
+                // one, because `last_frame_at` is never re-seeded on accept: a
+                // wrong guess FORCE-kills a healthy capture and every later
+                // reconnect is instantly "hung" again. Live 2026-10-16 (MK cold
+                // start): the watchdog fired while ~1.1 MB/s was arriving on the
+                // socket, and the host livelocked on a black page.
+                //
+                // So before the first frame ever lands, hold the wider net.
                 let healthy_at = self.last_frame_at.max(self.session_started_at);
-                if healthy_at.elapsed() >= FRAME_STALE_AFTER {
+                let threshold = if self.frames_received == 0 {
+                    FIRST_FRAME_GRACE
+                } else {
+                    FRAME_STALE_AFTER
+                };
+                if healthy_at.elapsed() >= threshold {
                     tracing::warn!(
                         "no frame from win-capture in {:?} (socket still open — \
                          likely hung, not disconnected) — treating as dead",
@@ -583,6 +618,12 @@ mod tests {
     /// Accept *does* start a fresh session clock so a real post-launch
     /// reconnect gets grace for the first frame — hung writers still die once
     /// that grace elapses with no frame.
+    ///
+    /// `frames_received: 1` — this capture was healthy and *then* went silent,
+    /// which is the real hang signature, so the strict `FRAME_STALE_AFTER`
+    /// applies and FORCE-kill must fire promptly. The never-healthy cold-start
+    /// case is deliberately different and is covered by
+    /// `cold_start_is_not_force_killed_before_its_first_frame`.
     #[test]
     fn silent_tcp_reconnect_does_not_mark_capture_healthy() {
         use std::net::TcpListener;
@@ -606,7 +647,7 @@ mod tests {
             format: FrameFormat::H264,
             keyframe: false,
             target: None,
-            frames_received: 0,
+            frames_received: 1, // was healthy, then went silent (real hang signature)
             disconnected_at: Some(outage_start),
             last_respawn: None,
             last_frame_at: stale,
@@ -654,6 +695,82 @@ mod tests {
         assert!(
             bridge.last_respawn.is_some(),
             "hung-alive must FORCE-respawn once session grace elapses with no frame"
+        );
+
+        writer.join().unwrap();
+    }
+
+    /// A cold start must not be mistaken for a hang.
+    ///
+    /// `session_started_at` gives an accepted socket one `FRAME_STALE_AFTER` to
+    /// deliver its first NAL, which is the right fix for a *reconnect* inheriting
+    /// a stale clock. It does not cover a genuine first-ever connection, where
+    /// win-capture has to launch, dial, resolve the window needle and spin up WGC
+    /// — routinely longer than 1.5s before a frame even exists.
+    ///
+    /// Nothing has proven this capture healthy yet, so "hung" is a guess, and an
+    /// expensive one: `last_frame_at` is never re-seeded on accept, so a wrong
+    /// call FORCE-kills a healthy capture and every later reconnect is instantly
+    /// "hung" again. Live 2026-10-16 (MK cold start): the watchdog fired at 1.5s
+    /// while ~1.1 MB/s was arriving on the socket, and the host livelocked on a
+    /// black "webcodecs video" page.
+    ///
+    /// The deliberate cost: a never-healthy silent writer now takes
+    /// `FIRST_FRAME_GRACE` to be killed instead of `FRAME_STALE_AFTER`. A capture
+    /// that has once delivered a frame is unaffected.
+    #[test]
+    fn cold_start_is_not_force_killed_before_its_first_frame() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Past both FRAME_STALE_AFTER and the accept grace: exactly the cold-start
+        // window that used to trip the watchdog mid-handshake.
+        let stale = Instant::now()
+            .checked_sub(FRAME_STALE_AFTER + Duration::from_millis(800))
+            .unwrap_or_else(Instant::now);
+        let mut bridge = WindowsBridge {
+            listener,
+            stream: None,
+            width: 0,
+            height: 0,
+            buf: Vec::new(),
+            pending: None,
+            last: None,
+            format: FrameFormat::H264,
+            keyframe: false,
+            target: None,
+            frames_received: 0,
+            disconnected_at: None,
+            last_respawn: None,
+            last_frame_at: stale,
+            session_started_at: stale,
+            ever_connected: true,
+            pending_audio: VecDeque::new(),
+        };
+
+        // Writer dials and stays open without ever sending a frame — the
+        // cold-start signature (distinct from the hung-after-healthy case above).
+        let writer = std::thread::spawn(move || {
+            let _stream = TcpStream::connect(addr).unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while bridge.stream.is_none() && Instant::now() < deadline {
+            let _ = bridge.capture();
+        }
+        assert!(bridge.stream.is_some(), "writer never connected");
+
+        // Well past FRAME_STALE_AFTER, but no frame has ever landed.
+        let _ = bridge.capture();
+        assert!(
+            bridge.stream.is_some(),
+            "cold start must not drop a capture that has not produced a frame yet"
+        );
+        assert!(
+            bridge.last_respawn.is_none(),
+            "cold start must not FORCE-kill before the first frame proves liveness"
         );
 
         writer.join().unwrap();
