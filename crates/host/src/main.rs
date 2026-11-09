@@ -14,6 +14,7 @@ mod nat_punch;
 mod ricardo_playable_ab;
 mod scale;
 mod signaling_client;
+mod split_seat;
 mod wan3_math;
 mod webrtc_peer;
 
@@ -619,6 +620,14 @@ async fn main() -> Result<()> {
     .await?;
 
     let signal_out = signaling.outbound.clone();
+    let split_seat_state = Arc::new(Mutex::new(split_seat::SplitSeatState::default()));
+    {
+        let st = Arc::clone(&split_seat_state);
+        let out = signal_out.clone();
+        tokio::spawn(split_seat::serve_control(st, out));
+    }
+    // Publish initial kaleidoscope config (master may be env-enabled).
+    split_seat::broadcast_config(&split_seat_state, &signal_out).await;
     {
         let (kind, id) = host_physical_pad();
         let _ = signal_out.send(SignalMessage::PadInfo {
@@ -724,6 +733,8 @@ async fn main() -> Result<()> {
                     &mut force_idr,
                 )
                 .await?;
+                // Late joiners must see current kaleidoscope master/regions.
+                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                 break;
             }
             SignalMessage::Error { message } => warn!("signal error: {message}"),
@@ -807,6 +818,7 @@ async fn main() -> Result<()> {
                             // else that arrived during the drain.
                             let (joins, deferred) =
                                 take_queued_joins(&mut signaling.inbound, slot, epoch);
+                            let had_joins = !joins.is_empty();
                             for (slot, epoch) in joins {
                                 handle_slot_join(
                                     slot,
@@ -820,6 +832,9 @@ async fn main() -> Result<()> {
                                     &mut force_idr,
                                 )
                                 .await?;
+                            }
+                            if had_joins {
+                                split_seat::broadcast_config(&split_seat_state, &signal_out).await;
                             }
                             // Re-handle non-join messages that arrived during the
                             // drain (answers for a *replaced* peer are dropped by
@@ -844,6 +859,32 @@ async fn main() -> Result<()> {
                                 });
                             }
                         }
+                        SignalMessage::SplitScreenSet {
+                            enabled,
+                            view_mode,
+                            layout,
+                            regions,
+                            rescan,
+                            slot,
+                        } => {
+                            let msg = SignalMessage::SplitScreenSet {
+                                enabled,
+                                view_mode: view_mode.clone(),
+                                layout: layout.clone(),
+                                regions: regions.clone(),
+                                rescan,
+                                slot,
+                            };
+                            {
+                                let mut st = split_seat_state.lock().await;
+                                split_seat::apply_player_set(&mut st, &msg);
+                                info!(
+                                    "slot {slot}: split_screen_set enabled={enabled} \
+                                     view={view_mode} layout={layout} rescan={rescan}"
+                                );
+                            }
+                            split_seat::broadcast_config(&split_seat_state, &signal_out).await;
+                        }
                         SignalMessage::PresentPath { path, slot } => {
                             if let Some(conn) = slots.lock().await.get(&slot) {
                                 conn.host.set_present_path(&path);
@@ -860,11 +901,12 @@ async fn main() -> Result<()> {
                             freeze_count_delta,
                             slot,
                         } => {
-                            if link_gov::client_report_is_congested(
+                            let loss_congested = link_gov::client_report_is_congested(
                                 packets_lost_delta,
                                 packets_received_delta,
                                 freeze_count_delta,
-                            ) {
+                            );
+                            if loss_congested {
                                 link_gov.note_client_loss();
                                 // warn: COUCHLINK_VERBOSE=0 filters info! — need this live.
                                 warn!(
@@ -909,6 +951,18 @@ async fn main() -> Result<()> {
                                     "slot {slot}: client rtt {rtt_ms}ms (≥{}) — marking link \
                                      congested (jb={jitter_buffer_ms}ms)",
                                     link_gov::RTT_CONGESTION_MS
+                                );
+                            }
+                            // Recover *now* — waiting for the next 5s gov window
+                            // + periodic IDR left friends on "Media lost" for
+                            // 5–12s. Coalesce with IDR_INTERVAL so reports every
+                            // 2s cannot IDR-storm.
+                            if (loss_congested || reacted || rtt_ms >= RTT_CONGESTION_MS)
+                                && last_idr.elapsed() >= IDR_INTERVAL
+                            {
+                                force_idr = true;
+                                info!(
+                                    "slot {slot}: client congestion — requesting IDR for recovery"
                                 );
                             }
                         }
@@ -1017,6 +1071,16 @@ async fn main() -> Result<()> {
                                             decided.bitrate_kbps, drop_pct
                                         );
                                     }
+                                    // Recovery: shed mid-GOP leaves friends on frozen /
+                                    // "media lost" until the next periodic IDR. Force one
+                                    // re-anchor when the window was lossy (rate-limited by
+                                    // IDR_INTERVAL via last_idr below).
+                                    if drop_pct >= 8 && last_idr.elapsed() >= IDR_INTERVAL {
+                                        force_idr = true;
+                                        info!(
+                                            "link recovery: {drop_pct}% shed this window — requesting IDR"
+                                        );
+                                    }
                                     let received = capturer.take_received();
                                     let (wait_ms, copy_ms, wait_p95_ms) = capturer.take_handoff_ms();
                                     let omega = crate::input_photon_budget::handoff_wait_periods(
@@ -1037,8 +1101,8 @@ async fn main() -> Result<()> {
                                             "link keeping up".to_string()
                                         } else {
                                             format!(
-                                                "bottleneck: peer/network can't consume at {:.0} Mbps",
-                                                preset.bitrate_kbps as f64 / 1000.0
+                                                "bottleneck: peer/network can't consume at {:.1} Mbps (commanded)",
+                                                commanded_target.bitrate_kbps as f64 / 1000.0
                                             )
                                         },
                                     );

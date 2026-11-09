@@ -7,6 +7,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 R="${RPCS3_DIR:-/mnt/c/Users/josep/RPCS3}"
 echo "==> active build: $(tr -d '\r\n' < "$R/versions/ACTIVE.txt")   PPU priority fix: $(tools/rpcs3-debug/set-prio.sh status | sed 's/.*= //')"
+echo "==> ensuring BO2 softlock pack defaults (hang-detect + force-complete ON)"
+RPCS3_DIR="$R" contrib/rpcs3-bo2-splitscreen/install.sh 2>&1 | tail -8
 echo "==> launching BO2"
 powershell.exe -NoProfile -Command 'Start-Process -FilePath "C:\Users\josep\RPCS3\rpcs3.exe" -WorkingDirectory "C:\Users\josep\RPCS3" -ArgumentList "`"C:\Users\josep\RPCS3\games\Call of Duty - Black Ops II (USA) (En,Fr)\PS3_GAME\USRDIR\EBOOT.BIN`""' >/dev/null 2>&1
 echo "==> starting Windows-native stall watcher"
