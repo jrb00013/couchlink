@@ -1,0 +1,112 @@
+name: regression
+
+# Latency / quality regression gate ("Ricardo optimals"). See docs/REGRESSION_CI.md.
+# Complements ci.yml (kept as-is). Linux only: no Windows, no GPU, no live stack.
+on:
+  pull_request:          # any base branch
+  push:
+    branches: [main]
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  guard:
+    name: thresholds guard + no-weakened-assertions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0   # needed to diff against the PR base
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Guard scripts unit tests
+        run: python3 scripts/ci/test_ci_scripts.py
+      - name: Thresholds guard (ci/regression-baseline.toml)
+        run: python3 scripts/ci/regression-guard.py
+      - name: No weakened assertions (PRs only)
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}   # via env, never interpolated into the shell
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          python3 scripts/ci/check-weakened-assertions.py --base "origin/$BASE_REF" --head HEAD
+
+  host-sacred:
+    name: host sacred + latency tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2.7.5
+        with:
+          shared-key: regression-host
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev pkg-config
+      # Unit tests live in-source (crates/host/src/*), so select them by module path.
+      # --no-fail-fast: report every failing sacred test, not just the first.
+      - name: ricardo / latency / link_gov / webrtc_peer tests
+        run: |
+          set -o pipefail
+          cargo test -p couchlink-host --no-fail-fast -- \
+            ricardo_playable_ab amazing_latency_ab latency_live_sim link_gov \
+            webrtc_peer wan3_math input_photon_budget 2>&1 | tee "$RUNNER_TEMP/host-sacred.log"
+      - name: Every sacred test ran and passed (a filter matching nothing is a failure)
+        run: python3 scripts/ci/regression-guard.py --test-log "$RUNNER_TEMP/host-sacred.log"
+
+  crates:
+    name: cargo test host/pad/proto/capture-bridge
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2.7.5
+        with:
+          shared-key: regression-host   # same build graph as host-sacred
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev pkg-config
+      - run: cargo test --no-fail-fast -p couchlink-host -p couchlink-pad -p couchlink-proto -p couchlink-capture-bridge
+
+  web:
+    name: web tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Sacred web tests (presentAge / keyboardMouse / webCodecsCanvas / lowLatencyCanvas / inputPhoton)
+        run: >
+          npx vitest run
+          src/presentAge.test.ts src/keyboardMouse.test.ts src/webCodecsCanvas.test.ts
+          src/lowLatencyCanvas.test.ts src/inputPhoton.test.ts
+      - name: Whole web suite
+        run: npx vitest run
