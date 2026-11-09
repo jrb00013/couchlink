@@ -9,6 +9,10 @@ fn main() {
 
 #[cfg(windows)]
 mod run {
+    /// Smallest frame worth encoding. NVENC H.264 refuses anything under roughly 145x49, and a
+    /// minimized window reports a ~173x32 caption bar, so resizes below this are ignored.
+    const MIN_ENCODE_W: u32 = 320;
+    const MIN_ENCODE_H: u32 = 180;
     use anyhow::{bail, Context as AnyhowContext, Result};
     use clap::{Parser, ValueEnum};
     use couchlink_capture_bridge::gpu_convert::{self, GpuConverter, ReplayTarget};
@@ -146,6 +150,8 @@ mod run {
     /// after the emulator restarts. Distinct from 1 so this shows up in a log
     /// as a deliberate restart request rather than a crash.
     const EXIT_SOURCE_CLOSED: i32 = 75;
+    /// Frames submitted that came from the window (not a replay of the last one).
+    static FRESH_SUBMITTED: AtomicU32 = AtomicU32::new(0);
 
     #[derive(Clone, Copy, Debug, ValueEnum)]
     pub enum CaptureSource {
@@ -408,7 +414,7 @@ mod run {
                 // to deliver. Output cadence follows input cadence, and a receiver
                 // sizes its jitter buffer from irregularity, not from rate — this is
                 // the same fix that took the raw path's buffer from 97ms to 6ms.
-                let tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
+                let mut tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
                 let mut next_submit = Instant::now();
                 // Only pixel frames can be re-encoded to fill a gap: a pooled texture
                 // is recycled by the capture thread and would be overwritten.
@@ -416,6 +422,8 @@ mod run {
                 let mut replay_target: Option<ReplayTarget> = None;
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
+                let mut tiny_frames = 0u32;
+                let mut fresh = 0u32;
                 let mut encoded_window = Instant::now();
 
                 loop {
@@ -435,11 +443,34 @@ mod run {
                             if next_submit > now {
                                 std::thread::sleep(next_submit - now);
                             }
+                            // The link governor's fps rungs act here, on the submit beat: the encoder is never rebuilt for an fps
+                            // change (see `plan_target_change`), so the commanded fps has to land in the pacing or the governor's
+                            // message-rate relief never reaches the wire. One relaxed atomic load per beat.
+                            tick = Duration::from_micros(1_000_000 / TARGET_FPS.load(Ordering::Relaxed).max(1) as u64);
                             next_submit = Instant::now() + tick;
 
                             // Take the newest frame available, not the oldest.
                             while let Ok(newer) = raw_rx.try_recv() {
                                 latest = Some(newer);
+                            }
+                            // A minimized/shrunk window (WGC reports its 173x32 caption bar)
+                            // is not a frame worth encoding: following it rebuilds the encoder
+                            // at a size NVENC rejects ("input type is not supported"), the
+                            // stream dies and the host kills the capture after 4 s. Drop it and
+                            // keep replaying the last real frame until the window is back.
+                            if latest
+                                .as_ref()
+                                .is_some_and(|(lw, lh, _, _)| *lw < MIN_ENCODE_W || *lh < MIN_ENCODE_H)
+                            {
+                                if let Some((lw, lh, _, _)) = latest.take() {
+                                    if tiny_frames == 0 {
+                                        info!("window shrank to {lw}x{lh} (minimized?) - holding the last frame instead of rebuilding the encoder");
+                                    }
+                                    tiny_frames += 1;
+                                }
+                            } else if tiny_frames > 0 {
+                                info!("window back to normal size after {tiny_frames} undersized frames");
+                                tiny_frames = 0;
                             }
                             // Nothing new this beat? Re-encode the frame we already
                             // have, so a static screen keeps the cadence hole-free
@@ -536,6 +567,7 @@ mod run {
                                     // since two clones of the same COM object live at
                                     // different addresses.
                                     if submitted.is_ok() && from_source {
+                                        FRESH_SUBMITTED.fetch_add(1, Ordering::Relaxed);
                                         if replay_target.as_ref().map(|r| r.dimensions())
                                             != Some((fw, fh))
                                         {
@@ -581,6 +613,7 @@ mod run {
                                     .try_send((w, h, f.data, FrameFormat::H264, key))
                                     .is_ok();
                                 encoded += 1;
+                                fresh += FRESH_SUBMITTED.swap(0, Ordering::Relaxed);
                                 if !queued {
                                     stalled += 1;
                                     encoder.request_keyframe();
@@ -595,7 +628,7 @@ mod run {
                                             / 1000.0
                                     };
                                     info!(
-                                        "encoded {:.1} fps ({bytes} bytes/frame, {stalled} not queued) \
+                                        "encoded {:.1} fps ({fresh} new from window, {bytes} bytes/frame, {stalled} not queued) \
                                          | capture->encoded p50={:.1}ms p99={:.1}ms",
                                         encoded as f64 / encoded_window.elapsed().as_secs_f64(),
                                         p(50),
@@ -603,6 +636,7 @@ mod run {
                                     );
                                     enc_us.clear();
                                     encoded = 0;
+                                    fresh = 0;
                                     stalled = 0;
                                     encoded_window = Instant::now();
                                 }
@@ -960,16 +994,63 @@ mod run {
         }
     }
 
+    fn hwnd_visible(hwnd: isize) -> bool {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+        unsafe { IsWindowVisible(HWND(hwnd as *mut _)).as_bool() }
+    }
+
+    /// First matching window, preferring a *visible* one. PCSX2 (and other Qt
+    /// emulators) answer F11 by hiding the game window and creating a second,
+    /// same-titled borderless one, so more than one window can match.
     fn find_window(needle: &str) -> Result<Option<Window>> {
         let wins = Window::enumerate().context("enumerate windows")?;
+        let mut hidden = None;
         for w in wins {
             let title = w.title().unwrap_or_default();
             let proc = w.process_name().unwrap_or_default();
             if window_matches(needle, &title, &proc) && !title.trim().is_empty() {
-                return Ok(Some(w));
+                if hwnd_visible(w.as_raw_hwnd() as isize) {
+                    return Ok(Some(w));
+                }
+                hidden.get_or_insert(w);
             }
         }
-        Ok(None)
+        Ok(hidden)
+    }
+
+    /// Exit 75 when the captured window is hidden and a different visible one
+    /// matches, so the launcher re-attaches to it.
+    ///
+    /// Live-traced 2026-11-06: F11 in PCSX2 hides the game window (new HWND for
+    /// the fullscreen one, same title). The WGC item on the hidden window never
+    /// closes, so `on_closed` never fires; frames just stop and the yellow
+    /// border vanishes until the player leaves fullscreen. Cost when idle is
+    /// one `IsWindowVisible` per 250 ms on a side thread, nothing on the frame path.
+    fn spawn_hidden_watch(hwnd: isize, needle: String) {
+        std::thread::spawn(move || {
+            let mut hidden_since: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                if hwnd_visible(hwnd) {
+                    hidden_since = None;
+                    continue;
+                }
+                let since = *hidden_since.get_or_insert_with(Instant::now);
+                if since.elapsed() < Duration::from_millis(500) {
+                    continue;
+                }
+                if let Ok(Some(w)) = find_window(&needle) {
+                    let other = w.as_raw_hwnd() as isize;
+                    if other != hwnd && hwnd_visible(other) {
+                        warn!("hwnd {hwnd} hidden; replacement hwnd {other}");
+                        warn!("captured window hidden and another matching window is visible (fullscreen toggle?) — exiting to re-attach");
+                        std::thread::sleep(Duration::from_millis(50));
+                        std::process::exit(EXIT_SOURCE_CLOSED);
+                    }
+                }
+            }
+        });
     }
 
     /// Host commands, multiplexed on the reverse of the frame socket.
@@ -1365,6 +1446,13 @@ mod run {
                             );
                         }
                     }
+
+                    info!(
+                        "capture target hwnd={} visible={}",
+                        w.as_raw_hwnd() as isize,
+                        hwnd_visible(w.as_raw_hwnd() as isize)
+                    );
+                    spawn_hidden_watch(w.as_raw_hwnd() as isize, args.window.clone());
 
                     if args.keep_rendering {
                         couchlink_capture_bridge::keep_rendering::spawn(w.as_raw_hwnd());
