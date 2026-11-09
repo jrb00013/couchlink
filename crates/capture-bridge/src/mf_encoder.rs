@@ -352,6 +352,27 @@ impl HardwareEncoder {
         })
     }
 
+    /// Change the target bitrate on the RUNNING encoder, without rebuilding it.
+    ///
+    /// Media Foundation H.264 encoders (including NVIDIA's MFT) accept CODECAPI_AVEncCommonMeanBitRate changes at runtime. A rebuild
+    /// is an encoder teardown and re-creation: a gap with no frames, a fresh IDR, a latency spike, and on 2026-10-03 a rebuild at
+    /// 4000 kbps was rejected ("input type is not supported for D3D device") and the stream stayed dead in a reconnect loop.
+    /// Returns an error when the encoder has no ICodecAPI or refuses the value; the caller then falls back to a rebuild.
+    pub fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<()> {
+        let api = self
+            .codec_api
+            .as_ref()
+            .context("encoder exposes no ICodecAPI - cannot change bitrate at runtime")?;
+        unsafe {
+            set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, bitrate_bps)
+                .context("encoder refused a runtime mean-bitrate change")?;
+            // Keep the same shape apply_codec_api_defaults() gave the build: ~20% peak headroom, ~250 ms VBV. Best effort.
+            let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMaxBitRate, bitrate_bps.saturating_mul(12) / 10);
+            let _ = set_codec_u32(api, &CODECAPI_AVEncCommonBufferSize, bitrate_bps / 4);
+        }
+        Ok(())
+    }
+
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }

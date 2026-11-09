@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CouchlinkPlayer, type ConnectionState } from "./player";
+import { HostBattery } from "./HostBattery";
+import type { HostBatteryInfo } from "./hostBattery";
 import {
   canUseLowLatencyCanvas,
   LowLatencyCanvasView,
@@ -20,6 +22,9 @@ import { classifyPresentStuck, type PresentStuckReason } from "./presentPromote"
 import { ControllerViz, silhouettePad, useLivePads } from "./ControllerViz";
 import type { ControllerKind } from "./controllerKind";
 import { seatForRemoteSlot } from "./seat";
+import { cropForClient, parseSplitConfig } from "./splitSeat";
+import { runOracle } from "./splitOracle";
+import type { SplitSeatConfig, ViewMode } from "./splitTypes";
 import { KeyboardMouseViz } from "./KeyboardMouseViz";
 import { clog, cerror, cwarn } from "./log";
 import { usePlayerCallbacks } from "./usePlayerCallbacks";
@@ -108,6 +113,7 @@ export default function App() {
   const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
   const [telemetry, setTelemetry] = useState<PlayerTelemetry | null>(null);
   const rttRef = useRef(0);
+  const [hostBattery, setHostBattery] = useState<HostBatteryInfo | null>(null);
   const [hostStats, setHostStats] = useState<{
     fps: number;
     frames_out: number;
@@ -147,6 +153,11 @@ export default function App() {
   /** This browser's own player slot, assigned by the session on registration. */
   const [mySlot, setMySlot] = useState<number | null>(null);
   const [present, setPresent] = useState<PresentSummary | null>(null);
+  /** Kaleidoscope: host master enable + regions; local view toggle when armed. */
+  const [splitConfig, setSplitConfig] = useState<SplitSeatConfig | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("own");
+  const splitConfigRef = useRef<SplitSeatConfig | null>(null);
+  splitConfigRef.current = splitConfig;
 
   function presentPhotonFields() {
     const rtt = rttRef.current;
@@ -201,6 +212,7 @@ export default function App() {
   const [isMobile, setIsMobile] = useState(() => detectMobile());
   const [landscape, setLandscape] = useState(() => detectLandscape());
   const touchInputRef = useRef<TouchGamepadInput | null>(null);
+  const [touchInput, setTouchInput] = useState<TouchGamepadInput | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -293,10 +305,27 @@ export default function App() {
     }, 15000);
   }
 
+  function applySplitCropToViews() {
+    const master = !!splitConfigRef.current?.masterEnabled;
+    const crop = cropForClient({
+      masterEnabled: master,
+      viewMode,
+      regions: splitConfigRef.current?.regions ?? [],
+      seatRegion: splitConfigRef.current?.seatRegion ?? [0, 1, 2, 3],
+      mySlot,
+    });
+    const armed = master && viewMode === "own";
+    viewRef.current?.setIsolationArmed(armed);
+    wcRef.current?.setIsolationArmed(armed);
+    viewRef.current?.setCrop(crop);
+    wcRef.current?.setCrop(crop);
+  }
+
   function ensureWebCodecs(): boolean {
     if (preferLegacyVideo() || !canUseWebCodecs() || !wcCanvasRef.current) return false;
     if (!wcRef.current) {
       wcRef.current = new WebCodecsCanvasView(wcCanvasRef.current);
+      applySplitCropToViews();
       wcRef.current.setStatsHandler((s) => {
         clearRtpFallbackTimer();
         if (!promotedRef.current) {
@@ -631,7 +660,17 @@ export default function App() {
       clog("ui state", s, d ?? "");
       setState(s);
       if (d) setDetail(d);
-      if (s === "disconnected" || s === "error" || s === "waiting_host") {
+      // Tear down present path only on hard loss. Soft ICE blips stay on
+      // "connected" now; "Recovering media…" / Host disconnected / errors still
+      // wipe the decoder so a real rebuild can attach cleanly.
+      const hardWaiting =
+        s === "waiting_host" &&
+        !!d &&
+        (/Recovering media/i.test(d) ||
+          /Host disconnected/i.test(d) ||
+          /^Waiting for host offer/i.test(d));
+      if (s === "disconnected" || s === "error" || hardWaiting) {
+        setHostBattery(null);
         clearRtpFallbackTimer();
         viewRef.current?.stop();
         wcRef.current?.stop();
@@ -697,6 +736,7 @@ export default function App() {
       setTelemetry(t);
     },
     onHostStats: (s) => setHostStats(s),
+    onHostBattery: (b) => setHostBattery(b),
     onRegistered: (slot) => setMySlot(slot),
     onPlayersStatus: (occupied, max) => setPlayersStatus({ occupied, max }),
     onPlayerPadInfo: (slot, kind, id) => {
@@ -709,7 +749,69 @@ export default function App() {
         return next;
       });
     },
+    onSplitScreenConfig: (msg) => {
+      const cfg = parseSplitConfig(msg);
+      setSplitConfig(cfg);
+      clog(
+        "split_screen_config",
+        cfg.masterEnabled,
+        cfg.layout,
+        cfg.regions.length,
+        cfg.rescan,
+      );
+    },
   });
+
+  // Apply crop + paint-gate to both present paths when isolation is armed.
+  useEffect(() => {
+    const master = !!splitConfig?.masterEnabled;
+    const crop = cropForClient({
+      masterEnabled: master,
+      viewMode,
+      regions: splitConfig?.regions ?? [],
+      seatRegion: splitConfig?.seatRegion ?? [0, 1, 2, 3],
+      mySlot,
+    });
+    viewRef.current?.setIsolationArmed(master && viewMode === "own");
+    wcRef.current?.setIsolationArmed(master && viewMode === "own");
+    viewRef.current?.setCrop(crop);
+    wcRef.current?.setCrop(crop);
+  }, [splitConfig, viewMode, mySlot]);
+
+  // Periodic / rescan oracle — off paint path; only when master enabled.
+  useEffect(() => {
+    if (!splitConfig?.masterEnabled) return;
+    let cancelled = false;
+    const tick = async (forceRescan: boolean) => {
+      if (cancelled) return;
+      const src = wcCanvasRef.current?.width
+        ? wcCanvasRef.current
+        : canvasRef.current;
+      if (!src || src.width < 2) return;
+      try {
+        const result = await runOracle({
+          source: src,
+          activeSeatHint: seatForRemoteSlot(mySlot),
+        });
+        if (cancelled || result.layout === "none") return;
+        playerRef.current?.sendSplitScreenSet({
+          enabled: true,
+          viewMode,
+          layout: result.layout,
+          regions: result.regions,
+          rescan: forceRescan,
+        });
+      } catch (e) {
+        cwarn("split oracle failed", e);
+      }
+    };
+    if (splitConfig.rescan) void tick(true);
+    const id = window.setInterval(() => void tick(false), 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [splitConfig?.masterEnabled, splitConfig?.rescan, mySlot, viewMode]);
 
   useEffect(() => {
     const player = new CouchlinkPlayer(playerCallbacks);
@@ -791,11 +893,25 @@ export default function App() {
   }, [kbmMouseLookEnabled]);
 
   // Re-detect mobile + landscape so side-mode follows a phone tilt.
+  // Sticky detectMobile keeps the overlay mounted across rotate; we also
+  // nudge video/canvas layout so the stream does not vanish on orientationchange.
   useEffect(() => {
     const sync = () => {
       setIsMobile(detectMobile());
       setLandscape(detectLandscape());
       touchInputRef.current?.refresh();
+      requestAnimationFrame(() => {
+        const v = videoRef.current;
+        if (v && !v.classList.contains("is-hidden")) {
+          void v.play().catch(() => {});
+        }
+        for (const c of [canvasRef.current, wcCanvasRef.current]) {
+          if (!c || c.classList.contains("is-hidden")) continue;
+          c.style.width = "100%";
+          c.style.height = "100%";
+        }
+        touchInputRef.current?.refresh();
+      });
     };
     window.addEventListener("resize", sync);
     window.addEventListener("orientationchange", sync);
@@ -841,20 +957,23 @@ export default function App() {
     };
   }, []);
 
-  // Touch controller: one shared input for the mobile layout, live for the
-  // lifetime of the page. Desktop is unaffected — setTouchInput(null) when the
-  // device is not mobile, and the overlay is only rendered on mobile.
+  // Touch controller: one shared input for the mobile layout. Desktop is
+  // unaffected — player gets null when not mobile; overlay only renders mobile.
   useEffect(() => {
+    if (!isMobile) {
+      touchInputRef.current = null;
+      setTouchInput(null);
+      playerRef.current?.setTouchInput(null);
+      return;
+    }
     const input = new TouchGamepadInput();
     touchInputRef.current = input;
-    if (isMobile) {
-      playerRef.current?.setTouchInput(input);
-    } else {
-      playerRef.current?.setTouchInput(null);
-    }
+    setTouchInput(input);
+    playerRef.current?.setTouchInput(input);
     return () => {
       input.detach();
       touchInputRef.current = null;
+      setTouchInput(null);
       playerRef.current?.setTouchInput(null);
     };
   }, [isMobile]);
@@ -943,6 +1062,7 @@ export default function App() {
             <p>HD co-play · your DualSense → host Bluetooth pad</p>
           </div>
         </div>
+        {hostBattery && <HostBattery battery={hostBattery} />}
         <ol className="roster" aria-label="player seats">
           {([1, 2, 3, 4] as const).map((seat) => {
             const remoteSlot = seat - 1;
@@ -1066,6 +1186,36 @@ export default function App() {
             <video ref={videoRef} className="stage" playsInline muted autoPlay />
             <audio ref={audioRef} autoPlay playsInline style={{ display: "none" }} />
             <div className="audio-controls">
+              {splitConfig?.masterEnabled && (
+                <div className="split-view-toggle" role="group" aria-label="Split view">
+                  <button
+                    type="button"
+                    className={viewMode === "own" ? "is-active" : undefined}
+                    onClick={() => {
+                      setViewMode("own");
+                      playerRef.current?.sendSplitScreenSet({
+                        enabled: true,
+                        viewMode: "own",
+                      });
+                    }}
+                  >
+                    My screen
+                  </button>
+                  <button
+                    type="button"
+                    className={viewMode === "full" ? "is-active" : undefined}
+                    onClick={() => {
+                      setViewMode("full");
+                      playerRef.current?.sendSplitScreenSet({
+                        enabled: true,
+                        viewMode: "full",
+                      });
+                    }}
+                  >
+                    Full split
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 className="audio-mute-btn"
@@ -1112,9 +1262,9 @@ export default function App() {
             )}
           </div>
 
-          {isMobile && connected && touchInputRef.current && (
-            <div className="touch-dock">
-              <TouchOverlay input={touchInputRef.current} />
+          {isMobile && connected && touchInput && (
+            <div className="touch-dock" aria-label="Touch controller">
+              <TouchOverlay input={touchInput} />
             </div>
           )}
         </div>

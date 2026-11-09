@@ -16,11 +16,13 @@ export function usePlayerCallbacks(handlers: {
   onPresentPath?: (path: PresentPath, detail?: string) => void;
   onStreamInfo?: PlayerCallbacks["onStreamInfo"];
   onHostStats?: PlayerCallbacks["onHostStats"];
+  onHostBattery?: PlayerCallbacks["onHostBattery"];
   onPadStats?: PlayerCallbacks["onPadStats"];
   onRegistered?: PlayerCallbacks["onRegistered"];
   onPlayersStatus?: PlayerCallbacks["onPlayersStatus"];
   onPlayerPadInfo?: PlayerCallbacks["onPlayerPadInfo"];
   onPlayerLeft?: PlayerCallbacks["onPlayerLeft"];
+  onSplitScreenConfig?: PlayerCallbacks["onSplitScreenConfig"];
   onTelemetry?: (t: PlayerTelemetry) => void;
 }): PlayerCallbacks {
   const handlersRef = useRef(handlers);
@@ -38,6 +40,7 @@ export function usePlayerCallbacks(handlers: {
         handlersRef.current.onPresentPath?.(path, detail),
       onStreamInfo: (info) => handlersRef.current.onStreamInfo?.(info),
       onHostStats: (stats) => handlersRef.current.onHostStats?.(stats),
+      onHostBattery: (b) => handlersRef.current.onHostBattery?.(b),
       onPadStats: (hz, name) => handlersRef.current.onPadStats?.(hz, name),
       onRegistered: (slot) => handlersRef.current.onRegistered?.(slot),
       onPlayersStatus: (occupied, max) =>
@@ -45,6 +48,8 @@ export function usePlayerCallbacks(handlers: {
       onPlayerPadInfo: (slot, kind, id) =>
         handlersRef.current.onPlayerPadInfo?.(slot, kind, id),
       onPlayerLeft: (slot) => handlersRef.current.onPlayerLeft?.(slot),
+      onSplitScreenConfig: (msg) =>
+        handlersRef.current.onSplitScreenConfig?.(msg),
       onTelemetry: (t) => handlersRef.current.onTelemetry?.(t),
     };
   }

@@ -25,11 +25,30 @@ use couchlink_capture_bridge::EncodeTarget;
 /// 2% was noise: three WAN viewers shed a couple of frames every window.
 /// 8% matches Joel live: 6% HUD must not step; 9–14% windows must.
 const DOWN_TRIGGER_PCT: u32 = 8;
+/// Host shed this high means the pipe cannot carry the *bits* (WAN/TURN),
+/// not just SCTP message rate — unlock bitrate rungs even without a client
+/// ClientLinkStats report. Live 2026-10-12: 10–18% shed at locked 10 Mbps
+/// froze friends on "media lost" while fps-only ladder held bitrate.
+const SEVERE_SHED_PCT: u32 = 12;
 /// Consecutive bad windows before stepping down.
 const DOWN_AFTER_WINDOWS: u32 = 2;
+/// Severe shed steps on the first bad window (don't wait ~10s while frozen).
+const SEVERE_DOWN_AFTER_WINDOWS: u32 = 1;
 /// Clean windows before climbing. Two (~10s) recovers fps after a CLVD blip
 /// without the old 40s stuck-at-floor climb while bitrate was wrong.
 const UP_AFTER_CLEAN_WINDOWS: u32 = 2;
+/// Ceiling for the climb-back backoff below (clean windows required per rung).
+const MAX_UP_AFTER_CLEAN_WINDOWS: u32 = 12;
+
+/// Client RTT (ms) that marks the current window congested and unlocks bitrate
+/// rungs. Below this we treat the report as healthy for climb-hold purposes.
+pub const RTT_CONGESTION_MS: u32 = 250;
+/// Client RTT (ms) that means the pipe has collapsed (bufferbloat / saturated
+/// uplink). Slam immediately to the 40% bitrate floor — waiting for two 5s
+/// windows is how Ricardo sat at 10 Mbps with an 8 s RTT and "Media lost".
+pub const RTT_SLAM_MS: u32 = 800;
+/// Clear the RTT hold after this many consecutive healthy-RTT reports.
+const RTT_CLEAR_REPORTS: u32 = 3;
 
 /// The governor's persistent memory between windows.
 #[derive(Debug, Clone)]
@@ -50,6 +69,22 @@ pub struct LinkGov {
     client_congestion_seen: bool,
     /// A client reported loss/freezes since the last `on_window`.
     client_loss_window: bool,
+    /// A client reported SEVERE RTP loss since the last `on_window` (see `client_report_is_severe`).
+    client_severe_window: bool,
+    /// Clean windows required before climbing one rung. Starts at `UP_AFTER_CLEAN_WINDOWS` and doubles (up to
+    /// `MAX_UP_AFTER_CLEAN_WINDOWS`) every time a *client-reported* loss pushes us down, then resets once we are back at baseline.
+    /// Live 2026-10-17: 8 Mbps -> 10 Mbps 15 s later -> loss again, over and over, because two clean windows were enough to climb
+    /// no matter how many times the same link had just failed at that rate.
+    up_need: u32,
+    /// Consecutive clean windows spent AT baseline; the climb-back backoff only resets after a long stable stretch there (reaching
+    /// baseline is not proof the link holds that rate: it is exactly where the yo-yo failed).
+    stable_windows: u32,
+    /// Sticky while client RTT is in the congestion band. Blocks climb so a
+    /// quiet host-shed window cannot walk us back up to 10 Mbps while the
+    /// friend's ICE RTT is still multi-second.
+    rtt_hold: bool,
+    /// Consecutive client reports with RTT below [`RTT_CONGESTION_MS`].
+    rtt_clear_reports: u32,
 }
 
 /// Rung ladder: **hold bitrate**, step fps.
@@ -81,7 +116,7 @@ fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
 /// "the governor fired but it's still bad" case this closes. Once real
 /// client-reported congestion has been seen this session, three bitrate cuts
 /// below the fps floor.
-fn rungs_from_inner(baseline: &EncodeTarget, rtp_congested: bool) -> Vec<EncodeTarget> {
+pub(crate) fn rungs_from_inner(baseline: &EncodeTarget, rtp_congested: bool) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
     if rtp_congested {
         // Client-reported loss means the pipe is too small for the *bits*, so cut
@@ -135,13 +170,26 @@ const MIN_LOSS_SAMPLE: u32 = 200;
 /// Loss share (percent) that counts as congestion. 3.6% live froze the picture.
 const LOSS_TRIGGER_PCT: u32 = 2;
 /// Browser freezes in one report that count as congestion on their own.
-const FREEZE_TRIGGER: u32 = 2;
+/// 1 — live (Ricardo 2026-10-10): freezeCount crept by ~1 per 2s tick with
+/// `totalFreezesDuration=0`, so a threshold of 2 never fired while the picture
+/// stuttered every second.
+const FREEZE_TRIGGER: u32 = 1;
 
 /// Does one client report describe a congested link? Pure so it is unit-tested.
 pub fn client_report_is_congested(lost: u32, received: u32, freezes: u32) -> bool {
     let total = lost.saturating_add(received);
     (total >= MIN_LOSS_SAMPLE && lost as u64 * 100 >= LOSS_TRIGGER_PCT as u64 * total as u64)
         || freezes >= FREEZE_TRIGGER
+}
+
+/// Loss share (percent) that is not "a bit lossy" but "this rate does not fit through the pipe". 12-18% loss with 2-3 freezes
+/// is what the friends saw as "it froze mid game"; a single such report should cut bitrate, not wait for a second window.
+const SEVERE_CLIENT_LOSS_PCT: u32 = 8;
+
+/// Is one client report severe enough to step down on its own? Pure so it is unit-tested.
+pub fn client_report_is_severe(lost: u32, received: u32) -> bool {
+    let total = lost.saturating_add(received);
+    total >= MIN_LOSS_SAMPLE && lost as u64 * 100 >= SEVERE_CLIENT_LOSS_PCT as u64 * total as u64
 }
 
 fn index_of(rungs: &[EncodeTarget], target: EncodeTarget) -> Option<usize> {
@@ -156,6 +204,11 @@ impl LinkGov {
             bad_windows: 0,
             client_congestion_seen: false,
             client_loss_window: false,
+            client_severe_window: false,
+            up_need: UP_AFTER_CLEAN_WINDOWS,
+            stable_windows: 0,
+            rtt_hold: false,
+            rtt_clear_reports: 0,
             baseline,
         }
     }
@@ -179,19 +232,96 @@ impl LinkGov {
         self.client_loss_window = true;
     }
 
+    /// Like `note_client_loss`, but the loss was severe: the window steps down on its own (no second bad window needed).
+    pub fn note_severe_client_loss(&mut self) {
+        self.note_client_loss();
+        self.client_severe_window = true;
+    }
+
+    /// Feed the browser's WebRTC `currentRoundTripTime`.
+    ///
+    /// Live regression (Ricardo 2026-10-10): srflx→srflx with encoder stuck at
+    /// 10 Mbps while the friend's RTT hit **8112 ms**, 52 freezes, then
+    /// "Media lost". The old path only called [`Self::note_client_congestion`]
+    /// (+8 synthetic shed frames) — that unlocks bitrate rungs but does **not**
+    /// mark the window bad, so `on_window` kept climbing/holding at baseline
+    /// whenever host-side RTP shed was under 8%.
+    ///
+    /// Now: RTT ≥ [`RTT_CONGESTION_MS`] marks the window bad (like loss/freezes).
+    /// RTT ≥ [`RTT_SLAM_MS`] jumps straight to the 40%-bitrate floor at full fps
+    /// and returns `Some(target)` so the host can `set_target` immediately
+    /// instead of waiting two 5 s windows. While `rtt_hold` is set, climb is
+    /// blocked even if host shed is quiet.
+    pub fn note_client_rtt(&mut self, rtt_ms: u32) -> Option<EncodeTarget> {
+        if rtt_ms == 0 {
+            return None;
+        }
+        if rtt_ms >= RTT_CONGESTION_MS {
+            self.client_congestion_seen = true;
+            self.client_loss_window = true;
+            self.rtt_hold = true;
+            self.rtt_clear_reports = 0;
+            self.clean_windows = 0;
+            if rtt_ms >= RTT_SLAM_MS {
+                let slam = self.bitrate_floor_at_full_fps();
+                if slam != self.current {
+                    self.current = slam;
+                    self.bad_windows = 0;
+                    return Some(slam);
+                }
+            }
+            return None;
+        }
+        // Healthy RTT — release the hold after a few clean reports.
+        if self.rtt_hold {
+            self.rtt_clear_reports = self.rtt_clear_reports.saturating_add(1);
+            if self.rtt_clear_reports >= RTT_CLEAR_REPORTS {
+                self.rtt_hold = false;
+                self.rtt_clear_reports = 0;
+            }
+        }
+        None
+    }
+
+    /// 40% of baseline bitrate at baseline fps (first real bandwidth floor).
+    fn bitrate_floor_at_full_fps(&self) -> EncodeTarget {
+        let rungs = rungs_from_inner(&self.baseline, true);
+        rungs
+            .iter()
+            .copied()
+            .filter(|r| r.fps == self.baseline.fps)
+            .last()
+            .unwrap_or(self.current)
+    }
+
     /// Give the governor one window of link observations.
     ///
     /// `shed` = frames dropped while pushing this window; `sent` = frames
     /// attempted (delivered + shed). Returns the target to command next.
     pub fn on_window(&mut self, shed: u32, sent: u32) -> EncodeTarget {
-        let rungs = rungs_from_inner(&self.baseline, self.client_congestion_seen);
         let drop_pct = if sent > 0 { shed * 100 / sent } else { 0 };
         let client_bad = std::mem::take(&mut self.client_loss_window);
+        let client_severe = std::mem::take(&mut self.client_severe_window);
+
+        // Severe host shed ⇒ unlock bitrate cuts (same as client RTP congestion).
+        // Without this, fps-only rungs keep bits/sec ≈ baseline and WAN friends
+        // stay packet-lossy / "media lost" forever.
+        if drop_pct >= SEVERE_SHED_PCT {
+            self.client_congestion_seen = true;
+        }
+
+        let rungs = rungs_from_inner(&self.baseline, self.client_congestion_seen);
+        let need = if drop_pct >= SEVERE_SHED_PCT || client_severe {
+            SEVERE_DOWN_AFTER_WINDOWS
+        } else {
+            DOWN_AFTER_WINDOWS
+        };
 
         if drop_pct > DOWN_TRIGGER_PCT || client_bad {
+            self.stable_windows = 0;
             self.clean_windows = 0;
             self.bad_windows += 1;
-            if self.bad_windows >= DOWN_AFTER_WINDOWS {
+            if self.bad_windows >= need {
                 self.bad_windows = 0;
                 // Step down one rung toward the floor, never below it.
                 let step = index_of(&rungs, self.current)
@@ -199,12 +329,21 @@ impl LinkGov {
                     .unwrap_or(self.current);
                 if step != self.current {
                     self.current = step;
+                    if client_bad {
+                        // The client says this rate loses packets: be slower to try it again.
+                        self.up_need = (self.up_need * 2).min(MAX_UP_AFTER_CLEAN_WINDOWS);
+                    }
                 }
             }
+        } else if self.rtt_hold {
+            // Friend still reports a congested RTT band — do not climb just
+            // because the host's push queue looked quiet this window.
+            self.bad_windows = 0;
+            self.clean_windows = 0;
         } else {
             self.bad_windows = 0;
             self.clean_windows += 1;
-            if self.clean_windows >= UP_AFTER_CLEAN_WINDOWS {
+            if self.clean_windows >= self.up_need {
                 self.clean_windows = 0;
                 // Step back up one rung toward baseline.
                 let step = index_of(&rungs, self.current)
@@ -214,6 +353,14 @@ impl LinkGov {
                 if step != self.current {
                     self.current = step;
                 }
+            }
+            if self.current == self.baseline {
+                self.stable_windows += 1;
+                if self.stable_windows >= MAX_UP_AFTER_CLEAN_WINDOWS {
+                    self.up_need = UP_AFTER_CLEAN_WINDOWS;
+                }
+            } else {
+                self.stable_windows = 0;
             }
         }
         self.current
@@ -249,11 +396,12 @@ mod tests {
     }
 
     #[test]
-    fn persistent_shed_steps_down_fps_holds_bitrate() {
+    fn mild_shed_steps_down_fps_holds_bitrate() {
+        // 9% is above DOWN_TRIGGER (8%) but below SEVERE (12%) — SCTP-rate path.
         let mut gov = LinkGov::new(P720);
         let mut seen = vec![];
         for _ in 0..20 {
-            let t = gov.on_window(40, 100);
+            let t = gov.on_window(9, 100);
             if seen.last() != Some(&t) {
                 seen.push(t);
             }
@@ -266,10 +414,10 @@ mod tests {
     }
 
     #[test]
-    fn persistent_shed_never_drops_bitrate() {
+    fn mild_shed_never_drops_bitrate() {
         let mut gov = LinkGov::new(P720);
         for _ in 0..20 {
-            gov.on_window(40, 100);
+            gov.on_window(9, 100);
             assert_eq!(gov.current().bitrate_kbps, P720.bitrate_kbps);
         }
         assert!(gov.current().fps <= P720.fps);
@@ -278,12 +426,108 @@ mod tests {
     }
 
     #[test]
+    fn severe_host_shed_unlocks_bitrate_cut() {
+        // Live 2026-10-12: 10–18% shed at locked 10 Mbps → media lost.
+        let mut gov = LinkGov::new(P720);
+        let t = gov.on_window(15, 100); // 15% ≥ SEVERE → bitrate ladder, step once
+        assert!(
+            t.bitrate_kbps < P720.bitrate_kbps,
+            "severe shed must cut bitrate on first step, got {t:?}"
+        );
+        assert_eq!(t.fps, P720.fps, "first bitrate rung holds fps");
+    }
+
+    #[test]
+    fn healthy_ladder_never_cuts_bitrate_below_baseline() {
+        // The documented Ricardo guarantee (2026-08-24 audit): without client-reported loss the ladder only steps fps.
+        for r in rungs_from_inner(&P720, false) {
+            assert_eq!(r.bitrate_kbps, P720.bitrate_kbps, "healthy rung cut bitrate: {r:?}");
+            assert!(r.fps >= 45, "fps floor broken: {r:?}");
+        }
+    }
+
+    #[test]
+    fn congested_ladder_bitrate_floor_is_40_percent_of_baseline() {
+        // The loss ladder may cut bits, but never below 40% of baseline (4000 kbps at 10 Mbps) and never in resolution.
+        let floor = P720.bitrate_kbps * 40 / 100;
+        let rungs = rungs_from_inner(&P720, true);
+        assert_eq!(rungs[0], P720, "first rung must be the baseline");
+        for r in &rungs {
+            assert!(r.bitrate_kbps >= floor, "bitrate below 40% floor: {r:?}");
+            assert!(r.fps >= 45, "fps floor broken: {r:?}");
+            assert_eq!((r.width, r.height), (P720.width, P720.height), "ladder must not change resolution: {r:?}");
+        }
+        assert_eq!(rungs.iter().map(|r| r.bitrate_kbps).min(), Some(floor));
+    }
+
+    #[test]
+    fn severe_shed_never_drives_bitrate_below_the_floor() {
+        let floor = P720.bitrate_kbps * 40 / 100;
+        let mut gov = LinkGov::new(P720);
+        for _ in 0..40 {
+            let t = gov.on_window(40, 100);
+            assert!(t.bitrate_kbps >= floor, "sustained 40% shed cut bitrate to {t:?}");
+        }
+    }
+
+    #[test]
     fn report_classifier_flags_loss_and_freezes_not_noise() {
         assert!(client_report_is_congested(20, 480, 0), "4% loss");
         assert!(!client_report_is_congested(2, 498, 0), "0.4% loss is noise");
         assert!(!client_report_is_congested(5, 20, 0), "tiny sample is ignored");
-        assert!(client_report_is_congested(0, 500, 2), "repeated freezes");
-        assert!(!client_report_is_congested(0, 500, 1), "one freeze is a blip");
+        assert!(client_report_is_congested(0, 500, 1), "a single freeze ticks congestion");
+        assert!(!client_report_is_congested(0, 500, 0), "zero freezes is clean");
+    }
+
+    #[test]
+    fn catastrophic_rtt_slams_to_bitrate_floor_immediately() {
+        // Ricardo live: 8112ms RTT, encoder still commanded 10 Mbps@60.
+        let mut gov = LinkGov::new(P720);
+        let slam = gov
+            .note_client_rtt(8112)
+            .expect("must return a slam target");
+        assert_eq!(slam.fps, P720.fps, "keep fps; cut bits");
+        assert_eq!(slam.bitrate_kbps, 4_000, "40% floor");
+        assert_eq!(gov.current(), slam);
+    }
+
+    #[test]
+    fn moderate_rtt_marks_bad_but_does_not_slam() {
+        let mut gov = LinkGov::new(P720);
+        assert!(gov.note_client_rtt(300).is_none());
+        assert_eq!(gov.current().bitrate_kbps, P720.bitrate_kbps);
+        // Two congested windows → first bitrate step (80%).
+        gov.on_window(0, 300);
+        gov.note_client_rtt(300);
+        gov.on_window(0, 300);
+        assert_eq!(gov.current().bitrate_kbps, 8_000);
+    }
+
+    #[test]
+    fn rtt_hold_blocks_climb_on_quiet_host_shed() {
+        let mut gov = LinkGov::new(P720);
+        let _ = gov.note_client_rtt(2000);
+        assert_eq!(gov.current().bitrate_kbps, 4_000);
+        // Host shed quiet for many windows — must NOT climb while RTT hold is set.
+        for _ in 0..10 {
+            gov.on_window(0, 300);
+        }
+        assert_eq!(
+            gov.current().bitrate_kbps,
+            4_000,
+            "must not climb under rtt_hold"
+        );
+        // Healthy RTT reports clear the hold, then climb can resume.
+        for _ in 0..RTT_CLEAR_REPORTS {
+            assert!(gov.note_client_rtt(40).is_none());
+        }
+        for _ in 0..4 {
+            gov.on_window(0, 300);
+        }
+        assert!(
+            gov.current().bitrate_kbps > 4_000,
+            "after RTT clears, climb resumes"
+        );
     }
 
     #[test]
@@ -339,16 +583,15 @@ mod tests {
         assert!(lowest.fps >= 45, "fps floor is unchanged by the new tier");
     }
 
-    /// Without ever seeing a client-reported drop, identical sustained shed
-    /// must behave exactly as before — same floor, bitrate untouched. This
-    /// is the regression guard for the historical SCTP incident: adding the
-    /// new tier must not change behavior for the case it doesn't apply to.
+    /// Mild sustained shed (SCTP rate, not bits) must match the historical
+    /// fps-only floor — bitrate untouched. Severe shed (≥12%) is a different
+    /// signal and deliberately unlocks bitrate (see severe_host_shed_*).
     #[test]
     fn no_client_congestion_seen_matches_pre_existing_floor() {
         let mut gov = LinkGov::new(P720);
         let mut lowest = P720;
         for _ in 0..40 {
-            lowest = gov.on_window(40, 100);
+            lowest = gov.on_window(9, 100);
         }
         assert_eq!(lowest.bitrate_kbps, P720.bitrate_kbps);
         assert_eq!(lowest, *rungs_from(&P720).last().unwrap());
@@ -366,6 +609,65 @@ mod tests {
             gov.on_window(0, 60);
         }
         assert_eq!(gov.current(), P720);
+    }
+
+    #[test]
+    fn severe_report_classifier() {
+        assert!(client_report_is_severe(436, 1975), "18% loss (live 03:04:38)");
+        assert!(client_report_is_severe(368, 2554), "12.6% loss (live 03:04:40)");
+        assert!(!client_report_is_severe(20, 480), "4% is congestion, not severe");
+        assert!(!client_report_is_severe(40, 60), "tiny sample is ignored");
+    }
+
+    #[test]
+    fn one_severe_client_report_cuts_bitrate_immediately() {
+        let mut gov = LinkGov::new(P720);
+        gov.note_severe_client_loss();
+        gov.on_window(0, 300);
+        assert_eq!(gov.current().bitrate_kbps, 8_000, "a single severe report must step down, not wait for a second window");
+        assert_eq!(gov.current().fps, P720.fps);
+        // A merely lossy report still needs two windows (unchanged behavior).
+        let mut gov = LinkGov::new(P720);
+        gov.note_client_loss();
+        gov.on_window(0, 300);
+        assert_eq!(gov.current(), P720);
+    }
+
+    #[test]
+    fn climb_back_after_client_loss_is_slower_and_backs_off() {
+        let mut gov = LinkGov::new(P720);
+        gov.note_severe_client_loss();
+        gov.on_window(0, 300);
+        let down = gov.current();
+        assert_ne!(down, P720);
+        // Two clean windows used to climb straight back to the rate that just lost packets.
+        gov.on_window(0, 300);
+        gov.on_window(0, 300);
+        assert_eq!(gov.current(), down, "two clean windows must not climb after a client-reported loss");
+        gov.on_window(0, 300);
+        gov.on_window(0, 300);
+        assert_ne!(gov.current(), down, "four clean windows climb one rung");
+        // A second failure at the higher rate doubles the wait again.
+        gov.note_severe_client_loss();
+        gov.on_window(0, 300);
+        let down2 = gov.current();
+        for _ in 0..7 {
+            gov.on_window(0, 300);
+        }
+        assert_eq!(gov.current(), down2, "after a repeat failure, seven clean windows still do not climb");
+        gov.on_window(0, 300);
+        assert_ne!(gov.current(), down2, "eight clean windows climb");
+        // And it resets once the link is healthy again at baseline.
+        for _ in 0..200 {
+            gov.on_window(0, 300);
+        }
+        assert_eq!(gov.current(), P720);
+        gov.on_window(40, 100);
+        gov.on_window(40, 100);
+        let d = gov.current();
+        gov.on_window(0, 60);
+        gov.on_window(0, 60);
+        assert_ne!(gov.current(), d, "host-shed recovery keeps the original two-window climb");
     }
 
     #[test]
@@ -424,35 +726,38 @@ mod tests {
         frames * bits_per
     }
 
-    /// Frame-capacity bench: governor must shrink fps (hold bitrate) until
-    /// emitted frames fit under a fixed push ceiling.
+    /// Frame-capacity bench: under mild shed (< SEVERE), governor steps fps
+    /// while holding bitrate. Discrete 100ms windows oscillate near capacity
+    /// once shed clears — assert min fps dropped, never unlock bitrate.
     #[test]
     fn benchmark_governor_vs_no_governor_on_saturated_frames() {
-        const CAPACITY_FPS: u32 = 48;
+        // ~11% shed at 96fps (1/9), clears once fps ≤ 85 — mild SCTP path.
+        const CAPACITY_FPS: u32 = 85;
         const WINDOWS: usize = 400;
-        // Baseline above capacity so the governor has room to step fps down.
         let baseline = EncodeTarget {
             fps: 96,
             ..P720
         };
         let mut gov = LinkGov::new(baseline);
-        let mut g_over = 0u32;
+        let mut min_fps = baseline.fps;
         for _ in 0..WINDOWS {
             let t = gov.current();
             assert_eq!(t.bitrate_kbps, baseline.bitrate_kbps);
             let emitted = (t.fps / 10).max(1);
             let carry = (CAPACITY_FPS / 10).max(1);
             let shed = emitted.saturating_sub(carry);
-            if shed > 0 {
-                g_over += 1;
-            }
             gov.on_window(shed, emitted.max(1));
+            min_fps = min_fps.min(gov.current().fps);
         }
         assert_eq!(gov.current().bitrate_kbps, baseline.bitrate_kbps);
-        // Ladder floor is 75% of baseline (72 @ 96). Capacity here is below that
-        // floor on purpose — assert we held bitrate and reached the fps floor.
-        assert_eq!(gov.current().fps, rungs_from(&baseline).last().unwrap().fps);
-        assert!(gov.current().fps < baseline.fps);
+        assert!(
+            min_fps < baseline.fps,
+            "mild saturation must step fps at least once, min={min_fps}"
+        );
+        assert!(
+            min_fps >= CAPACITY_FPS.saturating_sub(20),
+            "should settle near capacity, not floor; min={min_fps}"
+        );
     }
 
     #[test]

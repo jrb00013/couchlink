@@ -193,9 +193,9 @@ couchlink_try_upnp_online() {
       bridge_w="$(wslpath -w "$ROOT/scripts/windows/open-ports-upnp.ps1" 2>/dev/null || true)"
       if [[ -n "${bridge_w:-}" ]]; then
         if couchlink_verbose; then
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" && ok=1 || true
+          powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$bridge_w" && ok=1 || true
         else
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$bridge_w" >/dev/null 2>&1 && ok=1 || true
+          powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$bridge_w" >/dev/null 2>&1 && ok=1 || true
         fi
       fi
     fi
@@ -395,6 +395,10 @@ fi
 PIDS=()
 cleanup() {
   couchlink_say "==> shutting down"
+  # Stop CF watchdog before killing children so it doesn't race a restart.
+  if declare -F couchlink_stop_cloudflared_watchdog >/dev/null 2>&1; then
+    couchlink_stop_cloudflared_watchdog
+  fi
   for pid in "${PIDS[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done

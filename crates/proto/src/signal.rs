@@ -169,6 +169,31 @@ pub enum SignalMessage {
         #[serde(default)]
         slot: u8,
     },
+    /// Player asks the host for the list of capturable Windows windows —
+    /// fired only by a deliberate in-page shortcut (see `web/src/player.ts`
+    /// `WINDOW_SWITCH_SHORTCUT`), never automatically. The combo is chosen to
+    /// be unreachable by normal gameplay input so a friend triggering the
+    /// window switcher is always intentional.
+    RequestCaptureWindows {
+        #[serde(default)]
+        slot: u8,
+    },
+    /// Host's answer to `RequestCaptureWindows` — every currently capturable
+    /// window's title, for the player's switcher overlay to list.
+    CaptureWindowList {
+        windows: Vec<String>,
+        #[serde(default)]
+        slot: u8,
+    },
+    /// Player picked a window from the switcher overlay. The host re-targets
+    /// `couchlink-win-capture.exe` at it live, without touching the host
+    /// process, signaling, or the tunnel — see
+    /// `crates/host/src/capture/mod.rs` `capture_window_override`.
+    SwitchCaptureWindow {
+        title: String,
+        #[serde(default)]
+        slot: u8,
+    },
     /// Host announces stream ready (codec / resolution).
     StreamInfo {
         width: u32,
@@ -187,6 +212,18 @@ pub enum SignalMessage {
     /// from the host's half of the path too: the browser already reports its
     /// own decode/paint numbers, and these are the host's capture/scale/encode/
     /// push averages for the same window.
+    /// Host PC battery, sent with every stats window so viewers can show it: around 20% Windows switches power plans and the stream
+    /// hitches for a couple of seconds, which looks like a network problem from the couch. Not sent by a host without a battery.
+    HostBattery {
+        /// Charge, 0-100.
+        percent: u8,
+        /// The battery is charging (false when full, or on battery).
+        #[serde(default)]
+        charging: bool,
+        /// Mains power is connected.
+        #[serde(default)]
+        ac: bool,
+    },
     HostStats {
         /// Frames per second the host pushed to the wire in the last window.
         fps: f64,
@@ -228,6 +265,61 @@ pub enum SignalMessage {
         #[serde(default)]
         shm_gate_trips: bool,
     },
+    /// Player → host: request split-seat isolation intent / report detected regions.
+    /// Signaling stamps `slot` from the connection; never trust a client-supplied slot.
+    SplitScreenSet {
+        /// Player wants isolation (own seat crop) when host master is on.
+        enabled: bool,
+        /// `own` = crop to seat region; `full` = show entire split layout.
+        #[serde(default = "default_view_mode")]
+        view_mode: String,
+        /// Detected layout: `none`, `horizontal`, `vertical`, `grid2x2`.
+        #[serde(default)]
+        layout: String,
+        /// Normalized regions `[0,1]` in seat order (P1..P4), length 0..=4.
+        #[serde(default)]
+        regions: Vec<NormRect>,
+        /// Ask host/oracle to rescan seams.
+        #[serde(default)]
+        rescan: bool,
+        #[serde(default)]
+        slot: u8,
+    },
+    /// Host → all players: authoritative split-seat config for the session.
+    SplitScreenConfig {
+        /// Host master switch — clients may only isolate when true.
+        master_enabled: bool,
+        /// Host's own view: `own` or `full`.
+        #[serde(default = "default_view_mode")]
+        host_view_mode: String,
+        #[serde(default)]
+        layout: String,
+        #[serde(default)]
+        regions: Vec<NormRect>,
+        /// Seat index (1..=4) → region index into `regions` (0-based).
+        #[serde(default)]
+        seat_region: Vec<u8>,
+        /// Force clients to re-run detection.
+        #[serde(default)]
+        rescan: bool,
+    },
+}
+
+fn default_view_mode() -> String {
+    "full".into()
+}
+
+/// Normalized axis-aligned rect in frame space. All fields clamped to `[0,1]` by clients.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct NormRect {
+    #[serde(default)]
+    pub x: f32,
+    #[serde(default)]
+    pub y: f32,
+    #[serde(default)]
+    pub w: f32,
+    #[serde(default)]
+    pub h: f32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -424,6 +516,108 @@ mod tests {
                 assert_eq!(slot, 2);
                 assert_eq!(kind, "dualsense");
                 assert_eq!(id, "DualSense Wireless Controller");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_screen_set_round_trips() {
+        let m = SignalMessage::SplitScreenSet {
+            enabled: true,
+            view_mode: "own".into(),
+            layout: "horizontal".into(),
+            regions: vec![
+                NormRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
+                NormRect {
+                    x: 0.5,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
+            ],
+            rescan: false,
+            slot: 1,
+        };
+        let s = m.to_json().unwrap();
+        assert!(s.contains("\"type\":\"split_screen_set\""));
+        let back = SignalMessage::from_json(&s).unwrap();
+        match back {
+            SignalMessage::SplitScreenSet {
+                enabled,
+                view_mode,
+                layout,
+                regions,
+                slot,
+                ..
+            } => {
+                assert!(enabled);
+                assert_eq!(view_mode, "own");
+                assert_eq!(layout, "horizontal");
+                assert_eq!(regions.len(), 2);
+                assert_eq!(slot, 1);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_screen_config_round_trips() {
+        let m = SignalMessage::SplitScreenConfig {
+            master_enabled: true,
+            host_view_mode: "own".into(),
+            layout: "grid2x2".into(),
+            regions: vec![NormRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.5,
+                h: 0.5,
+            }],
+            seat_region: vec![0, 1, 2, 3],
+            rescan: true,
+        };
+        let s = m.to_json().unwrap();
+        assert!(s.contains("\"type\":\"split_screen_config\""));
+        let back = SignalMessage::from_json(&s).unwrap();
+        match back {
+            SignalMessage::SplitScreenConfig {
+                master_enabled,
+                host_view_mode,
+                layout,
+                rescan,
+                ..
+            } => {
+                assert!(master_enabled);
+                assert_eq!(host_view_mode, "own");
+                assert_eq!(layout, "grid2x2");
+                assert!(rescan);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_battery_roundtrips_and_old_peers_default_flags() {
+        let m = SignalMessage::HostBattery { percent: 19, charging: false, ac: false };
+        let json = m.to_json().unwrap();
+        assert!(json.contains("\"type\":\"host_battery\""), "wire tag: {json}");
+        match SignalMessage::from_json(&json).unwrap() {
+            SignalMessage::HostBattery { percent, charging, ac } => {
+                assert_eq!(percent, 19);
+                assert!(!charging && !ac);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // A sender that omits the optional flags still parses.
+        match SignalMessage::from_json(r#"{"type":"host_battery","percent":55}"#).unwrap() {
+            SignalMessage::HostBattery { percent, charging, ac } => {
+                assert_eq!(percent, 55);
+                assert!(!charging && !ac);
             }
             other => panic!("wrong variant: {other:?}"),
         }

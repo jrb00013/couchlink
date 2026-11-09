@@ -75,6 +75,21 @@ mod tests {
     }
 
     #[test]
+    fn b2_loss_ladder_never_below_40pct_of_playable_and_keeps_resolution() {
+        // Covers the real `rungs_from_inner(true)` path the fps-only test above cannot see.
+        let base = playable_preset();
+        let floor = A::ENCODER_KBPS * 40 / 100;
+        for r in crate::link_gov::rungs_from_inner(&base, true) {
+            assert!(r.bitrate_kbps >= floor, "loss ladder cut below 40% of playable: {r:?}");
+            assert_eq!((r.width, r.height), (A::ENCODER_W, A::ENCODER_H), "ladder changed resolution: {r:?}");
+        }
+        // And without client loss the hold is exact.
+        for r in crate::link_gov::rungs_from_inner(&base, false) {
+            assert_eq!(r.bitrate_kbps, A::ENCODER_KBPS, "healthy rung cut bitrate: {r:?}");
+        }
+    }
+
+    #[test]
     fn b_fps_floor_never_returns_unplayable_sub_30() {
         let floor = *rungs_from(&playable_preset()).last().unwrap();
         assert!(

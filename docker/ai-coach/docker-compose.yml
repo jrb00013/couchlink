@@ -1,0 +1,73 @@
+# CouchLink AI game coach — opt-in, host-local. Driven by scripts/ai-coach.sh.
+#
+# Isolation model:
+#   inference (internal)  ollama <-> coach. No route to the internet, nothing published.
+#   egress                coach only. It is the single process allowed to fetch web pages.
+# Only the coach API is published, and only on loopback.
+name: couchlink-ai-coach
+
+services:
+  ollama:
+    image: ollama/ollama:0.6.8
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [inference]
+    # No `ports:` on purpose: models are pulled by the one-shot `ollama-pull`
+    # service below, and the coach reaches ollama over the internal network.
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${COUCHLINK_AI_COACH_MEM:-6g}
+    cpus: ${COUCHLINK_AI_COACH_CPUS:-4}
+    environment:
+      OLLAMA_KEEP_ALIVE: ${COUCHLINK_AI_COACH_KEEP_ALIVE:-5m}
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  coach:
+    build: .
+    restart: unless-stopped
+    depends_on: [ollama]
+    networks: [inference, egress]
+    ports:
+      - "127.0.0.1:${COUCHLINK_AI_COACH_PORT:-18790}:18790"
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    mem_limit: 256m
+    pids_limit: 64
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      COUCHLINK_AI_COACH_MODEL: ${COUCHLINK_AI_COACH_MODEL:-qwen2.5:3b}
+      COUCHLINK_AI_COACH_WEB: ${COUCHLINK_AI_COACH_WEB:-1}
+      # Comma-separated host suffixes; "*" allows any public host. Empty = built-in list.
+      COUCHLINK_AI_COACH_ALLOW: ${COUCHLINK_AI_COACH_ALLOW:-}
+      COUCHLINK_AI_COACH_KEEP_ALIVE: ${COUCHLINK_AI_COACH_KEEP_ALIVE:-5m}
+      COACH_BIND: 0.0.0.0:18790
+
+  # One-shot: `scripts/ai-coach.sh pull-model`. The only ollama container with egress.
+  ollama-pull:
+    profiles: [pull]
+    image: ollama/ollama:0.6.8
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'ollama serve >/dev/null 2>&1 & for i in 1 2 3 4 5 6 7 8 9 10; do ollama list >/dev/null 2>&1 && break; sleep 1; done; ollama pull "$$MODEL"'
+    environment:
+      MODEL: ${COUCHLINK_AI_COACH_MODEL:-qwen2.5:3b}
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [egress]
+
+networks:
+  inference:
+    internal: true
+  egress: {}
+
+volumes:
+  ollama-models: {}

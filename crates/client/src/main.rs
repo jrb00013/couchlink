@@ -307,7 +307,7 @@ fn run_headless(args: ResolvedArgs) -> Result<()> {
     init_tracing();
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async_main(args, None, None))
+    rt.block_on(async_main(args, None, None, None))
 }
 
 
@@ -351,9 +351,11 @@ fn run_windowed(args: Option<ResolvedArgs>, join_prefill: String) -> Result<view
     let (frame_tx, frame_rx) = std_mpsc::channel::<decode::DecodedFrame>();
     let (shutdown_tx, shutdown_rx) = std_mpsc::channel::<()>();
     let keyboard_pad = Arc::new(Mutex::new(KeyboardPad::new()));
+    let crop_state = Arc::new(Mutex::new(view::CropState::default()));
 
     let net_thread = if let Some(net_args) = args.clone() {
         let net_keyboard_pad = keyboard_pad.clone();
+        let net_crop = Arc::clone(&crop_state);
         Some(
             std::thread::Builder::new()
                 .name("couchlink-net".into())
@@ -363,6 +365,7 @@ fn run_windowed(args: Option<ResolvedArgs>, join_prefill: String) -> Result<view
                         net_args,
                         Some(frame_tx),
                         Some((net_keyboard_pad, shutdown_rx)),
+                        Some(net_crop),
                     ))
                 })
                 .expect("spawn network thread"),
@@ -373,7 +376,13 @@ fn run_windowed(args: Option<ResolvedArgs>, join_prefill: String) -> Result<view
         None
     };
 
-    let view_result = match view::run(frame_rx, keyboard_pad, shutdown_tx, join_prefill) {
+    let view_result = match view::run(
+        frame_rx,
+        keyboard_pad,
+        shutdown_tx,
+        join_prefill,
+        crop_state,
+    ) {
         Ok(r) => r,
         Err(e) => {
             // Headless has no video output at all — say so rather than
@@ -407,6 +416,7 @@ async fn async_main(
     args: ResolvedArgs,
     video_frame_out: Option<std_mpsc::Sender<decode::DecodedFrame>>,
     keyboard: Option<(Arc<Mutex<KeyboardPad>>, std_mpsc::Receiver<()>)>,
+    crop_state: Option<Arc<Mutex<view::CropState>>>,
 ) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -519,6 +529,48 @@ async fn async_main(
                     }
                     Some(SignalMessage::PlayersStatus { occupied, max }) => {
                         info!("players: {occupied}/{max} connected");
+                    }
+                    Some(SignalMessage::SplitScreenConfig {
+                        master_enabled,
+                        host_view_mode,
+                        regions,
+                        seat_region,
+                        ..
+                    }) => {
+                        if let Some(cs) = &crop_state {
+                            let mut st = cs.lock().unwrap_or_else(|e| e.into_inner());
+                            // Native viewer defaults to own-seat when master is on
+                            // (host_view_mode is the host's preference, not ours).
+                            st.armed = master_enabled;
+                            if !st.armed {
+                                st.crop = None;
+                            } else if regions.is_empty() {
+                                st.crop = None; // paint gate until regions arrive
+                            } else {
+                                // Remote native client defaults to seat P2 (index 1).
+                                let seat_idx = 1usize;
+                                let region_idx = seat_region
+                                    .get(seat_idx)
+                                    .copied()
+                                    .unwrap_or(seat_idx as u8)
+                                    as usize;
+                                let r = regions
+                                    .get(region_idx)
+                                    .or_else(|| regions.first())
+                                    .cloned();
+                                st.crop = r.map(|n| view::UvCrop {
+                                    x: n.x,
+                                    y: n.y,
+                                    w: n.w,
+                                    h: n.h,
+                                });
+                            }
+                            info!(
+                                "split_screen_config master={master_enabled} host_view={host_view_mode} \
+                                 regions={}",
+                                regions.len()
+                            );
+                        }
                     }
                     Some(SignalMessage::PeerLeft { .. }) => warn!("host left"),
                     None => break,

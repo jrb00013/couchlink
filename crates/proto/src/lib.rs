@@ -16,7 +16,7 @@ pub use pad_frame::{PadFeedback, PadFrame, PAD_CHANNEL, PAD_MAGIC};
 pub use video_frame::{
     annex_b_is_keyframe, VideoAccessUnit, VideoFragment, VIDEO_CHANNEL, VIDEO_MAGIC,
 };
-pub use signal::{Role, SignalMessage, StreamPreset};
+pub use signal::{NormRect, Role, SignalMessage, StreamPreset};
 
 #[cfg(test)]
 mod tests {

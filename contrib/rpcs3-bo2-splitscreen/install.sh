@@ -16,6 +16,19 @@ mkdir -p "$RPCS3_DIR/patches" "$RPCS3_DIR/config" "$RPCS3_DIR/config/custom_conf
 cp "$ROOT/BLUS31011_patch.yml" "$RPCS3_DIR/patches/BLUS31011_patch.yml"
 cp "$ROOT/patch_config.yml" "$RPCS3_DIR/config/patch_config.yml"
 
+# Hang-detect MUST stay enabled. Softlock force-complete MUST stay disabled:
+# freeze 2026-10-11-213130 — faking *r30 complete on first usleep left SPURS
+# incomplete (SPUs PAUSE, SpursHdlr0 group_join, everyone on sys_semaphore_wait).
+# Emulator play22 fixes the Secondary stwcx starvation; do not re-enable this.
+if grep -A6 'force SPURS wait complete' "$RPCS3_DIR/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true'; then
+  echo "error: softlock force-complete must be Enabled: false (causes GUEST_STALL)" >&2
+  exit 1
+fi
+if ! grep -A6 'hang-detect watchdog' "$RPCS3_DIR/config/patch_config.yml" | grep -qE 'Enabled:[[:space:]]*true'; then
+  echo "error: hang-detect patch is not Enabled: true in patch_config.yml" >&2
+  exit 1
+fi
+
 # Build custom config from current global + our overrides (python for YAML-ish merge of known keys)
 BASE="$RPCS3_DIR/config/config.yml"
 OUT="$RPCS3_DIR/config/custom_configs/config_BLUS31011.yml"
@@ -37,6 +50,7 @@ sed -i \
   -e 's/^  RSX FIFO Fetch Accuracy:.*/  RSX FIFO Fetch Accuracy: Atomic/' \
   -e 's/^  Accurate ZCULL stats:.*/  Accurate ZCULL stats: false/' \
   -e 's/^  Relaxed ZCULL Sync:.*/  Relaxed ZCULL Sync: true/' \
+  -e 's/^  PPU Reservation Priority Over SPUs:.*/  PPU Reservation Priority Over SPUs: true\n  PPU Starvation CAS Refresh: true/' \
   -e 's/^  Frame limit:.*/  Frame limit: Auto/' \
   -e 's/^  Multithreaded RSX:.*/  Multithreaded RSX: false/' \
   -e 's/^  Resolution:.*/  Resolution: 1280x720/' \
@@ -53,11 +67,11 @@ fi
 
 echo "Installed BO2 split-screen pack into $RPCS3_DIR"
 echo "  patches/BLUS31011_patch.yml"
-echo "  config/patch_config.yml (Enabled: true)"
+echo "  config/patch_config.yml (hang-detect ON, softlock force-complete OFF)"
 echo "  config/custom_configs/config_BLUS31011.yml"
 echo "  Multithreaded RSX forced OFF (do not re-enable — menu softlock)"
 echo "Reboot BO2 for patches/config to take effect."
 echo "Verify Game Patches:"
-echo "  - BO2 split-screen: disable hang-detect watchdog (couchlink)"
-echo "  - BO2 softlock: force SPURS wait complete then exit (couchlink)"
-echo "Also stage couchlink-play: switch-rpcs3.cmd couchlink-play"
+echo "  - BO2 split-screen: disable hang-detect watchdog (couchlink) = ON"
+echo "  - BO2 softlock: force SPURS wait complete then exit = OFF (play22 fixes livelock)"
+echo "Also stage play22+: switch-rpcs3.cmd 19984-play22"
