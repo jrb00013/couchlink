@@ -1,0 +1,11 @@
+# Optional NVIDIA GPU for ollama: scripts/ai-coach.sh up --gpu
+# Needs the NVIDIA container toolkit. Without it the coach runs on CPU (slower).
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
