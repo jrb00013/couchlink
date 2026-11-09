@@ -168,6 +168,7 @@ struct App {
     capture_cmdline: Option<String>,
     host_alive: bool,
     signaling_alive: bool,
+    input_locked: bool,
 }
 
 impl App {
@@ -177,11 +178,12 @@ impl App {
             windows: Vec::new(),
             filter: String::new(),
             list_state: ListState::default(),
-            log: vec!["couchlink-tui ready — j/k or arrows to move, / to filter, enter to switch capture, r to restart capture, q to quit".into()],
+            log: vec!["couchlink-tui ready — j/k or arrows to move, / to filter, enter to switch capture, l to lock viewer input, r to restart capture, q to quit".into()],
             last_refresh: Instant::now() - Duration::from_secs(999),
             capture_cmdline: None,
             host_alive: false,
             signaling_alive: false,
+            input_locked: false,
         };
         s.refresh();
         s
@@ -208,6 +210,7 @@ impl App {
         self.capture_cmdline = capture_running();
         self.host_alive = proc_alive("couchlink-host --signaling") || proc_alive("target/release/couchlink-host");
         self.signaling_alive = proc_alive("couchlink-signaling");
+        self.input_locked = couchlink_pad::input_lock::lock_path().exists();
         self.last_refresh = Instant::now();
         if self.list_state.selected().is_none() && !self.filtered().is_empty() {
             self.list_state.select(Some(0));
@@ -254,6 +257,16 @@ impl App {
         self.refresh();
     }
 
+    fn toggle_input_lock(&mut self) {
+        let lock = !couchlink_pad::input_lock::lock_path().exists();
+        match couchlink_pad::input_lock::set_locked(lock) {
+            Ok(()) if lock => self.note("viewer input LOCKED - friends can watch but not press anything"),
+            Ok(()) => self.note("viewer input unlocked"),
+            Err(e) => self.note(format!("input lock failed: {e}")),
+        }
+        self.input_locked = couchlink_pad::input_lock::lock_path().exists();
+    }
+
     fn restart(&mut self) {
         self.note("force-restarting capture ...");
         match restart_capture(&self.root) {
@@ -287,7 +300,7 @@ fn draw(f: &mut Frame, app: &mut App, mode: &Mode) {
     let size = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(6), Constraint::Length(8), Constraint::Length(1)])
+        .constraints([Constraint::Length(5), Constraint::Min(6), Constraint::Length(8), Constraint::Length(1)])
         .split(size);
 
     draw_status(f, app, chunks[0]);
@@ -318,6 +331,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             status_line("signaling", app.signaling_alive),
         ]),
         capture_line,
+        if app.input_locked {
+            Line::from(vec![
+                Span::styled("■ viewer input LOCKED", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw("  (l = unlock)"),
+            ])
+        } else {
+            Line::from(vec![status_line("viewer input live", true), Span::raw("  (l = lock)")])
+        },
     ];
     let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" couchlink-tui "));
     f.render_widget(p, area);
@@ -351,7 +372,7 @@ fn draw_log(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    let p = Paragraph::new("j/k move · / filter · enter switch · r restart capture · R refresh · q quit");
+    let p = Paragraph::new("j/k move · / filter · enter switch · l lock/unlock viewer input · r restart capture · R refresh · q quit");
     f.render_widget(p, area);
 }
 
@@ -387,6 +408,7 @@ fn main() -> Result<()> {
                     KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
                     KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
                     KeyCode::Char('/') => mode = Mode::Filter,
+                    KeyCode::Char('l') => app.toggle_input_lock(),
                     KeyCode::Char('r') => app.restart(),
                     KeyCode::Char('R') => app.refresh(),
                     KeyCode::Enter => app.switch_to_selected(),

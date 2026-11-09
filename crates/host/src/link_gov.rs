@@ -40,6 +40,16 @@ const UP_AFTER_CLEAN_WINDOWS: u32 = 2;
 /// Ceiling for the climb-back backoff below (clean windows required per rung).
 const MAX_UP_AFTER_CLEAN_WINDOWS: u32 = 12;
 
+/// Client RTT (ms) that marks the current window congested and unlocks bitrate
+/// rungs. Below this we treat the report as healthy for climb-hold purposes.
+pub const RTT_CONGESTION_MS: u32 = 250;
+/// Client RTT (ms) that means the pipe has collapsed (bufferbloat / saturated
+/// uplink). Slam immediately to the 40% bitrate floor — waiting for two 5s
+/// windows is how Ricardo sat at 10 Mbps with an 8 s RTT and "Media lost".
+pub const RTT_SLAM_MS: u32 = 800;
+/// Clear the RTT hold after this many consecutive healthy-RTT reports.
+const RTT_CLEAR_REPORTS: u32 = 3;
+
 /// The governor's persistent memory between windows.
 #[derive(Debug, Clone)]
 pub struct LinkGov {
@@ -69,6 +79,12 @@ pub struct LinkGov {
     /// Consecutive clean windows spent AT baseline; the climb-back backoff only resets after a long stable stretch there (reaching
     /// baseline is not proof the link holds that rate: it is exactly where the yo-yo failed).
     stable_windows: u32,
+    /// Sticky while client RTT is in the congestion band. Blocks climb so a
+    /// quiet host-shed window cannot walk us back up to 10 Mbps while the
+    /// friend's ICE RTT is still multi-second.
+    rtt_hold: bool,
+    /// Consecutive client reports with RTT below [`RTT_CONGESTION_MS`].
+    rtt_clear_reports: u32,
 }
 
 /// Rung ladder: **hold bitrate**, step fps.
@@ -100,7 +116,7 @@ fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
 /// "the governor fired but it's still bad" case this closes. Once real
 /// client-reported congestion has been seen this session, three bitrate cuts
 /// below the fps floor.
-fn rungs_from_inner(baseline: &EncodeTarget, rtp_congested: bool) -> Vec<EncodeTarget> {
+pub(crate) fn rungs_from_inner(baseline: &EncodeTarget, rtp_congested: bool) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
     if rtp_congested {
         // Client-reported loss means the pipe is too small for the *bits*, so cut
@@ -154,7 +170,10 @@ const MIN_LOSS_SAMPLE: u32 = 200;
 /// Loss share (percent) that counts as congestion. 3.6% live froze the picture.
 const LOSS_TRIGGER_PCT: u32 = 2;
 /// Browser freezes in one report that count as congestion on their own.
-const FREEZE_TRIGGER: u32 = 2;
+/// 1 — live (Ricardo 2026-10-10): freezeCount crept by ~1 per 2s tick with
+/// `totalFreezesDuration=0`, so a threshold of 2 never fired while the picture
+/// stuttered every second.
+const FREEZE_TRIGGER: u32 = 1;
 
 /// Does one client report describe a congested link? Pure so it is unit-tested.
 pub fn client_report_is_congested(lost: u32, received: u32, freezes: u32) -> bool {
@@ -188,6 +207,8 @@ impl LinkGov {
             client_severe_window: false,
             up_need: UP_AFTER_CLEAN_WINDOWS,
             stable_windows: 0,
+            rtt_hold: false,
+            rtt_clear_reports: 0,
             baseline,
         }
     }
@@ -215,6 +236,62 @@ impl LinkGov {
     pub fn note_severe_client_loss(&mut self) {
         self.note_client_loss();
         self.client_severe_window = true;
+    }
+
+    /// Feed the browser's WebRTC `currentRoundTripTime`.
+    ///
+    /// Live regression (Ricardo 2026-10-10): srflx→srflx with encoder stuck at
+    /// 10 Mbps while the friend's RTT hit **8112 ms**, 52 freezes, then
+    /// "Media lost". The old path only called [`Self::note_client_congestion`]
+    /// (+8 synthetic shed frames) — that unlocks bitrate rungs but does **not**
+    /// mark the window bad, so `on_window` kept climbing/holding at baseline
+    /// whenever host-side RTP shed was under 8%.
+    ///
+    /// Now: RTT ≥ [`RTT_CONGESTION_MS`] marks the window bad (like loss/freezes).
+    /// RTT ≥ [`RTT_SLAM_MS`] jumps straight to the 40%-bitrate floor at full fps
+    /// and returns `Some(target)` so the host can `set_target` immediately
+    /// instead of waiting two 5 s windows. While `rtt_hold` is set, climb is
+    /// blocked even if host shed is quiet.
+    pub fn note_client_rtt(&mut self, rtt_ms: u32) -> Option<EncodeTarget> {
+        if rtt_ms == 0 {
+            return None;
+        }
+        if rtt_ms >= RTT_CONGESTION_MS {
+            self.client_congestion_seen = true;
+            self.client_loss_window = true;
+            self.rtt_hold = true;
+            self.rtt_clear_reports = 0;
+            self.clean_windows = 0;
+            if rtt_ms >= RTT_SLAM_MS {
+                let slam = self.bitrate_floor_at_full_fps();
+                if slam != self.current {
+                    self.current = slam;
+                    self.bad_windows = 0;
+                    return Some(slam);
+                }
+            }
+            return None;
+        }
+        // Healthy RTT — release the hold after a few clean reports.
+        if self.rtt_hold {
+            self.rtt_clear_reports = self.rtt_clear_reports.saturating_add(1);
+            if self.rtt_clear_reports >= RTT_CLEAR_REPORTS {
+                self.rtt_hold = false;
+                self.rtt_clear_reports = 0;
+            }
+        }
+        None
+    }
+
+    /// 40% of baseline bitrate at baseline fps (first real bandwidth floor).
+    fn bitrate_floor_at_full_fps(&self) -> EncodeTarget {
+        let rungs = rungs_from_inner(&self.baseline, true);
+        rungs
+            .iter()
+            .copied()
+            .filter(|r| r.fps == self.baseline.fps)
+            .last()
+            .unwrap_or(self.current)
     }
 
     /// Give the governor one window of link observations.
@@ -258,6 +335,11 @@ impl LinkGov {
                     }
                 }
             }
+        } else if self.rtt_hold {
+            // Friend still reports a congested RTT band — do not climb just
+            // because the host's push queue looked quiet this window.
+            self.bad_windows = 0;
+            self.clean_windows = 0;
         } else {
             self.bad_windows = 0;
             self.clean_windows += 1;
@@ -356,12 +438,96 @@ mod tests {
     }
 
     #[test]
+    fn healthy_ladder_never_cuts_bitrate_below_baseline() {
+        // The documented Ricardo guarantee (2026-08-24 audit): without client-reported loss the ladder only steps fps.
+        for r in rungs_from_inner(&P720, false) {
+            assert_eq!(r.bitrate_kbps, P720.bitrate_kbps, "healthy rung cut bitrate: {r:?}");
+            assert!(r.fps >= 45, "fps floor broken: {r:?}");
+        }
+    }
+
+    #[test]
+    fn congested_ladder_bitrate_floor_is_40_percent_of_baseline() {
+        // The loss ladder may cut bits, but never below 40% of baseline (4000 kbps at 10 Mbps) and never in resolution.
+        let floor = P720.bitrate_kbps * 40 / 100;
+        let rungs = rungs_from_inner(&P720, true);
+        assert_eq!(rungs[0], P720, "first rung must be the baseline");
+        for r in &rungs {
+            assert!(r.bitrate_kbps >= floor, "bitrate below 40% floor: {r:?}");
+            assert!(r.fps >= 45, "fps floor broken: {r:?}");
+            assert_eq!((r.width, r.height), (P720.width, P720.height), "ladder must not change resolution: {r:?}");
+        }
+        assert_eq!(rungs.iter().map(|r| r.bitrate_kbps).min(), Some(floor));
+    }
+
+    #[test]
+    fn severe_shed_never_drives_bitrate_below_the_floor() {
+        let floor = P720.bitrate_kbps * 40 / 100;
+        let mut gov = LinkGov::new(P720);
+        for _ in 0..40 {
+            let t = gov.on_window(40, 100);
+            assert!(t.bitrate_kbps >= floor, "sustained 40% shed cut bitrate to {t:?}");
+        }
+    }
+
+    #[test]
     fn report_classifier_flags_loss_and_freezes_not_noise() {
         assert!(client_report_is_congested(20, 480, 0), "4% loss");
         assert!(!client_report_is_congested(2, 498, 0), "0.4% loss is noise");
         assert!(!client_report_is_congested(5, 20, 0), "tiny sample is ignored");
-        assert!(client_report_is_congested(0, 500, 2), "repeated freezes");
-        assert!(!client_report_is_congested(0, 500, 1), "one freeze is a blip");
+        assert!(client_report_is_congested(0, 500, 1), "a single freeze ticks congestion");
+        assert!(!client_report_is_congested(0, 500, 0), "zero freezes is clean");
+    }
+
+    #[test]
+    fn catastrophic_rtt_slams_to_bitrate_floor_immediately() {
+        // Ricardo live: 8112ms RTT, encoder still commanded 10 Mbps@60.
+        let mut gov = LinkGov::new(P720);
+        let slam = gov
+            .note_client_rtt(8112)
+            .expect("must return a slam target");
+        assert_eq!(slam.fps, P720.fps, "keep fps; cut bits");
+        assert_eq!(slam.bitrate_kbps, 4_000, "40% floor");
+        assert_eq!(gov.current(), slam);
+    }
+
+    #[test]
+    fn moderate_rtt_marks_bad_but_does_not_slam() {
+        let mut gov = LinkGov::new(P720);
+        assert!(gov.note_client_rtt(300).is_none());
+        assert_eq!(gov.current().bitrate_kbps, P720.bitrate_kbps);
+        // Two congested windows → first bitrate step (80%).
+        gov.on_window(0, 300);
+        gov.note_client_rtt(300);
+        gov.on_window(0, 300);
+        assert_eq!(gov.current().bitrate_kbps, 8_000);
+    }
+
+    #[test]
+    fn rtt_hold_blocks_climb_on_quiet_host_shed() {
+        let mut gov = LinkGov::new(P720);
+        let _ = gov.note_client_rtt(2000);
+        assert_eq!(gov.current().bitrate_kbps, 4_000);
+        // Host shed quiet for many windows — must NOT climb while RTT hold is set.
+        for _ in 0..10 {
+            gov.on_window(0, 300);
+        }
+        assert_eq!(
+            gov.current().bitrate_kbps,
+            4_000,
+            "must not climb under rtt_hold"
+        );
+        // Healthy RTT reports clear the hold, then climb can resume.
+        for _ in 0..RTT_CLEAR_REPORTS {
+            assert!(gov.note_client_rtt(40).is_none());
+        }
+        for _ in 0..4 {
+            gov.on_window(0, 300);
+        }
+        assert!(
+            gov.current().bitrate_kbps > 4_000,
+            "after RTT clears, climb resumes"
+        );
     }
 
     #[test]

@@ -90,17 +90,17 @@ why = "AUDIT: no FEC tax right after promote (FEC -> RTCP PLI -> shared-IDR blac
 id = "frame-stale-bridge"
 file = "crates/host/src/capture/bridge.rs"
 item = "FRAME_STALE_AFTER"
-min = 1500
-max = 1500
-why = "issue #67 / 08752db: 4s -> 1.5s hung-capture detection. Raising it re-extends the freeze; lowering it risks false respawns on jitter."
+min = 4000
+max = 4000
+why = "INTENTIONAL CHANGE (PR #107, c1b4187): 1.5s -> 4s. A 1.5s stale rule force-respawned the capture on ordinary hitches (viewers saw ~5s paused) and livelocked cold starts; 4s plus a 10s first-frame grace removes that while a truly hung capture is still dropped. Lowering it re-introduces the false respawns."
 
 [[const]]
 id = "frame-stale-hyperv"
 file = "crates/host/src/capture/hyperv_bridge.rs"
 item = "FRAME_STALE_AFTER"
-min = 1500
-max = 1500
-why = "mirrors bridge.rs (same issue #67 fix)"
+min = 4000
+max = 4000
+why = "mirrors bridge.rs (same PR #107 hitch fix)"
 
 [[const]]
 id = "respawn-after-bridge"
