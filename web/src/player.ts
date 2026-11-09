@@ -1557,6 +1557,7 @@ export class CouchlinkPlayer {
           charging: msg.charging ?? false,
           ac: msg.ac ?? false,
         });
+        break;
       case "capture_window_list":
         this.showWindowSwitcherOverlay(msg.windows);
         break;
