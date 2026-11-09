@@ -1,0 +1,299 @@
+# CouchLink regression baseline -- the ONE file scripts/ci/regression-guard.py reads.
+#
+# Every value below was read from origin/main (ccb38d8, 2026-11-08) so the gate
+# passes today. A value may only change in a PR that edits THIS file and says
+# why in the "why" field (see docs/REGRESSION_CI.md, "Updating the baseline").
+#
+# Doc sources:
+#   AUDIT  = docs/superpowers/plans/2026-08-24-quality-bitrate-no-regress-audit.md (ef1b605)
+#   WED    = docs/superpowers/plans/2026-08-26-wednesday-next.md
+# Kinds: eq (exact), min (>=), max (<=). Rust Duration/`a * b` consts are
+# normalised to a number (Duration -> milliseconds, bytes stay bytes).
+
+# ---------------------------------------------------------------- numeric consts
+[[const]]
+id = "baseline-width"
+file = "crates/proto/src/signal.rs"
+item = "P720_60.width"        # struct field inside `pub const P720_60`
+eq = 1280
+why = "AUDIT: Resolution 1280x720 (not 1080@18M on WAN)"
+
+[[const]]
+id = "baseline-height"
+file = "crates/proto/src/signal.rs"
+item = "P720_60.height"
+eq = 720
+why = "AUDIT: Resolution 1280x720"
+
+[[const]]
+id = "baseline-fps"
+file = "crates/proto/src/signal.rs"
+item = "P720_60.fps"
+eq = 60
+why = "AUDIT: Frozen Ricardo A drawer 5 Mbps @ 60 / 720p60 friend-night preset"
+
+[[const]]
+id = "baseline-bitrate-kbps"
+file = "crates/proto/src/signal.rs"
+item = "P720_60.bitrate_kbps"
+eq = 10000
+why = "INTENTIONAL CHANGE vs AUDIT (5000 -> 10000): commit 343ce8e 'production motion - 10Mbps@60'; see comment in signal.rs and ricardo_gate.rs self_baseline. 10 Mbps is the new floor-in-practice."
+
+[[const]]
+id = "p720_30-bitrate-floor"
+file = "crates/proto/src/signal.rs"
+item = "P720_30.bitrate_kbps"
+min = 5000
+why = "AUDIT: Encode kbps >= 5000, never reopen a floor below 5 Mbps (1250 mush)"
+
+[[const]]
+id = "ricardo-encoder-w"
+file = "crates/host/src/ricardo_playable_ab.rs"
+item = "ENCODER_W"
+eq = 1280
+why = "AUDIT: Ricardo A drawer 1280x720"
+
+[[const]]
+id = "ricardo-encoder-h"
+file = "crates/host/src/ricardo_playable_ab.rs"
+item = "ENCODER_H"
+eq = 720
+why = "AUDIT: Ricardo A drawer 1280x720"
+
+[[const]]
+id = "ricardo-encoder-kbps"
+file = "crates/host/src/ricardo_playable_ab.rs"
+item = "ENCODER_KBPS"
+eq = 10000
+why = "Same 5->10 Mbps change as baseline-bitrate-kbps (343ce8e); test name b_bitrate_hold_never_drops_below_playable_10mbps"
+
+[[const]]
+id = "idr-ceiling-bytes"
+file = "crates/host/src/webrtc_peer.rs"
+item = "VIDEO_DC_MAX_BUFFERED_IDR"
+eq = 262144
+why = "AUDIT: IDR ceiling 256 KiB (24 KiB aborted mid-IDR, v33->v34, bd21765)"
+
+[[const]]
+id = "fec-promote-grace-ms"
+file = "crates/host/src/webrtc_peer.rs"
+item = "FEC_PROMOTE_GRACE_MS"
+eq = 1500
+why = "AUDIT: no FEC tax right after promote (FEC -> RTCP PLI -> shared-IDR black)"
+
+# Hitch-fix guard. NOTE: the brief for this gate assumed 'not below 4s'. On main the
+# value is 1.5 s: issue #67 (commit 08752db) deliberately LOWERED it from 4 s so a
+# hung win-capture is detected sooner (visible freeze ~10 s -> ~5 s). The guard
+# therefore pins the CURRENT value in both directions (min=max) and refuses silent
+# drift either way. It is NOT the 4 s the old docs implied.
+[[const]]
+id = "frame-stale-bridge"
+file = "crates/host/src/capture/bridge.rs"
+item = "FRAME_STALE_AFTER"
+min = 1500
+max = 1500
+why = "issue #67 / 08752db: 4s -> 1.5s hung-capture detection. Raising it re-extends the freeze; lowering it risks false respawns on jitter."
+
+[[const]]
+id = "frame-stale-hyperv"
+file = "crates/host/src/capture/hyperv_bridge.rs"
+item = "FRAME_STALE_AFTER"
+min = 1500
+max = 1500
+why = "mirrors bridge.rs (same issue #67 fix)"
+
+[[const]]
+id = "respawn-after-bridge"
+file = "crates/host/src/capture/bridge.rs"
+item = "RESPAWN_AFTER"
+min = 2000
+max = 2000
+why = "issue #67: 5s -> 2s grace before relaunching win-capture"
+
+[[const]]
+id = "respawn-after-hyperv"
+file = "crates/host/src/capture/hyperv_bridge.rs"
+item = "RESPAWN_AFTER"
+min = 2000
+max = 2000
+why = "mirrors bridge.rs"
+
+[[const]]
+id = "gov-down-trigger"
+file = "crates/host/src/link_gov.rs"
+item = "DOWN_TRIGGER_PCT"
+eq = 8
+why = "link_gov doc: 8% matches Joel live (6% HUD must not step; 9-14% must)"
+
+[[const]]
+id = "gov-severe"
+file = "crates/host/src/link_gov.rs"
+item = "SEVERE_SHED_PCT"
+eq = 12
+why = "link_gov doc: 2026-10-12 live, 10-18% shed at 10 Mbps froze friends"
+
+[[const]]
+id = "gov-down-windows"
+file = "crates/host/src/link_gov.rs"
+item = "DOWN_AFTER_WINDOWS"
+eq = 2
+why = "link_gov hysteresis: one 9% blip must not step"
+
+[[const]]
+id = "gov-severe-down-windows"
+file = "crates/host/src/link_gov.rs"
+item = "SEVERE_DOWN_AFTER_WINDOWS"
+eq = 1
+why = "severe shed steps on the first bad window"
+
+[[const]]
+id = "gov-up-clean-windows"
+file = "crates/host/src/link_gov.rs"
+item = "UP_AFTER_CLEAN_WINDOWS"
+eq = 2
+why = "link_gov doc: ~10s recovery"
+
+# ---------------------------------------------------------------- required code shapes
+# `pattern` is a Python regex. count = minimum number of matches.
+[[snippet]]
+id = "ladder-fps-floor-45"
+file = "crates/host/src/link_gov.rs"
+pattern = '\.max\(45\)'
+count = 2
+why = "AUDIT: fps floor never below 45 (sub-45 = death spiral); both ladders"
+
+[[snippet]]
+id = "ladder-holds-bitrate"
+file = "crates/host/src/link_gov.rs"
+pattern = 'bitrate_kbps:\s*baseline\.bitrate_kbps,'
+count = 1
+why = "AUDIT: fps-only ladder holds baseline bitrate (never step bits; no 1250 floor)"
+
+[[snippet]]
+id = "ladder-congested-cuts"
+file = "crates/host/src/link_gov.rs"
+pattern = '\[80u32,\s*60,\s*40\]'
+count = 1
+why = "bitrate cuts exist ONLY in the rtp_congested tier; do not add deeper rungs"
+
+[[snippet]]
+id = "rtcp-pli-ignored-in-hybrid"
+file = "crates/host/src/webrtc_peer.rs"
+pattern = 'if send_rtp && send_dc \{\s*continue;\s*\}'
+count = 1
+why = "AUDIT: ignore Chrome RTCP PLI in hybrid dual (shared-IDR black cycle)"
+
+[[snippet]]
+id = "no-fec-while-rtp-live"
+file = "crates/host/src/webrtc_peer.rs"
+pattern = 'self\.fec_enabled && path == PATH_WEBCODECS && !send_rtp'
+count = 1
+why = "AUDIT: no FEC while RTP is live"
+
+[[snippet]]
+id = "bootstrap-dc-pli-coalesce"
+file = "crates/host/src/webrtc_peer.rs"
+pattern = 'KEYFRAME_COALESCE_DUAL_MS'
+count = 3
+why = "AUDIT: one bootstrap DC PLI, long coalesce (>=3s) so no IDR storm"
+
+# Forbidden: patterns that must NOT appear.
+[[forbidden]]
+id = "no-fec-alongside-rtp"
+file = "crates/host/src/webrtc_peer.rs"
+pattern = 'fec_enabled\s*&&\s*send_rtp'
+why = "AUDIT do-not #2: never FEC alongside live RTP"
+
+# ---------------------------------------------------------------- sacred tests
+# Each name must exist as a #[test] fn (not #[ignore]d) in the given file.
+[[sacred]]
+file = "crates/host/src/ricardo_playable_ab.rs"
+tests = [
+  "a_baseline_encoder_matches_720p60_at_10mbps",
+  "b_bitrate_hold_never_drops_below_playable_10mbps",
+  "b_fps_floor_never_returns_unplayable_sub_30",
+  "b_healthy_hybrid_keeps_full_rtp_for_paint",
+  "b_warmup_keeps_full_rtp_so_canvas_stays_playable",
+  "b_trickle_isolates_slow_peer_without_killing_healthy",
+  "b_live_sim_target_beats_ricardo_on_all_axes",
+  "a_playable_soft_gates_are_internally_consistent",
+]
+why = "AUDIT 'Sacred units' (renamed ..._5mbps -> ..._10mbps with 343ce8e)"
+
+[[sacred]]
+file = "crates/host/src/latency_live_sim/ricardo_gate.rs"
+tests = [
+  "ricardo_baseline_beats_itself",
+  "soft_floor_session_fails_hard_gate",
+  "death_spiral_session_fails_gate",
+  "target_session_passes_all_three_axes",
+  "joel_optimized_path_composes_to_beat_ricardo",
+  "frozen_self_scorecard_fails_beat_self_margin",
+  "target_session_beats_self",
+  "old_delta_starve_path_cannot_beat_ricardo",
+]
+why = "AUDIT: beat-Ricardo / beat-self gate"
+
+[[sacred]]
+file = "crates/host/src/link_gov.rs"
+tests = [
+  "mild_shed_steps_down_fps_holds_bitrate",
+  "mild_shed_never_drops_bitrate",
+  "severe_host_shed_unlocks_bitrate_cut",
+  "client_loss_cuts_bitrate_first_at_full_fps",
+]
+why = "AUDIT: Governor locked -- hold bitrate, step fps"
+
+[[sacred]]
+file = "crates/host/src/amazing_latency_ab.rs"
+tests = ["webcodecs_path_keeps_full_rtp_hybrid", "ricardo_playable_rtt_matches_budget_constant"]
+why = "AUDIT: hybrid present path locked"
+
+[[sacred]]
+file = "crates/host/src/webrtc_peer.rs"
+tests = ["host_applies_simulated_xbox_clpd_from_each_sku_path", "host_applies_simulated_dualsense_and_ps_face_buttons"]
+why = "controller_host_tests"
+
+# Per-file minimum #[test] counts (catches silent deletion of non-sacred tests).
+# Counts as of ccb38d8; raise freely, lowering requires a baseline change.
+[[min_tests]]
+file = "crates/host/src/ricardo_playable_ab.rs"
+count = 8
+[[min_tests]]
+file = "crates/host/src/amazing_latency_ab.rs"
+count = 10
+[[min_tests]]
+file = "crates/host/src/latency_live_sim/death_spiral.rs"
+count = 6
+[[min_tests]]
+file = "crates/host/src/latency_live_sim/governor.rs"
+count = 3
+[[min_tests]]
+file = "crates/host/src/latency_live_sim/paint.rs"
+count = 4
+[[min_tests]]
+file = "crates/host/src/latency_live_sim/ricardo_gate.rs"
+count = 8
+[[min_tests]]
+file = "crates/host/src/link_gov.rs"
+count = 17
+[[min_tests]]
+file = "crates/host/src/webrtc_peer.rs"
+count = 22
+
+# Web: file must exist and keep at least this many it()/test() cases.
+[[web_tests]]
+file = "web/src/presentAge.test.ts"
+count = 9
+[[web_tests]]
+file = "web/src/keyboardMouse.test.ts"
+count = 20
+[[web_tests]]
+file = "web/src/webCodecsCanvas.test.ts"
+count = 7
+[[web_tests]]
+file = "web/src/lowLatencyCanvas.test.ts"
+count = 3
+[[web_tests]]
+file = "web/src/inputPhoton.test.ts"
+count = 8
