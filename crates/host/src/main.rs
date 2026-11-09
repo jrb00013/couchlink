@@ -1,4 +1,5 @@
 mod age;
+mod ai_coach;
 mod battery;
 mod amazing_latency_ab;
 mod input_photon_budget;
@@ -640,6 +641,18 @@ async fn main() -> Result<()> {
     // One peer + one virtual controller per remote slot. The host's own pad owns
     // emulator P1; slots 1-3 fill P2-P4.
     let slots: Arc<Mutex<HashMap<u8, PlayerConn>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Opt-in AI coach bridge (COUCHLINK_AI_COACH=1). Inert when off. The snapshot
+    // uses try_lock so the slow coach tick can never contend with the frame fan-out.
+    {
+        let slots = Arc::clone(&slots);
+        let host_kind = host_physical_pad().0;
+        let _ = ai_coach::spawn(ai_coach::CoachCfg::from_env(), move || {
+            let g = slots.try_lock().ok()?;
+            let mut v = vec![ai_coach::SeatInfo { slot: 0, pad_kind: Some(host_kind.clone()) }];
+            v.extend(g.iter().map(|(s, c)| ai_coach::SeatInfo { slot: *s, pad_kind: c.last_pad_kind.clone() }));
+            Some(v)
+        });
+    }
 
     // Open capture before the first player so Windows win-capture can connect immediately.
     // Blocking accept is fine here — we are still in startup, before the select loop.
