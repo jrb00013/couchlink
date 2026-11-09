@@ -150,6 +150,8 @@ mod run {
     /// after the emulator restarts. Distinct from 1 so this shows up in a log
     /// as a deliberate restart request rather than a crash.
     const EXIT_SOURCE_CLOSED: i32 = 75;
+    /// Frames submitted that came from the window (not a replay of the last one).
+    static FRESH_SUBMITTED: AtomicU32 = AtomicU32::new(0);
 
     #[derive(Clone, Copy, Debug, ValueEnum)]
     pub enum CaptureSource {
@@ -412,7 +414,7 @@ mod run {
                 // to deliver. Output cadence follows input cadence, and a receiver
                 // sizes its jitter buffer from irregularity, not from rate — this is
                 // the same fix that took the raw path's buffer from 97ms to 6ms.
-                let tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
+                let mut tick = Duration::from_micros(1_000_000 / fps.max(1) as u64);
                 let mut next_submit = Instant::now();
                 // Only pixel frames can be re-encoded to fill a gap: a pooled texture
                 // is recycled by the capture thread and would be overwritten.
@@ -421,6 +423,7 @@ mod run {
                 let mut encoded = 0u32;
                 let mut stalled = 0u32;
                 let mut tiny_frames = 0u32;
+                let mut fresh = 0u32;
                 let mut encoded_window = Instant::now();
 
                 loop {
@@ -440,6 +443,10 @@ mod run {
                             if next_submit > now {
                                 std::thread::sleep(next_submit - now);
                             }
+                            // The link governor's fps rungs act here, on the submit beat: the encoder is never rebuilt for an fps
+                            // change (see `plan_target_change`), so the commanded fps has to land in the pacing or the governor's
+                            // message-rate relief never reaches the wire. One relaxed atomic load per beat.
+                            tick = Duration::from_micros(1_000_000 / TARGET_FPS.load(Ordering::Relaxed).max(1) as u64);
                             next_submit = Instant::now() + tick;
 
                             // Take the newest frame available, not the oldest.
@@ -560,6 +567,7 @@ mod run {
                                     // since two clones of the same COM object live at
                                     // different addresses.
                                     if submitted.is_ok() && from_source {
+                                        FRESH_SUBMITTED.fetch_add(1, Ordering::Relaxed);
                                         if replay_target.as_ref().map(|r| r.dimensions())
                                             != Some((fw, fh))
                                         {
@@ -605,6 +613,7 @@ mod run {
                                     .try_send((w, h, f.data, FrameFormat::H264, key))
                                     .is_ok();
                                 encoded += 1;
+                                fresh += FRESH_SUBMITTED.swap(0, Ordering::Relaxed);
                                 if !queued {
                                     stalled += 1;
                                     encoder.request_keyframe();
@@ -619,7 +628,7 @@ mod run {
                                             / 1000.0
                                     };
                                     info!(
-                                        "encoded {:.1} fps ({bytes} bytes/frame, {stalled} not queued) \
+                                        "encoded {:.1} fps ({fresh} new from window, {bytes} bytes/frame, {stalled} not queued) \
                                          | capture->encoded p50={:.1}ms p99={:.1}ms",
                                         encoded as f64 / encoded_window.elapsed().as_secs_f64(),
                                         p(50),
@@ -627,6 +636,7 @@ mod run {
                                     );
                                     enc_us.clear();
                                     encoded = 0;
+                                    fresh = 0;
                                     stalled = 0;
                                     encoded_window = Instant::now();
                                 }
@@ -1033,6 +1043,7 @@ mod run {
                 if let Ok(Some(w)) = find_window(&needle) {
                     let other = w.as_raw_hwnd() as isize;
                     if other != hwnd && hwnd_visible(other) {
+                        warn!("hwnd {hwnd} hidden; replacement hwnd {other}");
                         warn!("captured window hidden and another matching window is visible (fullscreen toggle?) — exiting to re-attach");
                         std::thread::sleep(Duration::from_millis(50));
                         std::process::exit(EXIT_SOURCE_CLOSED);
@@ -1436,6 +1447,11 @@ mod run {
                         }
                     }
 
+                    info!(
+                        "capture target hwnd={} visible={}",
+                        w.as_raw_hwnd() as isize,
+                        hwnd_visible(w.as_raw_hwnd() as isize)
+                    );
                     spawn_hidden_watch(w.as_raw_hwnd() as isize, args.window.clone());
 
                     if args.keep_rendering {

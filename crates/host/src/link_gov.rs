@@ -100,7 +100,7 @@ fn rungs_from(baseline: &EncodeTarget) -> Vec<EncodeTarget> {
 /// "the governor fired but it's still bad" case this closes. Once real
 /// client-reported congestion has been seen this session, three bitrate cuts
 /// below the fps floor.
-fn rungs_from_inner(baseline: &EncodeTarget, rtp_congested: bool) -> Vec<EncodeTarget> {
+pub(crate) fn rungs_from_inner(baseline: &EncodeTarget, rtp_congested: bool) -> Vec<EncodeTarget> {
     let mut rungs = vec![*baseline];
     if rtp_congested {
         // Client-reported loss means the pipe is too small for the *bits*, so cut
@@ -353,6 +353,39 @@ mod tests {
             "severe shed must cut bitrate on first step, got {t:?}"
         );
         assert_eq!(t.fps, P720.fps, "first bitrate rung holds fps");
+    }
+
+    #[test]
+    fn healthy_ladder_never_cuts_bitrate_below_baseline() {
+        // The documented Ricardo guarantee (2026-08-24 audit): without client-reported loss the ladder only steps fps.
+        for r in rungs_from_inner(&P720, false) {
+            assert_eq!(r.bitrate_kbps, P720.bitrate_kbps, "healthy rung cut bitrate: {r:?}");
+            assert!(r.fps >= 45, "fps floor broken: {r:?}");
+        }
+    }
+
+    #[test]
+    fn congested_ladder_bitrate_floor_is_40_percent_of_baseline() {
+        // The loss ladder may cut bits, but never below 40% of baseline (4000 kbps at 10 Mbps) and never in resolution.
+        let floor = P720.bitrate_kbps * 40 / 100;
+        let rungs = rungs_from_inner(&P720, true);
+        assert_eq!(rungs[0], P720, "first rung must be the baseline");
+        for r in &rungs {
+            assert!(r.bitrate_kbps >= floor, "bitrate below 40% floor: {r:?}");
+            assert!(r.fps >= 45, "fps floor broken: {r:?}");
+            assert_eq!((r.width, r.height), (P720.width, P720.height), "ladder must not change resolution: {r:?}");
+        }
+        assert_eq!(rungs.iter().map(|r| r.bitrate_kbps).min(), Some(floor));
+    }
+
+    #[test]
+    fn severe_shed_never_drives_bitrate_below_the_floor() {
+        let floor = P720.bitrate_kbps * 40 / 100;
+        let mut gov = LinkGov::new(P720);
+        for _ in 0..40 {
+            let t = gov.on_window(40, 100);
+            assert!(t.bitrate_kbps >= floor, "sustained 40% shed cut bitrate to {t:?}");
+        }
     }
 
     #[test]
