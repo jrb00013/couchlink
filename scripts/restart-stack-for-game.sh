@@ -21,8 +21,23 @@ echo "==> building host + signaling from $(git rev-parse --abbrev-ref HEAD) @ $(
 cargo build --release -p couchlink-host -p couchlink-signaling 2>&1 | grep -E '^error|Finished' | head -3
 
 echo "==> stopping old stack (exact-name matches only; never pkill -f a pattern this shell contains)"
-for n in couchlink-signaling couchlink-host turnserver cloudflared; do
+# The kernel truncates the process name (comm) to 15 chars, so `pgrep -x couchlink-signaling` NEVER matches the signaling server
+# (its comm is "couchlink-signa"). A stale signaling then kept :8443, the new one died with "Address already in use", and players sat on
+# "waiting for host offer" against a signaling with no host registered (2026-10-17, and 2026-10-11). Match the truncated names too.
+for n in couchlink-signaling couchlink-signa couchlink-host turnserver cloudflared; do
   for p in $(pgrep -x "$n" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
+done
+# Belt and braces: whatever still owns the signaling / capture ports is a stale stack process, whatever it is called or whichever tree it ran from.
+for port in 8443 9876; do
+  for p in $(ss -ltnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do kill "$p" 2>/dev/null || true; done
+done
+sleep 1
+for port in 8443 9876; do
+  if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+    echo "ERROR: port $port is still in use after stopping the old stack; refusing to start a second stack on top of it" >&2
+    ss -ltnpH "sport = :$port" >&2
+    exit 1
+  fi
 done
 for p in $(pgrep -f '^bash \./scripts/run\.sh host' 2>/dev/null); do kill "$p" 2>/dev/null || true; done
 
