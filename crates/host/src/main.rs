@@ -957,7 +957,9 @@ async fn main() -> Result<()> {
                             // + periodic IDR left friends on "Media lost" for
                             // 5–12s. Coalesce with IDR_INTERVAL so reports every
                             // 2s cannot IDR-storm.
-                            if (loss_congested || reacted || rtt_ms >= RTT_CONGESTION_MS)
+                            if (loss_congested
+                                || frames_dropped_delta > 0
+                                || rtt_ms >= link_gov::RTT_CONGESTION_MS)
                                 && last_idr.elapsed() >= IDR_INTERVAL
                             {
                                 force_idr = true;
