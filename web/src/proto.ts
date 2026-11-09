@@ -68,6 +68,8 @@ export type SignalMessage =
       capture_ok?: boolean;
       capture_hint?: string;
     }
+  /** Host PC battery (sent with each host_stats window; absent on a host without a battery). */
+  | { type: "host_battery"; percent: number; charging?: boolean; ac?: boolean }
   | {
       type: "host_stats";
       fps: number;

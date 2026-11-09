@@ -187,6 +187,18 @@ pub enum SignalMessage {
     /// from the host's half of the path too: the browser already reports its
     /// own decode/paint numbers, and these are the host's capture/scale/encode/
     /// push averages for the same window.
+    /// Host PC battery, sent with every stats window so viewers can show it: around 20% Windows switches power plans and the stream
+    /// hitches for a couple of seconds, which looks like a network problem from the couch. Not sent by a host without a battery.
+    HostBattery {
+        /// Charge, 0-100.
+        percent: u8,
+        /// The battery is charging (false when full, or on battery).
+        #[serde(default)]
+        charging: bool,
+        /// Mains power is connected.
+        #[serde(default)]
+        ac: bool,
+    },
     HostStats {
         /// Frames per second the host pushed to the wire in the last window.
         fps: f64,
@@ -559,6 +571,28 @@ mod tests {
                 assert_eq!(host_view_mode, "own");
                 assert_eq!(layout, "grid2x2");
                 assert!(rescan);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_battery_roundtrips_and_old_peers_default_flags() {
+        let m = SignalMessage::HostBattery { percent: 19, charging: false, ac: false };
+        let json = m.to_json().unwrap();
+        assert!(json.contains("\"type\":\"host_battery\""), "wire tag: {json}");
+        match SignalMessage::from_json(&json).unwrap() {
+            SignalMessage::HostBattery { percent, charging, ac } => {
+                assert_eq!(percent, 19);
+                assert!(!charging && !ac);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // A sender that omits the optional flags still parses.
+        match SignalMessage::from_json(r#"{"type":"host_battery","percent":55}"#).unwrap() {
+            SignalMessage::HostBattery { percent, charging, ac } => {
+                assert_eq!(percent, 55);
+                assert!(!charging && !ac);
             }
             other => panic!("wrong variant: {other:?}"),
         }

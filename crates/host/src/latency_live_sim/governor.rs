@@ -59,7 +59,8 @@ pub fn single_blip_holds_baseline() -> bool {
 pub fn sustained_shed_reaches_floor_not_625() -> bool {
     let windows: Vec<(u32, u32)> = (0..20).map(|_| (40, 100)).collect();
     let r = simulate_governor_session(&windows);
-    r.final_kbps >= 1_250 && r.final_kbps != 625
+    // Floor is 40% of the Ricardo encoder target (4000 kbps at 10 Mbps), not the old 1250: a bitrate cut may never sink below it.
+    r.final_kbps >= A::ENCODER_KBPS * 40 / 100 && r.final_kbps != 625
 }
 
 #[cfg(test)]
@@ -72,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn sustained_congestion_floors_at_1250_not_625() {
+    fn sustained_congestion_floors_at_40pct_not_625() {
         assert!(sustained_shed_reaches_floor_not_625());
     }
 

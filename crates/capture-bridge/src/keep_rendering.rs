@@ -24,7 +24,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowPlacement, IsIconic, IsWindow, SetWindowPlacement, SetWindowPos,
-    ShowWindow, SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WINDOWPLACEMENT,
+    ShowWindow, SW_RESTORE, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
 };
 
 /// Far enough off-screen that no monitor arrangement can show it.
@@ -71,6 +71,12 @@ pub fn restore_now() {
             if let Err(e) = SetWindowPlacement(hwnd, &p.placement) {
                 warn!("could not restore window placement: {e}");
             } else {
+                // The placement was read while the window was minimized, so applying it
+                // can minimize the window again; the watcher then re-parks it and the
+                // capture flips between full size and the 173x32 minimized rect forever.
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
                 info!("restored the captured window to its original position");
             }
         }
@@ -129,6 +135,15 @@ unsafe fn park(hwnd: HWND, hwnd_val: isize) {
     if let Err(e) = GetWindowPlacement(hwnd, &mut placement) {
         warn!("could not read window placement ({e}) — leaving it minimized");
         return;
+    }
+    // Captured while minimized, so showCmd says "minimized". Store the state to come back
+    // to instead, or restore_now() would put the window straight back into the taskbar.
+    if placement.showCmd == SW_SHOWMINIMIZED.0 as u32 {
+        placement.showCmd = if placement.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0 {
+            SW_SHOWMAXIMIZED.0 as u32
+        } else {
+            SW_SHOWNORMAL.0 as u32
+        };
     }
     // Un-minimize so DWM resumes compositing, then hide it off-screen. Size is left
     // untouched (SWP_NOSIZE) so the capture keeps its resolution.

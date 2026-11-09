@@ -55,14 +55,40 @@ if ($needBuild) {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
         throw "cargo not found on Windows — install Rust (https://rustup.rs) with the MSVC toolchain"
     }
+    # MSVC link.exe cannot open its outputs on a \\wsl.localhost UNC share
+    # (LNK1104). Any checkout living in WSL - a fresh git worktree has no
+    # prebuilt target\ - must build into a local NTFS target dir and have the
+    # exe copied back, otherwise the host silently runs video-only and the
+    # emulator shows "input disconnected".
+    $LocalTarget = Join-Path $env:LOCALAPPDATA "couchlink\target"
+    $Staged = Join-Path $env:LOCALAPPDATA "couchlink\bin\couchlink-ds-vhid.exe"
+    $built = $false
     Push-Location $Root
     try {
+        $env:CARGO_TARGET_DIR = $LocalTarget
         cargo build -p couchlink-ds-vhid --release
-        if ($LASTEXITCODE -ne 0) {
-            throw "cargo build failed with exit code $LASTEXITCODE"
+        if ($LASTEXITCODE -eq 0) {
+            $out = Join-Path $LocalTarget "release\couchlink-ds-vhid.exe"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Bin) | Out-Null
+            Copy-Item -Path $out -Destination $Bin -Force
+            $built = $true
+        } else {
+            Write-Warning "cargo build failed with exit code $LASTEXITCODE"
         }
     } finally {
+        Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
         Pop-Location
+    }
+    if (-not $built) {
+        # Never leave the host video-only just because a rebuild failed: reuse
+        # the last companion that was staged locally.
+        if (Test-Path $Staged) {
+            Write-Warning "falling back to previously staged companion: $Staged"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Bin) | Out-Null
+            Copy-Item -Path $Staged -Destination $Bin -Force
+        } else {
+            throw "cargo build failed and no staged companion to fall back to"
+        }
     }
 }
 

@@ -15,7 +15,7 @@ pub enum TargetPlan {
     Keep,
     /// Same fps, different bitrate: change the rate on the running encoder. No teardown, no gap, no extra latency.
     ApplyBitrate(u32),
-    /// fps changed (the MFT is bound to one frame rate at build time): rebuild.
+    /// Reserved for a change the running encoder cannot absorb. fps alone never lands here any more (see `plan_target_change`).
     Rebuild,
 }
 
@@ -25,10 +25,15 @@ pub fn plan_target_change(current: Target, wanted: Target, rejected: Option<Targ
     if wanted == current || rejected == Some(wanted) {
         return TargetPlan::Keep;
     }
-    if wanted.0 == current.0 {
-        TargetPlan::ApplyBitrate(wanted.1)
+    // fps is deliberately NOT a rebuild trigger. Capture pacing is fixed at startup (`frame_dur` from --max-fps) so a commanded fps
+    // only changes the encoder's rate-control frame-rate hint, but the link governor flips 60 <-> 52 every minute or so and each
+    // flip tore the encoder down: a gap, a fresh IDR, and sometimes a rejected rebuild (0xC00D6D76 again, live 2026-10-20 00:59:43:
+    // fell back to raw BGRA, 0.1 fps, host dropped the capture, every viewer saw a ~5 s pause). Keep the running encoder and only
+    // follow the bitrate.
+    if wanted.1 == current.1 {
+        TargetPlan::Keep
     } else {
-        TargetPlan::Rebuild
+        TargetPlan::ApplyBitrate(wanted.1)
     }
 }
 
@@ -64,9 +69,12 @@ mod tests {
     }
 
     #[test]
-    fn fps_change_rebuilds() {
-        assert_eq!(plan_target_change((60, 10_000_000), (30, 10_000_000), None), TargetPlan::Rebuild);
-        assert_eq!(plan_target_change((60, 10_000_000), (30, 4_000_000), None), TargetPlan::Rebuild);
+    fn fps_change_never_rebuilds() {
+        // The governor's 60 <-> 52 flip: nothing to do on the running encoder...
+        assert_eq!(plan_target_change((60, 7_200_000), (52, 7_200_000), None), TargetPlan::Keep);
+        assert_eq!(plan_target_change((52, 7_200_000), (60, 7_200_000), None), TargetPlan::Keep);
+        // ...and when the bitrate moves with it only the bitrate is applied.
+        assert_eq!(plan_target_change((60, 10_000_000), (30, 4_000_000), None), TargetPlan::ApplyBitrate(4_000_000));
     }
 
     #[test]
