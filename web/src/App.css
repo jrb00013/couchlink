@@ -47,6 +47,62 @@ body {
   flex-wrap: wrap;
 }
 
+.host-battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+}
+
+.host-battery-icon {
+  position: relative;
+  width: 1.6rem;
+  height: 0.8rem;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+  padding: 1px;
+  box-sizing: border-box;
+}
+
+.host-battery-icon::after {
+  content: "";
+  position: absolute;
+  right: -4px;
+  top: 25%;
+  width: 2px;
+  height: 50%;
+  background: currentColor;
+  border-radius: 0 1px 1px 0;
+}
+
+.host-battery-fill {
+  display: block;
+  height: 100%;
+  background: #4ade80;
+  border-radius: 1px;
+}
+
+.host-battery.is-low {
+  color: #fbbf24;
+}
+
+.host-battery.is-low .host-battery-fill {
+  background: #fbbf24;
+}
+
+.host-battery.is-critical {
+  color: #f87171;
+}
+
+.host-battery.is-critical .host-battery-fill {
+  background: #f87171;
+}
+
 .top-pills {
   display: flex;
   align-items: flex-start;

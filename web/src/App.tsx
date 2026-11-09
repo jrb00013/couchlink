@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CouchlinkPlayer, type ConnectionState } from "./player";
+import { HostBattery } from "./HostBattery";
+import type { HostBatteryInfo } from "./hostBattery";
 import {
   canUseLowLatencyCanvas,
   LowLatencyCanvasView,
@@ -111,6 +113,7 @@ export default function App() {
   const [ctxHint, setCtxHint] = useState<string | null>(() => secureContextHint());
   const [telemetry, setTelemetry] = useState<PlayerTelemetry | null>(null);
   const rttRef = useRef(0);
+  const [hostBattery, setHostBattery] = useState<HostBatteryInfo | null>(null);
   const [hostStats, setHostStats] = useState<{
     fps: number;
     frames_out: number;
@@ -667,6 +670,7 @@ export default function App() {
           /Host disconnected/i.test(d) ||
           /^Waiting for host offer/i.test(d));
       if (s === "disconnected" || s === "error" || hardWaiting) {
+        setHostBattery(null);
         clearRtpFallbackTimer();
         viewRef.current?.stop();
         wcRef.current?.stop();
@@ -732,6 +736,7 @@ export default function App() {
       setTelemetry(t);
     },
     onHostStats: (s) => setHostStats(s),
+    onHostBattery: (b) => setHostBattery(b),
     onRegistered: (slot) => setMySlot(slot),
     onPlayersStatus: (occupied, max) => setPlayersStatus({ occupied, max }),
     onPlayerPadInfo: (slot, kind, id) => {
@@ -1057,6 +1062,7 @@ export default function App() {
             <p>HD co-play · your DualSense → host Bluetooth pad</p>
           </div>
         </div>
+        {hostBattery && <HostBattery battery={hostBattery} />}
         <ol className="roster" aria-label="player seats">
           {([1, 2, 3, 4] as const).map((seat) => {
             const remoteSlot = seat - 1;

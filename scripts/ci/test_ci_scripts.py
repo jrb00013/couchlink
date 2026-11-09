@@ -198,7 +198,7 @@ class GuardOnRepo(unittest.TestCase):
 
     def test_frame_stale_drift(self):
         t = self.tree()
-        self.mutate(t, "crates/host/src/capture/bridge.rs", "Duration::from_millis(1500)", "Duration::from_millis(500)")
+        self.mutate(t, "crates/host/src/capture/bridge.rs", "Duration::from_secs(4)", "Duration::from_millis(500)")
         self.assertTrue(any("frame-stale-bridge" in f for f in self.run_guard(t)))
 
     def test_governor_trigger_drift(self):
