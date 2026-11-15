@@ -4,40 +4,82 @@
 #   scripts/restart-stack-for-game.sh mk|bo2|<window-needle> [--hyperv]
 # Prints the new join link (also copied to the Windows clipboard). The tunnel hostname changes on
 # every restart, so friends need the NEW link.
+#
+# Overlap lock: a second invoke waits for the first instead of killing a half-started
+# run.sh (live 2026-11-14: LIVE bring-up logged "==> shutting down" mid-capture because
+# an ASAP restart from another checkout SIGTERM'd it via the stop-old-stack loop).
+# Set COUCHLINK_FORCE_RESTART=1 to always tear down and relaunch after acquiring the lock.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 case "${1:-}" in
   mk)  NEEDLE=30522;;
   bo2) NEEDLE=31011;;
-  ""|-h|--help) sed -n '2,7p' "$0"; exit 2;;
+  ""|-h|--help) sed -n '2,11p' "$0"; exit 2;;
   *)   NEEDLE="$1";;
 esac
 TRANSPORT=tcp; [ "${2:-}" = "--hyperv" ] && TRANSPORT=hyperv
 LOG="/tmp/couchlink-stack-$(date +%Y%m%d-%H%M%S).log"
+# Overridable for regression tests (scripts/test-restart-stack-overlap.sh).
+LOCK="${COUCHLINK_RESTART_LOCK:-/tmp/couchlink-restart-stack.lock}"
+LOCK_WAIT="${COUCHLINK_RESTART_LOCK_WAIT:-180}"
+
+print_join() {
+  [ -s /tmp/couchlink-join-url.txt ] || return 1
+  tr -d '\r\n' < /tmp/couchlink-join-url.txt | clip.exe 2>/dev/null || true
+  host=$(sed 's#\(https://[^/]*\)/.*#\1#' /tmp/couchlink-join-url.txt)
+  echo "tunnel: $(curl -s -o /dev/null -w '%{http_code}' "$host/")  (200 = reachable)"
+  echo; echo "JOIN LINK (on clipboard):"; cat /tmp/couchlink-join-url.txt; echo
+}
+
+stack_healthy() {
+  # Hook lets overlap regression tests fake health without touching the live stack.
+  if [ -n "${COUCHLINK_RESTART_HEALTHY_HOOK:-}" ]; then
+    # shellcheck disable=SC2086
+    eval "$COUCHLINK_RESTART_HEALTHY_HOOK"
+    return $?
+  fi
+  [ -s /tmp/couchlink-join-url.txt ] || return 1
+  pgrep -x couchlink-host >/dev/null 2>&1 || return 1
+  pgrep -x couchlink-signaling >/dev/null 2>&1 || return 1
+  return 0
+}
+
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "==> another restart-stack is in progress — waiting (up to ${LOCK_WAIT}s) instead of killing it mid-boot"
+  if ! flock -w "$LOCK_WAIT" 9; then
+    echo "error: timed out waiting for $LOCK" >&2
+    exit 1
+  fi
+  if stack_healthy && [ "${COUCHLINK_FORCE_RESTART:-0}" != "1" ]; then
+    echo "==> concurrent restart finished — reusing live stack (COUCHLINK_FORCE_RESTART=1 to tear down)"
+    print_join || true
+    exit 0
+  fi
+fi
+
+# Dry-run: prove lock/reuse paths without stopping/starting the live session.
+if [ "${COUCHLINK_RESTART_DRY_RUN:-0}" = "1" ]; then
+  echo "==> DRY_RUN: acquired restart lock ($LOCK); not stopping/starting stack"
+  exit 0
+fi
 
 # A host built from the wrong branch silently dropped every browser stats report all night (2026-10-03: 'unknown variant client_link_stats'),
 # leaving the link governor blind. Always start from binaries built from THIS checkout (incremental, seconds when current).
 echo "==> building host + signaling from $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 cargo build --release -p couchlink-host -p couchlink-signaling 2>&1 | grep -E '^error|Finished' | head -3
 
+# Re-check after the (possibly long) build: another holder may have finished under us
+# if we raced before flock existed; also covers FORCE=0 after waiting above.
+if stack_healthy && [ "${COUCHLINK_FORCE_RESTART:-0}" != "1" ]; then
+  echo "==> stack already healthy after build — not tearing it down"
+  print_join
+  exit 0
+fi
+
 echo "==> stopping old stack (exact-name matches only; never pkill -f a pattern this shell contains)"
-# The kernel truncates the process name (comm) to 15 chars, so `pgrep -x couchlink-signaling` NEVER matches the signaling server
-# (its comm is "couchlink-signa"). A stale signaling then kept :8443, the new one died with "Address already in use", and players sat on
-# "waiting for host offer" against a signaling with no host registered (2026-10-17, and 2026-10-11). Match the truncated names too.
-for n in couchlink-signaling couchlink-signa couchlink-host turnserver cloudflared; do
+for n in couchlink-signaling couchlink-host turnserver cloudflared; do
   for p in $(pgrep -x "$n" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
-done
-# Belt and braces: whatever still owns the signaling / capture ports is a stale stack process, whatever it is called or whichever tree it ran from.
-for port in 8443 9876; do
-  for p in $(ss -ltnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do kill "$p" 2>/dev/null || true; done
-done
-sleep 1
-for port in 8443 9876; do
-  if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
-    echo "ERROR: port $port is still in use after stopping the old stack; refusing to start a second stack on top of it" >&2
-    ss -ltnpH "sport = :$port" >&2
-    exit 1
-  fi
 done
 for p in $(pgrep -f '^bash \./scripts/run\.sh host' 2>/dev/null); do kill "$p" 2>/dev/null || true; done
 
@@ -70,9 +112,4 @@ fi
 if sed 's/\x1b\[[0-9;]*m//g' "$LOG" 2>/dev/null | grep -aq 'unknown variant `client_link_stats`'; then
   echo "WARNING: host cannot decode client_link_stats (stale/wrong-branch host binary): the link governor is blind. Rebuild and restart." >&2
 fi
-echo "==> starting capture-keeper (peak-bytes watchdog; survives host silent-reconnect bugs)"
-scripts/capture-keeper.sh --bg "$NEEDLE" >/dev/null
-
-host=$(sed 's#\(https://[^/]*\)/.*#\1#' /tmp/couchlink-join-url.txt)
-echo "tunnel: $(curl -s -o /dev/null -w '%{http_code}' "$host/")  (200 = reachable)"
-echo; echo "JOIN LINK (on clipboard):"; cat /tmp/couchlink-join-url.txt; echo
+print_join
