@@ -196,6 +196,36 @@ fn index_of(rungs: &[EncodeTarget], target: EncodeTarget) -> Option<usize> {
     rungs.iter().position(|r| *r == target)
 }
 
+/// When the ladder flips fps-only → bitrate (severe shed / client RTP / fps-floor
+/// unlock), `current` may be a fps-floor rung that does not exist on the new
+/// ladder (e.g. 45 fps @ 10 Mbps). `index_of` then returns `None` and a naive
+/// `unwrap_or(current)` **sticks forever at 10 Mbps** — live 2026-11-21 MUA:
+/// mild shed floored fps, later 15–31% sheds could not cut bits, friends froze.
+///
+/// Snap onto the first rung that actually reduces bits/sec: same fps with a
+/// lower bitrate if present, else the first full-fps bitrate cut (80% of
+/// baseline), else the second rung.
+fn rematch_after_ladder_unlock(
+    rungs: &[EncodeTarget],
+    current: EncodeTarget,
+    baseline: &EncodeTarget,
+) -> EncodeTarget {
+    if let Some(r) = rungs
+        .iter()
+        .copied()
+        .find(|r| r.fps == current.fps && r.bitrate_kbps < current.bitrate_kbps)
+    {
+        return r;
+    }
+    if let Some(r) = rungs.iter().copied().find(|r| {
+        r.fps == baseline.fps && r.bitrate_kbps < baseline.bitrate_kbps
+    }) {
+        return r;
+    }
+    rungs.get(1).copied().unwrap_or(current)
+}
+
+
 impl LinkGov {
     pub fn new(baseline: EncodeTarget) -> Self {
         Self {
@@ -310,6 +340,14 @@ impl LinkGov {
             self.client_congestion_seen = true;
         }
 
+        // Live 2026-11-21 MUA: mild shed (8–11%) often reached the fps floor
+        // *before* a ≥12% window. A later severe spike unlocked the bitrate
+        // ladder, but `current` was still a fps-only rung (45@10000) missing
+        // from that ladder — `index_of` returned None and the old
+        // `unwrap_or(current)` stuck at 10 Mbps forever. Rematch is handled
+        // below; do not unlock bitrate on mild-at-floor alone (that regresses
+        // the SCTP message-rate path which must hold bitrate while stepping fps).
+
         let rungs = rungs_from_inner(&self.baseline, self.client_congestion_seen);
         let need = if drop_pct >= SEVERE_SHED_PCT || client_severe {
             SEVERE_DOWN_AFTER_WINDOWS
@@ -324,9 +362,13 @@ impl LinkGov {
             if self.bad_windows >= need {
                 self.bad_windows = 0;
                 // Step down one rung toward the floor, never below it.
-                let step = index_of(&rungs, self.current)
-                    .map(|i| rungs[(i + 1).min(rungs.len() - 1)])
-                    .unwrap_or(self.current);
+                // If the ladder just unlocked bitrate and `current` is an
+                // fps-only rung missing from the new ladder, rematch instead
+                // of sticking at baseline bitrate forever.
+                let step = match index_of(&rungs, self.current) {
+                    Some(i) => rungs[(i + 1).min(rungs.len() - 1)],
+                    None => rematch_after_ladder_unlock(&rungs, self.current, &self.baseline),
+                };
                 if step != self.current {
                     self.current = step;
                     if client_bad {
@@ -929,6 +971,80 @@ mod tests {
         assert!(
             preset_sec < detached_sec / 2,
             "res/bitrate fix must at least halve wire bytes per GOP: got {preset_sec} vs {detached_sec}"
+        );
+    }
+
+    /// Live 2026-11-21: mild shed floors fps @ 10 Mbps; later severe shed must
+    /// still rematch onto the bitrate ladder (not stick at 45@10000).
+    #[test]
+    fn mild_floor_then_severe_cuts_bitrate() {
+        let mut gov = LinkGov::new(P720);
+        for _ in 0..20 {
+            gov.on_window(9, 100);
+        }
+        assert_eq!(gov.current().bitrate_kbps, P720.bitrate_kbps);
+        assert!(
+            gov.current().fps <= 45,
+            "expected fps floor, got {:?}",
+            gov.current()
+        );
+        let t = gov.on_window(15, 100);
+        assert!(
+            t.bitrate_kbps < P720.bitrate_kbps,
+            "after fps floor, severe shed must cut bitrate, got {t:?}"
+        );
+    }
+
+    /// Compacted drop windows from the 2026-11-21 MUA CouchLink session log
+    /// (`/tmp/couchlink-stack-20261121-223951.log`) — friends froze while host
+    /// stayed ~59 fps with "can't consume at 10 Mbps".
+    #[test]
+    fn mua_2026_11_21_friend_freeze_seq_cuts_bitrate() {
+        let windows: &[(u32, u32)] = &[
+            (57, 351),
+            (66, 361),
+            (34, 329),
+            (18, 313),
+            (55, 350),
+            (38, 333),
+            (134, 429),
+            (34, 329),
+            (17, 312),
+            (19, 314),
+            (28, 323),
+            (33, 328),
+            (16, 311),
+            (22, 317),
+            (34, 329),
+            (14, 271),
+            (33, 289),
+            (60, 354),
+            (53, 347),
+            (66, 359),
+            (49, 343),
+            (68, 362),
+            (51, 346),
+            (68, 363),
+            (50, 345),
+            (37, 331),
+            (65, 360),
+            (55, 350),
+            (110, 405),
+            (38, 333),
+        ];
+        let mut gov = LinkGov::new(P720);
+        let mut min_br = P720.bitrate_kbps;
+        for &(shed, sent) in windows {
+            let t = gov.on_window(shed, sent);
+            min_br = min_br.min(t.bitrate_kbps);
+        }
+        assert!(
+            min_br < P720.bitrate_kbps,
+            "MUA friend-freeze sequence must cut bitrate, min was {min_br}"
+        );
+        assert!(
+            min_br >= P720.bitrate_kbps * 40 / 100,
+            "must not sink below 40% floor, min was {min_br}"
         );
     }
 }
